@@ -10,6 +10,7 @@ license = { workspace = true }
 edition = { workspace = true }
 
 [dependencies]
+vcd="*"
 async-trait = { workspace = true }
 bincode = { workspace = true }
 dashmap = { workspace = true }

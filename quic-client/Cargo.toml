@@ -10,6 +10,7 @@ license = { workspace = true }
 edition = { workspace = true }
 
 [dependencies]
+vcd="*"
 async-lock = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }

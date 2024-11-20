@@ -160,6 +160,7 @@ impl ClientConnection for QuicClientConnection {
     fn send_data_async(&self, data: Vec<u8>) -> TransportResult<()> {
         let _lock = ASYNC_TASK_SEMAPHORE.acquire();
         let inner = self.inner.clone();
+        // LEAK!!!!
 
         let _handle = RUNTIME.spawn(send_data_async(inner, data));
         Ok(())
@@ -168,6 +169,7 @@ impl ClientConnection for QuicClientConnection {
     fn send_data_batch_async(&self, buffers: Vec<Vec<u8>>) -> TransportResult<()> {
         let _lock = ASYNC_TASK_SEMAPHORE.acquire();
         let inner = self.inner.clone();
+        // LEAK!!!!
         let _handle = RUNTIME.spawn(send_data_batch_async(inner, buffers));
         Ok(())
     }
