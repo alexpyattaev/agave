@@ -1,0 +1,27 @@
+
+
+tpu-client-next/src/connection_workers_scheduler.rs
++215 endpoint.clone()
++218 ConnectionWorker::new(...)
+
+core/src/validator.rs
+# turbine_quic_endpoint - probably irrelevant
+
+quic-client/src/lib.rs
++81 QuicConfig stores client_endpoints 
+
+QuicConfig struct likely does not need Clone
+
+quic-client/src/nonblocking/quic_client.rs
++99 QuicLazyInitializedEndpoint  stores Endpoints
++131 create_endpoint()  clones Endpoints
+
+client/src/connection_cache.rs
+
+streamer/src/nonblocking/testing_utilities.rs
++225 make_client_endpoint()
+
+streamer/src/nonblocking/quic.rs
++207	endpoints.clone() 
+Leak unlikely
+
