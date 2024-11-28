@@ -1,3 +1,4 @@
+#![allow(clippy::arithmetic_side_effects)]
 use {
     solana_keypair::Keypair,
     solana_pubkey::Pubkey,
