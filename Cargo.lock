@@ -9164,7 +9164,7 @@ dependencies = [
 name = "solana-tls-utils"
 version = "2.2.0"
 dependencies = [
- "rustls 0.23.18",
+ "rustls 0.23.19",
  "solana-keypair",
  "solana-pubkey",
  "solana-sdk",

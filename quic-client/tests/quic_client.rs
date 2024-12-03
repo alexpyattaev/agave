@@ -6,15 +6,13 @@ mod tests {
         solana_connection_cache::connection_cache_stats::ConnectionCacheStats,
         solana_net_utils::bind_to_localhost,
         solana_perf::packet::PacketBatch,
-        solana_quic_client::nonblocking::quic_client::{
-             QuicLazyInitializedEndpoint,
-        },
+        solana_quic_client::nonblocking::quic_client::QuicLazyInitializedEndpoint,
         solana_sdk::{packet::PACKET_DATA_SIZE, signature::Keypair},
         solana_streamer::{
             quic::{QuicServerParams, SpawnServerResult},
             streamer::StakedNodes,
         },
-        solana_tls_utils::{QuicClientCertificate,new_dummy_x509_certificate},
+        solana_tls_utils::{new_dummy_x509_certificate, QuicClientCertificate},
         std::{
             net::{SocketAddr, UdpSocket},
             sync::{
