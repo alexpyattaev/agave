@@ -4,12 +4,12 @@ description = "Solana TLS utilities"
 documentation = "https://docs.rs/solana-tls-utils"
 publish = false
 
-version.workspace = true
-authors.workspace = true
-repository.workspace = true
-homepage.workspace = true
-license.workspace = true
-edition.workspace = true
+version = { workspace = true }
+authors = { workspace = true }
+repository = { workspace = true }
+homepage = { workspace = true }
+license = { workspace = true }
+edition = { workspace = true }
 
 [dependencies]
 
