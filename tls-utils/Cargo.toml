@@ -13,7 +13,7 @@ edition = { workspace = true }
 
 [dependencies]
 
-rustls = { workspace = true, features=["ring"] }
+rustls = { workspace = true, features = ["ring"] }
 solana-keypair = { workspace = true }
 solana-pubkey = { workspace = true }
 solana-sdk = { workspace = true }
