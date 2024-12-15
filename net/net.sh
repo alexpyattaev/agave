@@ -279,6 +279,7 @@ syncScripts() {
   declare ipAddress=$1
   declare remoteHome
   remoteHome=$(remoteHomeDir "$ipAddress")
+  set -x
   local remoteSolanaHome="${remoteHome}/solana"
   rsync -vPrc -e "ssh ${sshOptions[*]}" \
     --exclude 'net/log*' \

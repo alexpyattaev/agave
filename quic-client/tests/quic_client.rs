@@ -68,12 +68,15 @@ mod tests {
         let (sender, receiver) = unbounded();
         let staked_nodes = Arc::new(RwLock::new(StakedNodes::default()));
         let (s, exit, keypair) = server_args();
+        let cfg = agave_thread_manager::TokioConfig::default();
+        let rt =
+            agave_thread_manager::TokioRuntime::new("solQuicTest".to_owned(), cfg.clone()).unwrap();
         let SpawnServerResult {
             endpoints: _,
-            thread: t,
+            join_handle: t,
             key_updater: _,
         } = solana_streamer::quic::spawn_server(
-            "solQuicTest",
+            &rt,
             "quic_streamer_test",
             s.try_clone().unwrap(),
             &keypair,
@@ -156,7 +159,7 @@ mod tests {
         let solana_streamer::nonblocking::quic::SpawnNonBlockingServerResult {
             endpoints: _,
             stats: _,
-            thread: t,
+            join_handle: t,
             max_concurrent_connections: _,
         } = solana_streamer::nonblocking::quic::spawn_server(
             "quic_streamer_test",
@@ -217,12 +220,17 @@ mod tests {
         let (sender, receiver) = unbounded();
         let staked_nodes = Arc::new(RwLock::new(StakedNodes::default()));
         let (request_recv_socket, request_recv_exit, keypair) = server_args();
+        let tokio_cfg = agave_thread_manager::TokioConfig::default();
+        let rt =
+            agave_thread_manager::TokioRuntime::new("solQuicTest".to_owned(), tokio_cfg.clone())
+                .unwrap();
+
         let SpawnServerResult {
             endpoints: request_recv_endpoints,
-            thread: request_recv_thread,
+            join_handle: request_recv_thread,
             key_updater: _,
         } = solana_streamer::quic::spawn_server(
-            "solQuicTest",
+            &rt,
             "quic_streamer_test",
             request_recv_socket.try_clone().unwrap(),
             &keypair,
@@ -246,12 +254,15 @@ mod tests {
         let addr = response_recv_socket.local_addr().unwrap().ip();
         let port = response_recv_socket.local_addr().unwrap().port();
         let server_addr = SocketAddr::new(addr, port);
+        let rt =
+            agave_thread_manager::TokioRuntime::new("solQuicTest2".to_owned(), tokio_cfg.clone())
+                .unwrap();
         let SpawnServerResult {
             endpoints: mut response_recv_endpoints,
-            thread: response_recv_thread,
+            join_handle: response_recv_thread,
             key_updater: _,
         } = solana_streamer::quic::spawn_server(
-            "solQuicTest",
+            &rt,
             "quic_streamer_test",
             response_recv_socket,
             &keypair2,

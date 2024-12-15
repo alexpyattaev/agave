@@ -26,10 +26,8 @@ use {
             atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
             Arc, Mutex, RwLock,
         },
-        thread,
         time::Duration,
     },
-    tokio::runtime::Runtime,
 };
 
 pub const MAX_STAKED_CONNECTIONS: usize = 2000;
@@ -42,7 +40,7 @@ pub(crate) const DEFAULT_TPU_COALESCE: Duration = Duration::from_millis(5);
 
 pub struct SpawnServerResult {
     pub endpoints: Vec<Endpoint>,
-    pub thread: thread::JoinHandle<()>,
+    pub join_handle: std::thread::JoinHandle<()>,
     pub key_updater: Arc<EndpointKeyUpdater>,
 }
 
@@ -89,14 +87,6 @@ pub(crate) fn configure_server(
     config.enable_segmentation_offload(false);
 
     Ok((server_config, cert_chain_pem))
-}
-
-pub fn rt(name: String) -> Runtime {
-    tokio::runtime::Builder::new_multi_thread()
-        .thread_name(name)
-        .enable_all()
-        .build()
-        .unwrap()
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -544,7 +534,7 @@ impl StreamerStats {
 }
 
 pub fn spawn_server(
-    thread_name: &'static str,
+    runtime: &agave_thread_manager::TokioRuntime,
     metrics_name: &'static str,
     socket: UdpSocket,
     keypair: &Keypair,
@@ -554,7 +544,7 @@ pub fn spawn_server(
     quic_server_params: QuicServerParams,
 ) -> Result<SpawnServerResult, QuicServerError> {
     spawn_server_multi(
-        thread_name,
+        runtime,
         metrics_name,
         vec![socket],
         keypair,
@@ -590,7 +580,7 @@ impl Default for QuicServerParams {
 }
 
 pub fn spawn_server_multi(
-    thread_name: &'static str,
+    runtime: &agave_thread_manager::TokioRuntime,
     metrics_name: &'static str,
     sockets: Vec<UdpSocket>,
     keypair: &Keypair,
@@ -599,9 +589,8 @@ pub fn spawn_server_multi(
     staked_nodes: Arc<RwLock<StakedNodes>>,
     quic_server_params: QuicServerParams,
 ) -> Result<SpawnServerResult, QuicServerError> {
-    let runtime = rt(format!("{thread_name}Rt"));
     let result = {
-        let _guard = runtime.enter();
+        let _guard = runtime.tokio.enter();
         crate::nonblocking::quic::spawn_server_multi(
             metrics_name,
             sockets,
@@ -612,20 +601,21 @@ pub fn spawn_server_multi(
             quic_server_params,
         )
     }?;
-    let handle = thread::Builder::new()
-        .name(thread_name.into())
+    let handle = runtime.tokio.handle().clone();
+    let waiter = std::thread::Builder::new()
+        .name("solWaiterThread".to_owned())
         .spawn(move || {
-            if let Err(e) = runtime.block_on(result.thread) {
-                warn!("error from runtime.block_on: {:?}", e);
-            }
+            handle
+                .block_on(result.join_handle)
+                .expect("quic streamer crashed");
         })
-        .unwrap();
+        .expect("Could not spawn waiter thread");
     let updater = EndpointKeyUpdater {
         endpoints: result.endpoints.clone(),
     };
     Ok(SpawnServerResult {
         endpoints: result.endpoints,
-        thread: handle,
+        join_handle: waiter,
         key_updater: Arc::new(updater),
     })
 }
@@ -633,9 +623,18 @@ pub fn spawn_server_multi(
 #[cfg(test)]
 mod test {
     use {
-        super::*, crate::nonblocking::quic::test::*, crossbeam_channel::unbounded,
-        solana_net_utils::bind_to_localhost, std::net::SocketAddr,
+        super::*, crate::nonblocking::quic::test::*, agave_thread_manager::TokioRuntime,
+        crossbeam_channel::unbounded, solana_net_utils::bind_to_localhost, std::net::SocketAddr,
     };
+
+    /// Makes test runtime with 2 threads, only for unittests
+    fn rt() -> TokioRuntime {
+        let cfg = agave_thread_manager::TokioConfig {
+            worker_threads: 2,
+            ..Default::default()
+        };
+        agave_thread_manager::TokioRuntime::new("solQuicTest".to_owned(), cfg.clone()).unwrap()
+    }
 
     fn setup_quic_server() -> (
         std::thread::JoinHandle<()>,
@@ -649,12 +648,13 @@ mod test {
         let keypair = Keypair::new();
         let server_address = s.local_addr().unwrap();
         let staked_nodes = Arc::new(RwLock::new(StakedNodes::default()));
+        let runtime = rt();
         let SpawnServerResult {
             endpoints: _,
-            thread: t,
+            join_handle: t,
             key_updater: _,
         } = spawn_server(
-            "solQuicTest",
+            &runtime,
             "quic_streamer_test",
             s,
             &keypair,
@@ -678,8 +678,10 @@ mod test {
     fn test_quic_timeout() {
         solana_logger::setup();
         let (t, exit, receiver, server_address) = setup_quic_server();
-        let runtime = rt("solQuicTestRt".to_string());
-        runtime.block_on(check_timeout(receiver, server_address));
+        let runtime = rt();
+        runtime
+            .tokio
+            .block_on(check_timeout(receiver, server_address));
         exit.store(true, Ordering::Relaxed);
         t.join().unwrap();
     }
@@ -689,8 +691,10 @@ mod test {
         solana_logger::setup();
         let (t, exit, _receiver, server_address) = setup_quic_server();
 
-        let runtime = rt("solQuicTestRt".to_string());
-        runtime.block_on(check_block_multiple_connections(server_address));
+        let runtime = rt();
+        runtime
+            .tokio
+            .block_on(check_block_multiple_connections(server_address));
         exit.store(true, Ordering::Relaxed);
         t.join().unwrap();
     }
@@ -704,12 +708,13 @@ mod test {
         let keypair = Keypair::new();
         let server_address = s.local_addr().unwrap();
         let staked_nodes = Arc::new(RwLock::new(StakedNodes::default()));
+        let runtime = rt();
         let SpawnServerResult {
             endpoints: _,
-            thread: t,
+            join_handle: t,
             key_updater: _,
         } = spawn_server(
-            "solQuicTest",
+            &runtime,
             "quic_streamer_test",
             s,
             &keypair,
@@ -723,8 +728,10 @@ mod test {
         )
         .unwrap();
 
-        let runtime = rt("solQuicTestRt".to_string());
-        runtime.block_on(check_multiple_streams(receiver, server_address));
+        let runtime = rt();
+        runtime
+            .tokio
+            .block_on(check_multiple_streams(receiver, server_address));
         exit.store(true, Ordering::Relaxed);
         t.join().unwrap();
     }
@@ -734,8 +741,10 @@ mod test {
         solana_logger::setup();
         let (t, exit, receiver, server_address) = setup_quic_server();
 
-        let runtime = rt("solQuicTestRt".to_string());
-        runtime.block_on(check_multiple_writes(receiver, server_address, None));
+        let runtime = rt();
+        runtime
+            .tokio
+            .block_on(check_multiple_writes(receiver, server_address, None));
         exit.store(true, Ordering::Relaxed);
         t.join().unwrap();
     }
@@ -749,12 +758,13 @@ mod test {
         let keypair = Keypair::new();
         let server_address = s.local_addr().unwrap();
         let staked_nodes = Arc::new(RwLock::new(StakedNodes::default()));
+        let runtime = rt();
         let SpawnServerResult {
             endpoints: _,
-            thread: t,
+            join_handle: t,
             key_updater: _,
         } = spawn_server(
-            "solQuicTest",
+            &runtime,
             "quic_streamer_test",
             s,
             &keypair,
@@ -768,8 +778,10 @@ mod test {
         )
         .unwrap();
 
-        let runtime = rt("solQuicTestRt".to_string());
-        runtime.block_on(check_unstaked_node_connect_failure(server_address));
+        let runtime = rt();
+        runtime
+            .tokio
+            .block_on(check_unstaked_node_connect_failure(server_address));
         exit.store(true, Ordering::Relaxed);
         t.join().unwrap();
     }

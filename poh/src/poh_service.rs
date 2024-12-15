@@ -2,6 +2,7 @@
 //! "ticks", a measure of time in the PoH stream
 use {
     crate::poh_recorder::{PohRecorder, Record},
+    agave_thread_manager::NativeThreadRuntime,
     crossbeam_channel::Receiver,
     log::*,
     solana_entry::poh::Poh,
@@ -12,13 +13,12 @@ use {
             atomic::{AtomicBool, Ordering},
             Arc, Mutex, RwLock,
         },
-        thread::{self, Builder, JoinHandle},
         time::{Duration, Instant},
     },
 };
 
 pub struct PohService {
-    tick_producer: JoinHandle<()>,
+    tick_producer: agave_thread_manager::JoinHandle<()>,
 }
 
 // Number of hashes to batch together.
@@ -28,8 +28,6 @@ pub struct PohService {
 //
 // Can use test_poh_service to calibrate this
 pub const DEFAULT_HASHES_PER_BATCH: u64 = 64;
-
-pub const DEFAULT_PINNED_CPU_CORE: usize = 0;
 
 const TARGET_SLOT_ADJUSTMENT_NS: u64 = 50_000_000;
 
@@ -99,13 +97,12 @@ impl PohService {
         poh_config: &PohConfig,
         poh_exit: Arc<AtomicBool>,
         ticks_per_slot: u64,
-        pinned_cpu_core: usize,
+        pinned_cpu_runtime: &NativeThreadRuntime,
         hashes_per_batch: u64,
         record_receiver: Receiver<Record>,
     ) -> Self {
         let poh_config = poh_config.clone();
-        let tick_producer = Builder::new()
-            .name("solPohTickProd".to_string())
+        let tick_producer = pinned_cpu_runtime
             .spawn(move || {
                 if poh_config.hashes_per_tick.is_none() {
                     if poh_config.target_tick_count.is_none() {
@@ -124,12 +121,6 @@ impl PohService {
                         );
                     }
                 } else {
-                    // PoH service runs in a tight loop, generating hashes as fast as possible.
-                    // Let's dedicate one of the CPU cores to this thread so that it can gain
-                    // from cache performance.
-                    if let Some(cores) = core_affinity::get_core_ids() {
-                        core_affinity::set_for_current(cores[pinned_cpu_core]);
-                    }
                     Self::tick_producer(
                         poh_recorder,
                         &poh_exit,
@@ -144,7 +135,7 @@ impl PohService {
                 }
                 poh_exit.store(true, Ordering::Relaxed);
             })
-            .unwrap();
+            .expect("Could not start PoH thread");
 
         Self { tick_producer }
     }
@@ -367,7 +358,7 @@ impl PohService {
         }
     }
 
-    pub fn join(self) -> thread::Result<()> {
+    pub fn join(self) -> std::thread::Result<()> {
         self.tick_producer.join()
     }
 }
@@ -440,7 +431,7 @@ mod tests {
             let poh_recorder = poh_recorder.clone();
             let exit = exit.clone();
 
-            Builder::new()
+            std::thread::Builder::new()
                 .name("solPohEntryProd".to_string())
                 .spawn(move || {
                     let now = Instant::now();
@@ -480,12 +471,22 @@ mod tests {
         let hashes_per_batch = std::env::var("HASHES_PER_BATCH")
             .map(|x| x.parse().unwrap())
             .unwrap_or(DEFAULT_HASHES_PER_BATCH);
+        let rt = agave_thread_manager::NativeThreadRuntime::new(
+            "PoHService".to_owned(),
+            agave_thread_manager::NativeConfig {
+                core_allocation: agave_thread_manager::CoreAllocation::PinnedCores {
+                    min: 0,
+                    max: 1,
+                },
+                ..Default::default()
+            },
+        );
         let poh_service = PohService::new(
             poh_recorder.clone(),
             &poh_config,
             exit.clone(),
             0,
-            DEFAULT_PINNED_CPU_CORE,
+            &rt,
             hashes_per_batch,
             record_receiver,
         );

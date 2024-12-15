@@ -74,17 +74,18 @@ pub struct Tpu {
     banking_stage: BankingStage,
     cluster_info_vote_listener: ClusterInfoVoteListener,
     broadcast_stage: BroadcastStage,
-    tpu_quic_t: thread::JoinHandle<()>,
-    tpu_forwards_quic_t: thread::JoinHandle<()>,
+    tpu_quic_t: std::thread::JoinHandle<()>,
+    tpu_forwards_quic_t: std::thread::JoinHandle<()>,
     tpu_entry_notifier: Option<TpuEntryNotifier>,
     staked_nodes_updater_service: StakedNodesUpdaterService,
     tracer_thread_hdl: TracerThread,
-    tpu_vote_quic_t: thread::JoinHandle<()>,
+    tpu_vote_quic_t: std::thread::JoinHandle<()>,
 }
 
 impl Tpu {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
+        thread_manager: &agave_thread_manager::ThreadManager,
         cluster_info: &Arc<ClusterInfo>,
         poh_recorder: &Arc<RwLock<PohRecorder>>,
         entry_receiver: Receiver<WorkingBankEntry>,
@@ -168,10 +169,12 @@ impl Tpu {
         // Streamer for Votes:
         let SpawnServerResult {
             endpoints: _,
-            thread: tpu_vote_quic_t,
+            join_handle: tpu_vote_quic_t,
             key_updater: vote_streamer_key_updater,
         } = spawn_server_multi(
-            "solQuicTVo",
+            thread_manager
+                .get_tokio("solQuicTVo")
+                .expect("Runtime for TPU vote missing"),
             "quic_streamer_tpu_vote",
             tpu_vote_quic_sockets,
             keypair,
@@ -193,10 +196,12 @@ impl Tpu {
         // Streamer for TPU
         let SpawnServerResult {
             endpoints: _,
-            thread: tpu_quic_t,
+            join_handle: tpu_quic_t,
             key_updater,
         } = spawn_server_multi(
-            "solQuicTpu",
+            thread_manager
+                .get_tokio("solQuicTpu")
+                .expect("Runtime for TPU streamer missing"),
             "quic_streamer_tpu",
             transactions_quic_sockets,
             keypair,
@@ -215,10 +220,12 @@ impl Tpu {
         // Streamer for TPU forward
         let SpawnServerResult {
             endpoints: _,
-            thread: tpu_forwards_quic_t,
+            join_handle: tpu_forwards_quic_t,
             key_updater: forwards_key_updater,
         } = spawn_server_multi(
-            "solQuicTpuFwd",
+            thread_manager
+                .get_tokio("solQuicTpuFwd")
+                .expect("Runtime for TPU forwarder missing"),
             "quic_streamer_tpu_forwards",
             transactions_forwards_quic_sockets,
             keypair,

@@ -234,7 +234,7 @@ mod tests {
 
         let SpawnServerResult {
             endpoints: mut response_recv_endpoints,
-            thread: response_recv_thread,
+            join_handle: response_recv_thread,
             key_updater: _,
         } = solana_streamer::quic::spawn_server(
             "solQuicTest",

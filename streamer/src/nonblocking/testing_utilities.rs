@@ -139,7 +139,7 @@ pub fn setup_quic_server_with_sockets(
     let SpawnNonBlockingServerResult {
         endpoints: _,
         stats,
-        thread: handle,
+        join_handle: handle,
         max_concurrent_connections: _,
     } = spawn_server_multi(
         "quic_streamer_test",

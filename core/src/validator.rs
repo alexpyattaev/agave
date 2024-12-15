@@ -30,6 +30,7 @@ use {
         tpu::{Tpu, TpuSockets, DEFAULT_TPU_COALESCE},
         tvu::{Tvu, TvuConfig, TvuSockets},
     },
+    agave_thread_manager::{RuntimeManagerConfig, ThreadManager},
     anyhow::{anyhow, Context, Result},
     crossbeam_channel::{bounded, unbounded, Receiver},
     lazy_static::lazy_static,
@@ -133,6 +134,7 @@ use {
     std::{
         borrow::Cow,
         collections::{HashMap, HashSet},
+        io::Read,
         net::SocketAddr,
         num::NonZeroUsize,
         path::{Path, PathBuf},
@@ -146,8 +148,10 @@ use {
     strum::VariantNames,
     strum_macros::{Display, EnumCount, EnumIter, EnumString, EnumVariantNames, IntoStaticStr},
     thiserror::Error,
-    tokio::runtime::Runtime as TokioRuntime,
 };
+
+const RUNTIME_NAME_TURBINE: &str = "solTurbineQuic";
+const RUNTIME_NAME_REPAIR: &str = "solRepairQuic";
 
 const MAX_COMPLETED_DATA_SETS_IN_CHANNEL: usize = 100_000;
 const WAIT_FOR_SUPERMAJORITY_THRESHOLD_PERCENT: u64 = 80;
@@ -257,7 +261,6 @@ pub struct ValidatorConfig {
     pub no_os_network_stats_reporting: bool,
     pub no_os_cpu_stats_reporting: bool,
     pub no_os_disk_stats_reporting: bool,
-    pub poh_pinned_cpu_core: usize,
     pub poh_hashes_per_batch: u64,
     pub process_ledger_before_services: bool,
     pub accounts_db_config: Option<AccountsDbConfig>,
@@ -329,7 +332,6 @@ impl Default for ValidatorConfig {
             no_os_network_stats_reporting: true,
             no_os_cpu_stats_reporting: true,
             no_os_disk_stats_reporting: true,
-            poh_pinned_cpu_core: poh_service::DEFAULT_PINNED_CPU_CORE,
             poh_hashes_per_batch: poh_service::DEFAULT_HASHES_PER_BATCH,
             process_ledger_before_services: false,
             warp_slot: None,
@@ -517,15 +519,14 @@ pub struct Validator {
     pub bank_forks: Arc<RwLock<BankForks>>,
     pub blockstore: Arc<Blockstore>,
     geyser_plugin_service: Option<GeyserPluginService>,
+    thread_manager: agave_thread_manager::ThreadManager,
     blockstore_metric_report_service: BlockstoreMetricReportService,
     accounts_background_service: AccountsBackgroundService,
     accounts_hash_verifier: AccountsHashVerifier,
     turbine_quic_endpoint: Option<Endpoint>,
-    turbine_quic_endpoint_runtime: Option<TokioRuntime>,
     turbine_quic_endpoint_join_handle: Option<solana_turbine::quic_endpoint::AsyncTryJoinHandle>,
     repair_quic_endpoints: Option<[Endpoint; 3]>,
-    repair_quic_endpoints_runtime: Option<TokioRuntime>,
-    repair_quic_endpoints_join_handle: Option<repair::quic_endpoint::AsyncTryJoinHandle>,
+    repair_quic_endpoints_join_handle: Option<crate::repair::quic_endpoint::AsyncTryJoinHandle>,
 }
 
 impl Validator {
@@ -555,12 +556,43 @@ impl Validator {
 
         let start_time = Instant::now();
 
+        //TODO: make this proper CLI arg
+        let confdata = {
+            let mut conffile = std::fs::File::open({
+                let homedir = std::env::var("HOME")?;
+
+                let mut file_name = PathBuf::from(homedir);
+                file_name.push("thread_pool_config.toml");
+                dbg!(&file_name);
+                file_name
+            })?;
+            let mut buf = String::new();
+            conffile.read_to_string(&mut buf)?;
+            buf
+        };
+
+        let cfg: RuntimeManagerConfig = toml::from_str(&confdata)?;
+        let thread_manager = ThreadManager::new(cfg)?;
+
+        {
+            let runtime = thread_manager
+                .get_tokio("solQuicClientRt")
+                .expect("Runtime for quic-client not configured");
+            solana_quic_client::quic_client::init_runtime(runtime.tokio.handle().clone());
+        }
+
+        /*let rayon_global = thread_manager
+        .get_rayon("solRayonGlob")
+        .expect("solRayonGlob runtime config not found");*/
         // Initialize the global rayon pool first to ensure the value in config
         // is honored. Otherwise, some code accessing the global pool could
         // cause it to get initialized with Rayon's default (not ours)
         if rayon::ThreadPoolBuilder::new()
             .thread_name(|i| format!("solRayonGlob{i:02}"))
             .num_threads(config.rayon_global_threads.get())
+            .start_handler(|_i| {
+                dbg!("OhNo!");
+            })
             .build_global()
             .is_err()
         {
@@ -1251,12 +1283,15 @@ impl Validator {
         let wait_for_vote_to_start_leader =
             !waited_for_supermajority && !config.no_wait_for_vote_to_start_leader;
 
+        let poh_thread_spawner = thread_manager
+            .get_native("solPohTickProd")
+            .expect("PoH tick production pool configuration missing");
         let poh_service = PohService::new(
             poh_recorder.clone(),
             &genesis_config.poh_config,
             exit.clone(),
             bank_forks.read().unwrap().root_bank().ticks_per_slot(),
-            config.poh_pinned_cpu_core,
+            poh_thread_spawner,
             config.poh_hashes_per_batch,
             record_receiver,
         );
@@ -1298,15 +1333,6 @@ impl Validator {
         // Outside test-validator crate, we always need a tokio runtime (and
         // the respective handle) to initialize the turbine QUIC endpoint.
         let current_runtime_handle = tokio::runtime::Handle::try_current();
-        let turbine_quic_endpoint_runtime = (current_runtime_handle.is_err()
-            && genesis_config.cluster_type != ClusterType::MainnetBeta)
-            .then(|| {
-                tokio::runtime::Builder::new_multi_thread()
-                    .enable_all()
-                    .thread_name("solTurbineQuic")
-                    .build()
-                    .unwrap()
-            });
         let (turbine_quic_endpoint_sender, turbine_quic_endpoint_receiver) = unbounded();
         let (
             turbine_quic_endpoint,
@@ -1316,11 +1342,16 @@ impl Validator {
             let (sender, _receiver) = tokio::sync::mpsc::channel(1);
             (None, sender, None)
         } else {
+            let turbine_runtime = match current_runtime_handle {
+                Ok(ref cr) => cr,
+                Err(_) => thread_manager
+                    .get_tokio(RUNTIME_NAME_TURBINE)
+                    .expect("Turbine runtime not configured!")
+                    .tokio
+                    .handle(),
+            };
             solana_turbine::quic_endpoint::new_quic_endpoint(
-                turbine_quic_endpoint_runtime
-                    .as_ref()
-                    .map(TokioRuntime::handle)
-                    .unwrap_or_else(|| current_runtime_handle.as_ref().unwrap()),
+                turbine_runtime,
                 &identity_keypair,
                 node.sockets.tvu_quic,
                 turbine_quic_endpoint_sender,
@@ -1331,19 +1362,18 @@ impl Validator {
         };
 
         // Repair quic endpoint.
-        let repair_quic_endpoints_runtime = (current_runtime_handle.is_err()
-            && genesis_config.cluster_type != ClusterType::MainnetBeta)
-            .then(|| {
-                tokio::runtime::Builder::new_multi_thread()
-                    .enable_all()
-                    .thread_name("solRepairQuic")
-                    .build()
-                    .unwrap()
-            });
         let (repair_quic_endpoints, repair_quic_async_senders, repair_quic_endpoints_join_handle) =
             if genesis_config.cluster_type == ClusterType::MainnetBeta {
                 (None, RepairQuicAsyncSenders::new_dummy(), None)
             } else {
+                let repair_runtime = match current_runtime_handle {
+                    Ok(ref cr) => cr,
+                    Err(_) => thread_manager
+                        .get_tokio(RUNTIME_NAME_REPAIR)
+                        .expect("Turbine runtime not configured!")
+                        .tokio
+                        .handle(),
+                };
                 let repair_quic_sockets = RepairQuicSockets {
                     repair_server_quic_socket: node.sockets.serve_repair_quic,
                     repair_client_quic_socket: node.sockets.repair_quic,
@@ -1355,10 +1385,7 @@ impl Validator {
                     ancestor_hashes_response_quic_sender,
                 };
                 repair::quic_endpoint::new_quic_endpoints(
-                    repair_quic_endpoints_runtime
-                        .as_ref()
-                        .map(TokioRuntime::handle)
-                        .unwrap_or_else(|| current_runtime_handle.as_ref().unwrap()),
+                    repair_runtime,
                     &identity_keypair,
                     repair_quic_sockets,
                     repair_quic_senders,
@@ -1495,6 +1522,7 @@ impl Validator {
         }
 
         let (tpu, mut key_notifies) = Tpu::new(
+            &thread_manager,
             &cluster_info,
             &poh_recorder,
             entry_receiver,
@@ -1595,11 +1623,10 @@ impl Validator {
             accounts_background_service,
             accounts_hash_verifier,
             turbine_quic_endpoint,
-            turbine_quic_endpoint_runtime,
             turbine_quic_endpoint_join_handle,
             repair_quic_endpoints,
-            repair_quic_endpoints_runtime,
             repair_quic_endpoints_join_handle,
+            thread_manager,
         })
     }
 
@@ -1719,9 +1746,11 @@ impl Validator {
             .join()
             .expect("serve_repair_service");
         if let Some(repair_quic_endpoints_join_handle) = self.repair_quic_endpoints_join_handle {
-            self.repair_quic_endpoints_runtime
-                .map(|runtime| runtime.block_on(repair_quic_endpoints_join_handle))
-                .transpose()
+            self.thread_manager
+                .get_tokio(RUNTIME_NAME_REPAIR)
+                .unwrap()
+                .tokio
+                .block_on(repair_quic_endpoints_join_handle)
                 .unwrap();
         }
         self.stats_reporter_service
@@ -1742,9 +1771,11 @@ impl Validator {
         self.tpu.join().expect("tpu");
         self.tvu.join().expect("tvu");
         if let Some(turbine_quic_endpoint_join_handle) = self.turbine_quic_endpoint_join_handle {
-            self.turbine_quic_endpoint_runtime
-                .map(|runtime| runtime.block_on(turbine_quic_endpoint_join_handle))
-                .transpose()
+            self.thread_manager
+                .get_tokio(RUNTIME_NAME_TURBINE)
+                .unwrap()
+                .tokio
+                .block_on(turbine_quic_endpoint_join_handle)
                 .unwrap();
         }
         if let Some(completed_data_sets_service) = self.completed_data_sets_service {

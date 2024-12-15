@@ -20,6 +20,7 @@ solana-metrics = { workspace = true }
 solana-runtime = { workspace = true }
 solana-sdk = { workspace = true }
 thiserror = { workspace = true }
+agave-thread-manager = { workspace = true }
 
 [dev-dependencies]
 assert_matches = { workspace = true }

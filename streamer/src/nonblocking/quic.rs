@@ -142,7 +142,7 @@ impl ConnectionPeerType {
 pub struct SpawnNonBlockingServerResult {
     pub endpoints: Vec<Endpoint>,
     pub stats: Arc<StreamerStats>,
-    pub thread: JoinHandle<()>,
+    pub join_handle: JoinHandle<()>,
     pub max_concurrent_connections: usize,
 }
 
@@ -221,7 +221,7 @@ pub fn spawn_server_multi(
     Ok(SpawnNonBlockingServerResult {
         endpoints,
         stats,
-        thread: handle,
+        join_handle: handle,
         max_concurrent_connections,
     })
 }
@@ -2000,7 +2000,7 @@ pub mod test {
         let SpawnNonBlockingServerResult {
             endpoints: _,
             stats: _,
-            thread: t,
+            join_handle: t,
             max_concurrent_connections: _,
         } = spawn_server(
             "quic_streamer_test",
@@ -2033,7 +2033,7 @@ pub mod test {
         let SpawnNonBlockingServerResult {
             endpoints: _,
             stats,
-            thread: t,
+            join_handle: t,
             max_concurrent_connections: _,
         } = spawn_server(
             "quic_streamer_test",

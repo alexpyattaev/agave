@@ -1176,12 +1176,20 @@ pub fn create_test_recorder(
 
     poh_recorder.set_bank(BankWithScheduler::new_without_scheduler(bank), false);
     let poh_recorder = Arc::new(RwLock::new(poh_recorder));
+
+    let rt = agave_thread_manager::NativeThreadRuntime::new(
+        "PoHService".to_owned(),
+        agave_thread_manager::NativeConfig {
+            core_allocation: agave_thread_manager::CoreAllocation::PinnedCores { min: 0, max: 1 },
+            ..Default::default()
+        },
+    );
     let poh_service = PohService::new(
         poh_recorder.clone(),
         &poh_config,
         exit.clone(),
         ticks_per_slot,
-        crate::poh_service::DEFAULT_PINNED_CPU_CORE,
+        &rt,
         crate::poh_service::DEFAULT_HASHES_PER_BATCH,
         record_receiver,
     );

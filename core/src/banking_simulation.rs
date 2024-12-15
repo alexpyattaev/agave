@@ -25,7 +25,7 @@ use {
     solana_net_utils::bind_to_localhost,
     solana_poh::{
         poh_recorder::{PohRecorder, GRACE_TICKS_FACTOR, MAX_GRACE_SLOTS},
-        poh_service::{PohService, DEFAULT_HASHES_PER_BATCH, DEFAULT_PINNED_CPU_CORE},
+        poh_service::{PohService, DEFAULT_HASHES_PER_BATCH},
     },
     solana_runtime::{
         bank::{Bank, HashOverrides},
@@ -722,12 +722,23 @@ impl BankingSimulator {
             exit.clone(),
         );
         let poh_recorder = Arc::new(RwLock::new(poh_recorder));
+
+        let rt = agave_thread_manager::NativeThreadRuntime::new(
+            "PoHService".to_owned(),
+            agave_thread_manager::NativeConfig {
+                core_allocation: agave_thread_manager::CoreAllocation::PinnedCores {
+                    min: 0,
+                    max: 1,
+                },
+                ..Default::default()
+            },
+        );
         let poh_service = PohService::new(
             poh_recorder.clone(),
             &genesis_config.poh_config,
             exit.clone(),
             bank.ticks_per_slot(),
-            DEFAULT_PINNED_CPU_CORE,
+            &rt,
             DEFAULT_HASHES_PER_BATCH,
             record_receiver,
         );

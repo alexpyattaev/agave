@@ -1248,7 +1248,7 @@ pub fn app<'a>(version: &'a str, default_args: &'a DefaultArgs) -> App<'a, 'a> {
                     }
                     Ok(())
                 })
-                .help("EXPERIMENTAL: Specify which CPU core PoH is pinned to"),
+                .help("DEPRECATED: Specify which CPU core PoH is pinned to"),
         )
         .arg(
             Arg::with_name("poh_hashes_per_batch")
