@@ -1,5 +1,6 @@
 use {
     crate::repair::{quic_endpoint::RemoteRequest, serve_repair::ServeRepair},
+    agave_thread_manager::{JoinHandle, NativeThreadRuntime},
     bytes::Bytes,
     crossbeam_channel::{unbounded, Receiver, Sender},
     solana_ledger::blockstore::Blockstore,
@@ -11,7 +12,7 @@ use {
     std::{
         net::{SocketAddr, UdpSocket},
         sync::{atomic::AtomicBool, Arc},
-        thread::{self, Builder, JoinHandle},
+        thread::{self},
         time::Duration,
     },
     tokio::sync::mpsc::Sender as AsyncSender,
@@ -32,6 +33,7 @@ impl ServeRepairService {
         socket_addr_space: SocketAddrSpace,
         stats_reporter_sender: Sender<Box<dyn FnOnce() + Send>>,
         exit: Arc<AtomicBool>,
+        thread_builder: &NativeThreadRuntime,
     ) -> Self {
         let (request_sender, request_receiver) = unbounded();
         let serve_repair_socket = Arc::new(serve_repair_socket);
@@ -40,25 +42,31 @@ impl ServeRepairService {
             &serve_repair.my_id(),
             serve_repair_socket.local_addr().unwrap()
         );
-        let t_receiver = streamer::receiver(
-            "solRcvrServeRep".to_string(),
-            serve_repair_socket.clone(),
-            exit.clone(),
-            request_sender,
-            Recycler::default(),
-            Arc::new(StreamerReceiveStats::new("serve_repair_receiver")),
-            Duration::from_millis(1), // coalesce
-            false,                    // use_pinned_memory
-            None,                     // in_vote_only_mode
-            false,                    // is_staked_service
-        );
-        let t_packet_adapter = Builder::new()
-            .name(String::from("solServRAdapt"))
-            .spawn(|| adapt_repair_requests_packets(request_receiver, remote_request_sender))
+        let t_receiver = thread_builder
+            .spawn_named(
+                "solRcvrServeRep".to_string(),
+                streamer::receiver(
+                    serve_repair_socket.clone(),
+                    exit.clone(),
+                    request_sender,
+                    Recycler::default(),
+                    Arc::new(StreamerReceiveStats::new("serve_repair_receiver")),
+                    Duration::from_millis(1), // coalesce
+                    false,                    // use_pinned_memory
+                    None,                     // in_vote_only_mode
+                    false,                    // is_staked_service
+                ),
+            )
+            .unwrap();
+        let t_packet_adapter = thread_builder
+            .spawn_named(String::from("solServRAdapt"), || {
+                adapt_repair_requests_packets(request_receiver, remote_request_sender)
+            })
             .unwrap();
         let (response_sender, response_receiver) = unbounded();
         let t_responder = streamer::responder(
             "Repair",
+            thread_builder,
             serve_repair_socket,
             response_receiver,
             socket_addr_space,
@@ -70,6 +78,7 @@ impl ServeRepairService {
             response_sender,
             repair_response_quic_sender,
             exit,
+            thread_builder,
         );
 
         let thread_hdls = vec![t_receiver, t_packet_adapter, t_responder, t_listen];

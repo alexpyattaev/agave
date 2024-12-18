@@ -16,6 +16,7 @@ use {
         local_cluster::{ClusterConfig, LocalCluster},
         validator_configs::*,
     },
+    agave_thread_manager::{ThreadManager, ThreadManagerConfig},
     log::*,
     solana_accounts_db::utils::create_accounts_run_and_snapshot_dirs,
     solana_core::{
@@ -376,6 +377,7 @@ pub fn run_cluster_partition<C>(
     );
     let mut cluster = LocalCluster::new(&mut config, SocketAddrSpace::Unspecified);
 
+    let thread_manager = ThreadManager::new(ThreadManagerConfig::default()).unwrap();
     info!("PARTITION_TEST spend_and_verify_all_nodes(), ensure all nodes are caught up");
     cluster_tests::spend_and_verify_all_nodes(
         &cluster.entry_point_info,
@@ -384,12 +386,14 @@ pub fn run_cluster_partition<C>(
         HashSet::new(),
         SocketAddrSpace::Unspecified,
         &cluster.connection_cache,
+        &thread_manager,
     );
 
     let cluster_nodes = discover_cluster(
         &cluster.entry_point_info.gossip().unwrap(),
         num_nodes,
         SocketAddrSpace::Unspecified,
+        &thread_manager,
     )
     .unwrap();
 

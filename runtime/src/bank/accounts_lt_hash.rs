@@ -218,7 +218,8 @@ impl Bank {
             .rc
             .accounts
             .accounts_db
-            .thread_pool
+            .rayon_pools
+            .foreground
             .install(do_calculate_delta_lt_hash);
 
         let total_time = measure_total.end_as_duration();

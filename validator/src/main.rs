@@ -899,12 +899,7 @@ pub fn main() {
     };
 
     let cli::thread_args::NumThreadConfig {
-        accounts_db_clean_threads,
-        accounts_db_foreground_threads,
-        accounts_db_hash_threads,
-        accounts_index_flush_threads,
         ip_echo_server_threads,
-        rayon_global_threads,
         replay_forks_threads,
         replay_transactions_threads,
         tvu_receive_threads,
@@ -1222,7 +1217,7 @@ pub fn main() {
 
     let mut accounts_index_config = AccountsIndexConfig {
         started_from_validator: true, // this is the only place this is set
-        num_flush_threads: Some(accounts_index_flush_threads),
+        num_flush_threads: None,
         ..AccountsIndexConfig::default()
     };
     if let Ok(bins) = value_t!(matches, "accounts_index_bins", usize) {
@@ -1371,9 +1366,6 @@ pub fn main() {
             .is_present("accounts_db_experimental_accumulator_hash"),
         verify_experimental_accumulator_hash: matches
             .is_present("accounts_db_verify_experimental_accumulator_hash"),
-        num_clean_threads: Some(accounts_db_clean_threads),
-        num_foreground_threads: Some(accounts_db_foreground_threads),
-        num_hash_threads: Some(accounts_db_hash_threads),
         ..AccountsDbConfig::default()
     };
 
@@ -1596,7 +1588,6 @@ pub fn main() {
             UseSnapshotArchivesAtStartup
         ),
         ip_echo_server_threads,
-        rayon_global_threads,
         replay_forks_threads,
         replay_transactions_threads,
         tvu_shred_sigverify_threads: tvu_sigverify_threads,

@@ -2,6 +2,7 @@
 
 use {
     crate::repair::serve_repair::ServeRepair,
+    agave_thread_manager::{JoinHandle, NativeThreadRuntime},
     bytes::Bytes,
     crossbeam_channel::{unbounded, Receiver, RecvTimeoutError, Sender},
     itertools::Itertools,
@@ -24,7 +25,7 @@ use {
             atomic::{AtomicBool, Ordering},
             Arc, RwLock,
         },
-        thread::{self, Builder, JoinHandle},
+        thread::{self},
         time::{Duration, Instant},
     },
 };
@@ -151,6 +152,7 @@ impl ShredFetchStage {
 
     #[allow(clippy::too_many_arguments)]
     fn packet_modifier(
+        thread_builder: &NativeThreadRuntime,
         receiver_thread_name: &'static str,
         modifier_thread_name: &'static str,
         sockets: Vec<Arc<UdpSocket>>,
@@ -169,23 +171,26 @@ impl ShredFetchStage {
             .into_iter()
             .enumerate()
             .map(|(i, socket)| {
-                streamer::receiver(
-                    format!("{receiver_thread_name}{i:02}"),
-                    socket,
-                    exit.clone(),
-                    packet_sender.clone(),
-                    recycler.clone(),
-                    Arc::new(StreamerReceiveStats::new("packet_modifier")),
-                    PACKET_COALESCE_DURATION,
-                    true, // use_pinned_memory
-                    None, // in_vote_only_mode
-                    false,
-                )
+                thread_builder
+                    .spawn_named(
+                        format!("{receiver_thread_name}{i:02}"),
+                        streamer::receiver(
+                            socket,
+                            exit.clone(),
+                            packet_sender.clone(),
+                            recycler.clone(),
+                            Arc::new(StreamerReceiveStats::new("packet_modifier")),
+                            PACKET_COALESCE_DURATION,
+                            true, // use_pinned_memory
+                            None, // in_vote_only_mode
+                            false,
+                        ),
+                    )
+                    .unwrap()
             })
             .collect();
-        let modifier_hdl = Builder::new()
-            .name(modifier_thread_name.to_string())
-            .spawn(move || {
+        let modifier_hdl = thread_builder
+            .spawn_named(modifier_thread_name.to_string(), move || {
                 let repair_context = repair_context
                     .as_ref()
                     .map(|(socket, cluster_info)| (socket.as_ref(), cluster_info.as_ref()));
@@ -216,10 +221,12 @@ impl ShredFetchStage {
         cluster_info: Arc<ClusterInfo>,
         turbine_disabled: Arc<AtomicBool>,
         exit: Arc<AtomicBool>,
+        thread_builder: &NativeThreadRuntime,
     ) -> Self {
         let recycler = PacketBatchRecycler::warmed(100, 1024);
 
         let (mut tvu_threads, tvu_filter) = Self::packet_modifier(
+            thread_builder,
             "solRcvrShred",
             "solTvuPktMod",
             sockets,
@@ -235,6 +242,7 @@ impl ShredFetchStage {
         );
 
         let (repair_receiver, repair_handler) = Self::packet_modifier(
+            thread_builder,
             "solRcvrShredRep",
             "solTvuRepPktMod",
             vec![repair_socket.clone()],
@@ -261,9 +269,8 @@ impl ShredFetchStage {
             let sender = sender.clone();
             let turbine_disabled = turbine_disabled.clone();
             tvu_threads.extend([
-                Builder::new()
-                    .name("solTvuRecvRpr".to_string())
-                    .spawn(|| {
+                thread_builder
+                    .spawn_named("solTvuRecvRpr".to_string(), || {
                         receive_quic_datagrams(
                             repair_response_quic_receiver,
                             PacketFlags::REPAIR,
@@ -273,9 +280,8 @@ impl ShredFetchStage {
                         )
                     })
                     .unwrap(),
-                Builder::new()
-                    .name("solTvuFetchRpr".to_string())
-                    .spawn(move || {
+                thread_builder
+                    .spawn_named("solTvuFetchRpr".to_owned(), move || {
                         Self::modify_packets(
                             packet_receiver,
                             sender,
@@ -293,9 +299,8 @@ impl ShredFetchStage {
         // Turbine shreds fetched over QUIC protocol.
         let (packet_sender, packet_receiver) = unbounded();
         tvu_threads.extend([
-            Builder::new()
-                .name("solTvuRecvQuic".to_string())
-                .spawn(|| {
+            thread_builder
+                .spawn_named("solTvuRecvQuic".to_string(), move || {
                     receive_quic_datagrams(
                         turbine_quic_endpoint_receiver,
                         PacketFlags::empty(),
@@ -305,9 +310,8 @@ impl ShredFetchStage {
                     )
                 })
                 .unwrap(),
-            Builder::new()
-                .name("solTvuFetchQuic".to_string())
-                .spawn(move || {
+            thread_builder
+                .spawn_named("solTvuFetchQuic".to_string(), move || {
                     Self::modify_packets(
                         packet_receiver,
                         sender,

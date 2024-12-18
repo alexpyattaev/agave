@@ -11,6 +11,7 @@ license = { workspace = true }
 edition = { workspace = true }
 
 [dependencies]
+agave-thread-manager = { workspace = true }
 agave-geyser-plugin-interface = { workspace = true }
 chrono = { workspace = true, features = ["default", "serde"] }
 clap = { workspace = true }

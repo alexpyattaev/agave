@@ -1,6 +1,7 @@
 #![allow(clippy::arithmetic_side_effects)]
 
 use {
+    agave_thread_manager::{ThreadManager, ThreadManagerConfig},
     clap::{crate_description, crate_name, value_t, values_t_or_exit, App, Arg},
     log::*,
     rand::{thread_rng, Rng},
@@ -592,6 +593,7 @@ fn main() {
     let payer_keypair_refs: Vec<&Keypair> = payer_keypairs.iter().collect();
     let account_keypair_refs: Vec<&Keypair> = account_keypairs.iter().collect();
 
+    let thread_manager = ThreadManager::new(ThreadManagerConfig::default()).unwrap();
     let rpc_addr = if !skip_gossip {
         info!("Finding cluster entry: {:?}", entrypoint_addr);
         let (gossip_nodes, _validators) = discover(
@@ -604,6 +606,7 @@ fn main() {
             None,                    // my_gossip_addr
             0,                       // my_shred_version
             SocketAddrSpace::Unspecified,
+            &thread_manager,
         )
         .unwrap_or_else(|err| {
             eprintln!("Failed to discover {entrypoint_addr} node: {err:?}");

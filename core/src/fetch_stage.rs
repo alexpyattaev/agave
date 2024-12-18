@@ -2,6 +2,7 @@
 
 use {
     crate::result::{Error, Result},
+    agave_thread_manager::{JoinHandle, NativeThreadRuntime},
     crossbeam_channel::{unbounded, RecvTimeoutError},
     solana_metrics::{inc_new_counter_debug, inc_new_counter_info},
     solana_perf::{packet::PacketBatchRecycler, recycler::Recycler},
@@ -20,7 +21,7 @@ use {
             atomic::{AtomicBool, Ordering},
             Arc, RwLock,
         },
-        thread::{self, sleep, Builder, JoinHandle},
+        thread::{self, sleep},
         time::Duration,
     },
 };
@@ -37,6 +38,7 @@ impl FetchStage {
         exit: Arc<AtomicBool>,
         poh_recorder: &Arc<RwLock<PohRecorder>>,
         coalesce: Duration,
+        thread_builder: &NativeThreadRuntime,
     ) -> (Self, PacketBatchReceiver, PacketBatchReceiver) {
         let (sender, receiver) = unbounded();
         let (vote_sender, vote_receiver) = unbounded();
@@ -55,6 +57,7 @@ impl FetchStage {
                 coalesce,
                 None,
                 DEFAULT_TPU_ENABLE_UDP,
+                thread_builder,
             ),
             receiver,
             vote_receiver,
@@ -75,6 +78,7 @@ impl FetchStage {
         coalesce: Duration,
         in_vote_only_mode: Option<Arc<AtomicBool>>,
         tpu_enable_udp: bool,
+        thread_builder: &NativeThreadRuntime,
     ) -> Self {
         let tx_sockets = sockets.into_iter().map(Arc::new).collect();
         let tpu_forwards_sockets = tpu_forwards_sockets.into_iter().map(Arc::new).collect();
@@ -92,6 +96,7 @@ impl FetchStage {
             coalesce,
             in_vote_only_mode,
             tpu_enable_udp,
+            thread_builder,
         )
     }
 
@@ -151,6 +156,7 @@ impl FetchStage {
         coalesce: Duration,
         in_vote_only_mode: Option<Arc<AtomicBool>>,
         tpu_enable_udp: bool,
+        thread_builder: &NativeThreadRuntime,
     ) -> Self {
         let recycler: PacketBatchRecycler = Recycler::warmed(1000, 1024);
 
@@ -161,18 +167,22 @@ impl FetchStage {
                 .into_iter()
                 .enumerate()
                 .map(|(i, socket)| {
-                    streamer::receiver(
-                        format!("solRcvrTpu{i:02}"),
-                        socket,
-                        exit.clone(),
-                        sender.clone(),
-                        recycler.clone(),
-                        tpu_stats.clone(),
-                        coalesce,
-                        true,
-                        in_vote_only_mode.clone(),
-                        false, // unstaked connections
-                    )
+                    thread_builder
+                        .spawn_named(
+                            format!("solRcvrTpu{i:02}"),
+                            streamer::receiver(
+                                socket,
+                                exit.clone(),
+                                sender.clone(),
+                                recycler.clone(),
+                                tpu_stats.clone(),
+                                coalesce,
+                                true,
+                                in_vote_only_mode.clone(),
+                                false, // unstaked connections
+                            ),
+                        )
+                        .unwrap()
                 })
                 .collect()
         } else {
@@ -185,18 +195,22 @@ impl FetchStage {
                 .into_iter()
                 .enumerate()
                 .map(|(i, socket)| {
-                    streamer::receiver(
-                        format!("solRcvrTpuFwd{i:02}"),
-                        socket,
-                        exit.clone(),
-                        forward_sender.clone(),
-                        recycler.clone(),
-                        tpu_forward_stats.clone(),
-                        coalesce,
-                        true,
-                        in_vote_only_mode.clone(),
-                        false, // unstaked connections
-                    )
+                    thread_builder
+                        .spawn_named(
+                            format!("solRcvrTpuFwd{i:02}"),
+                            streamer::receiver(
+                                socket,
+                                exit.clone(),
+                                forward_sender.clone(),
+                                recycler.clone(),
+                                tpu_forward_stats.clone(),
+                                coalesce,
+                                true,
+                                in_vote_only_mode.clone(),
+                                false, // unstaked connections
+                            ),
+                        )
+                        .unwrap()
                 })
                 .collect()
         } else {
@@ -208,27 +222,30 @@ impl FetchStage {
             .into_iter()
             .enumerate()
             .map(|(i, socket)| {
-                streamer::receiver(
-                    format!("solRcvrTpuVot{i:02}"),
-                    socket,
-                    exit.clone(),
-                    vote_sender.clone(),
-                    recycler.clone(),
-                    tpu_vote_stats.clone(),
-                    coalesce,
-                    true,
-                    None,
-                    true, // only staked connections should be voting
-                )
+                thread_builder
+                    .spawn_named(
+                        format!("solRcvrTpuVot{i:02}"),
+                        streamer::receiver(
+                            socket,
+                            exit.clone(),
+                            vote_sender.clone(),
+                            recycler.clone(),
+                            tpu_vote_stats.clone(),
+                            coalesce,
+                            true,
+                            None,
+                            true, // only staked connections should be voting
+                        ),
+                    )
+                    .unwrap()
             })
             .collect();
 
         let sender = sender.clone();
         let poh_recorder = poh_recorder.clone();
 
-        let fwd_thread_hdl = Builder::new()
-            .name("solFetchStgFwRx".to_string())
-            .spawn(move || loop {
+        let fwd_thread_hdl = thread_builder
+            .spawn_named("solFetchStgFwRx".to_string(), move || loop {
                 if let Err(e) =
                     Self::handle_forwarded_packets(&forward_receiver, &sender, &poh_recorder)
                 {
@@ -243,9 +260,8 @@ impl FetchStage {
             })
             .unwrap();
 
-        let metrics_thread_hdl = Builder::new()
-            .name("solFetchStgMetr".to_string())
-            .spawn(move || loop {
+        let metrics_thread_hdl = thread_builder
+            .spawn_named("solFetchStgMetr".to_string(), move || loop {
                 sleep(Duration::from_secs(1));
 
                 tpu_stats.report();

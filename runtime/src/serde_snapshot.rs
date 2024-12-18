@@ -1057,8 +1057,9 @@ where
 {
     let mut accounts_db = AccountsDb::new_with_config(
         account_paths.to_vec(),
-        accounts_db_config,
+        accounts_db_config.unwrap_or_default(),
         accounts_update_notifier,
+        solana_accounts_db::accounts_db::RayonPools::default(),
         exit,
     );
 

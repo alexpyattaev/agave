@@ -97,7 +97,7 @@ dependencies = [
  "clap 2.33.3",
  "flate2",
  "hex",
- "hyper 0.14.31",
+ "hyper 0.14.32",
  "log",
  "serde",
  "serde_derive",
@@ -251,6 +251,7 @@ dependencies = [
  "affinity",
  "anyhow",
  "axum 0.7.9",
+ "env_logger",
  "log",
  "num_cpus",
  "rayon",
@@ -279,6 +280,7 @@ name = "agave-validator"
 version = "2.2.0"
 dependencies = [
  "agave-geyser-plugin-interface",
+ "agave-thread-manager",
  "assert_cmd",
  "chrono",
  "clap 2.33.3",
@@ -813,7 +815,7 @@ dependencies = [
  "futures-util",
  "http 0.2.12",
  "http-body 0.4.5",
- "hyper 0.14.31",
+ "hyper 0.14.32",
  "itoa",
  "matchit",
  "memchr",
@@ -3062,7 +3064,7 @@ dependencies = [
  "futures 0.3.31",
  "headers",
  "http 0.2.12",
- "hyper 0.14.31",
+ "hyper 0.14.32",
  "hyper-tls",
  "native-tls",
  "tokio",
@@ -3078,7 +3080,7 @@ checksum = "8d78e1e73ec14cf7375674f74d7dde185c8206fd9dea6fb6295e8a98098aaa97"
 dependencies = [
  "futures-util",
  "http 0.2.12",
- "hyper 0.14.31",
+ "hyper 0.14.32",
  "rustls 0.21.12",
  "tokio",
  "tokio-rustls",
@@ -3090,7 +3092,7 @@ version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbb958482e8c7be4bc3cf272a766a2b0bf1a6755e7a6ae777f017a31d11b13b1"
 dependencies = [
- "hyper 0.14.31",
+ "hyper 0.14.32",
  "pin-project-lite",
  "tokio",
  "tokio-io-timeout",
@@ -3103,7 +3105,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6183ddfa99b85da61a140bea0efc93fdf56ceaa041b37d553518030827f9905"
 dependencies = [
  "bytes",
- "hyper 0.14.31",
+ "hyper 0.14.32",
  "native-tls",
  "tokio",
  "tokio-native-tls",
@@ -3547,7 +3549,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e1dea6e07251d9ce6a552abfb5d7ad6bc290a4596c8dcc3d795fae2bbdc1f3ff"
 dependencies = [
  "futures 0.3.31",
- "hyper 0.14.31",
+ "hyper 0.14.32",
  "jsonrpc-core",
  "jsonrpc-server-utils",
  "log",
@@ -5167,7 +5169,7 @@ dependencies = [
  "h2",
  "http 0.2.12",
  "http-body 0.4.5",
- "hyper 0.14.31",
+ "hyper 0.14.32",
  "hyper-rustls",
  "hyper-tls",
  "ipnet",
@@ -6059,6 +6061,7 @@ dependencies = [
 name = "solana-accounts-cluster-bench"
 version = "2.2.0"
 dependencies = [
+ "agave-thread-manager",
  "clap 2.33.3",
  "log",
  "rand 0.8.5",
@@ -6091,6 +6094,7 @@ dependencies = [
 name = "solana-accounts-db"
 version = "2.2.0"
 dependencies = [
+ "agave-thread-manager",
  "ahash 0.8.11",
  "assert_matches",
  "bincode",
@@ -6689,6 +6693,7 @@ dependencies = [
 name = "solana-client"
 version = "2.2.0"
 dependencies = [
+ "agave-thread-manager",
  "async-trait",
  "bincode",
  "crossbeam-channel",
@@ -7102,6 +7107,7 @@ dependencies = [
 name = "solana-dos"
 version = "2.2.0"
 dependencies = [
+ "agave-thread-manager",
  "bincode",
  "clap 3.2.23",
  "crossbeam-channel",
@@ -7456,6 +7462,7 @@ dependencies = [
 name = "solana-gossip"
 version = "2.2.0"
 dependencies = [
+ "agave-thread-manager",
  "assert_matches",
  "bincode",
  "bs58",
@@ -7681,6 +7688,7 @@ dependencies = [
 name = "solana-ledger"
 version = "2.2.0"
 dependencies = [
+ "agave-thread-manager",
  "assert_matches",
  "bincode",
  "bitflags 2.6.0",
@@ -7775,6 +7783,7 @@ dependencies = [
 name = "solana-local-cluster"
 version = "2.2.0"
 dependencies = [
+ "agave-thread-manager",
  "assert_matches",
  "crossbeam-channel",
  "fs_extra",
@@ -9325,7 +9334,7 @@ dependencies = [
  "futures 0.3.31",
  "goauth",
  "http 0.2.12",
- "hyper 0.14.31",
+ "hyper 0.14.32",
  "hyper-proxy",
  "log",
  "openssl",
@@ -9864,6 +9873,7 @@ dependencies = [
 name = "solana-transaction-dos"
 version = "2.2.0"
 dependencies = [
+ "agave-thread-manager",
  "bincode",
  "clap 2.33.3",
  "log",
@@ -11346,7 +11356,7 @@ dependencies = [
  "h2",
  "http 0.2.12",
  "http-body 0.4.5",
- "hyper 0.14.31",
+ "hyper 0.14.32",
  "hyper-timeout",
  "percent-encoding 2.3.1",
  "pin-project",

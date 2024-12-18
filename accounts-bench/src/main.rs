@@ -9,7 +9,7 @@ use {
         accounts::Accounts,
         accounts_db::{
             test_utils::{create_test_accounts, update_accounts_bench},
-            AccountsDb, CalcAccountsHashDataSource, ACCOUNTS_DB_CONFIG_FOR_BENCHMARKS,
+            AccountsDb, CalcAccountsHashDataSource, RayonPools, ACCOUNTS_DB_CONFIG_FOR_BENCHMARKS,
         },
         ancestors::Ancestors,
     },
@@ -69,8 +69,9 @@ fn main() {
     }
     let accounts_db = AccountsDb::new_with_config(
         vec![path],
-        Some(ACCOUNTS_DB_CONFIG_FOR_BENCHMARKS),
+        ACCOUNTS_DB_CONFIG_FOR_BENCHMARKS,
         None,
+        RayonPools::default(),
         Arc::default(),
     );
     let accounts = Accounts::new(Arc::new(accounts_db));

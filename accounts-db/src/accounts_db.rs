@@ -73,11 +73,12 @@ use {
         u64_align, utils,
         verify_accounts_hash_in_background::VerifyAccountsHashInBackground,
     },
+    agave_thread_manager::{RayonConfig, RayonRuntime, ThreadManager},
     crossbeam_channel::{unbounded, Receiver, Sender, TryRecvError},
     dashmap::{DashMap, DashSet},
     log::*,
     rand::{thread_rng, Rng},
-    rayon::{prelude::*, ThreadPool},
+    rayon::prelude::*,
     seqlock::SeqLock,
     smallvec::SmallVec,
     solana_lattice_hash::lt_hash::LtHash,
@@ -512,9 +513,6 @@ pub const ACCOUNTS_DB_CONFIG_FOR_TESTING: AccountsDbConfig = AccountsDbConfig {
     scan_filter_for_shrinking: ScanFilter::OnlyAbnormalWithVerify,
     enable_experimental_accumulator_hash: false,
     verify_experimental_accumulator_hash: false,
-    num_clean_threads: None,
-    num_foreground_threads: None,
-    num_hash_threads: None,
     hash_calculation_pubkey_bins: Some(4),
 };
 pub const ACCOUNTS_DB_CONFIG_FOR_BENCHMARKS: AccountsDbConfig = AccountsDbConfig {
@@ -538,9 +536,6 @@ pub const ACCOUNTS_DB_CONFIG_FOR_BENCHMARKS: AccountsDbConfig = AccountsDbConfig
     scan_filter_for_shrinking: ScanFilter::OnlyAbnormalWithVerify,
     enable_experimental_accumulator_hash: false,
     verify_experimental_accumulator_hash: false,
-    num_clean_threads: None,
-    num_foreground_threads: None,
-    num_hash_threads: None,
     hash_calculation_pubkey_bins: None,
 };
 
@@ -666,12 +661,90 @@ pub struct AccountsDbConfig {
     pub scan_filter_for_shrinking: ScanFilter,
     pub enable_experimental_accumulator_hash: bool,
     pub verify_experimental_accumulator_hash: bool,
-    /// Number of threads for background cleaning operations (`thread_pool_clean')
-    pub num_clean_threads: Option<NonZeroUsize>,
-    /// Number of threads for foreground operations (`thread_pool`)
-    pub num_foreground_threads: Option<NonZeroUsize>,
-    /// Number of threads for background accounts hashing (`thread_pool_hash`)
-    pub num_hash_threads: Option<NonZeroUsize>,
+}
+
+pub const RAYON_POOL_NAME_BACKGROUND: &str = "solAccountsLo";
+pub const RAYON_POOL_NAME_FOREGROUND: &str = "solAccounts";
+pub const RAYON_POOL_NAME_HASH: &str = "solAcctHash";
+
+#[derive(Debug, Clone)]
+pub struct RayonPools {
+    /// background cleaning operations (formerly `rayon_pools.background')
+    pub background: RayonRuntime,
+    /// foreground operations (formerly `thread_pool`)
+    pub foreground: RayonRuntime,
+    /// background accounts hashing (formerly `rayon_pools.hash`)
+    pub hash: RayonRuntime,
+}
+
+impl RayonPools {
+    ///Creates unmanaged thread pools for tests/benchmarks. Do not use in production!
+    fn new_unmanaged(
+        foreground: NonZeroUsize,
+        background: NonZeroUsize,
+        hash: NonZeroUsize,
+    ) -> Self {
+        Self {
+            background: {
+                RayonRuntime::new(
+                    RAYON_POOL_NAME_BACKGROUND.to_owned(),
+                    RayonConfig {
+                        worker_threads: background.into(),
+                        ..Default::default()
+                    },
+                )
+                .unwrap()
+            },
+            foreground: {
+                RayonRuntime::new(
+                    RAYON_POOL_NAME_FOREGROUND.to_owned(),
+                    RayonConfig {
+                        worker_threads: foreground.into(),
+                        ..Default::default()
+                    },
+                )
+                .unwrap()
+            },
+            hash: {
+                RayonRuntime::new(
+                    RAYON_POOL_NAME_HASH.to_owned(),
+                    RayonConfig {
+                        worker_threads: hash.into(),
+                        ..Default::default()
+                    },
+                )
+                .unwrap()
+            },
+        }
+    }
+    pub fn from_thread_manager(thread_manager: &ThreadManager) -> Self {
+        Self {
+            background: thread_manager
+                .get_rayon(RAYON_POOL_NAME_BACKGROUND)
+                .unwrap()
+                .clone(),
+            foreground: thread_manager
+                .get_rayon(RAYON_POOL_NAME_FOREGROUND)
+                .unwrap()
+                .clone(),
+            hash: thread_manager
+                .get_rayon(RAYON_POOL_NAME_HASH)
+                .unwrap()
+                .clone(),
+        }
+    }
+}
+
+impl Default for RayonPools {
+    /// Default scales thread pools based on some reasonable heuristics and env variables
+    fn default() -> Self {
+        let n = num_cpus::get();
+        Self::new_unmanaged(
+            NonZeroUsize::new(get_thread_count()).unwrap(),
+            NonZeroUsize::new(std::cmp::max(2, n / 4)).unwrap(),
+            NonZeroUsize::new((n / 8).clamp(2, 6)).unwrap(),
+        )
+    }
 }
 
 #[cfg(not(test))]
@@ -1527,12 +1600,7 @@ pub struct AccountsDb {
     file_size: u64,
 
     /// Thread pool used for par_iter
-    pub thread_pool: ThreadPool,
-
-    pub thread_pool_clean: ThreadPool,
-
-    pub thread_pool_hash: ThreadPool,
-
+    pub rayon_pools: RayonPools,
     accounts_delta_hashes: Mutex<HashMap<Slot, AccountsDeltaHash>>,
     accounts_hashes: Mutex<HashMap<Slot, (AccountsHash, /*capitalization*/ u64)>>,
     incremental_accounts_hashes:
@@ -1823,40 +1891,6 @@ impl SplitAncientStorages {
     }
 }
 
-pub fn quarter_thread_count() -> usize {
-    std::cmp::max(2, num_cpus::get() / 4)
-}
-
-pub fn make_min_priority_thread_pool() -> ThreadPool {
-    // Use lower thread count to reduce priority.
-    let num_threads = quarter_thread_count();
-    rayon::ThreadPoolBuilder::new()
-        .thread_name(|i| format!("solAccountsLo{i:02}"))
-        .num_threads(num_threads)
-        .build()
-        .unwrap()
-}
-
-/// Returns the default number of threads to use for background accounts hashing
-pub fn default_num_hash_threads() -> NonZeroUsize {
-    // 1/8 of the number of cpus and up to 6 threads gives good balance for the system.
-    let num_threads = (num_cpus::get() / 8).clamp(2, 6);
-    NonZeroUsize::new(num_threads).unwrap()
-}
-
-pub fn make_hash_thread_pool(num_threads: Option<NonZeroUsize>) -> ThreadPool {
-    let num_threads = num_threads.unwrap_or_else(default_num_hash_threads).get();
-    rayon::ThreadPoolBuilder::new()
-        .thread_name(|i| format!("solAcctHash{i:02}"))
-        .num_threads(num_threads)
-        .build()
-        .unwrap()
-}
-
-pub fn default_num_foreground_threads() -> usize {
-    get_thread_count()
-}
-
 #[cfg(feature = "frozen-abi")]
 impl solana_frozen_abi::abi_example::AbiExample for AccountsDb {
     fn example() -> Self {
@@ -1918,8 +1952,9 @@ impl AccountsDb {
     ) -> Self {
         let mut db = AccountsDb::new_with_config(
             paths,
-            Some(ACCOUNTS_DB_CONFIG_FOR_TESTING),
+            ACCOUNTS_DB_CONFIG_FOR_TESTING,
             None,
+            RayonPools::default(),
             Arc::default(),
         );
         db.accounts_file_provider = accounts_file_provider;
@@ -1928,11 +1963,11 @@ impl AccountsDb {
 
     pub fn new_with_config(
         paths: Vec<PathBuf>,
-        accounts_db_config: Option<AccountsDbConfig>,
+        accounts_db_config: AccountsDbConfig,
         accounts_update_notifier: Option<AccountsUpdateNotifier>,
+        rayon_pools: RayonPools,
         exit: Arc<AtomicBool>,
     ) -> Self {
-        let accounts_db_config = accounts_db_config.unwrap_or_default();
         let accounts_index = AccountsIndex::new(accounts_db_config.index.clone(), exit);
 
         let base_working_path = accounts_db_config.base_working_path.clone();
@@ -1978,32 +2013,6 @@ impl AccountsDb {
             Self::DEFAULT_MAX_READ_ONLY_CACHE_DATA_SIZE_HI,
         ));
 
-        // Increase the stack for foreground threads
-        // rayon needs a lot of stack
-        const ACCOUNTS_STACK_SIZE: usize = 8 * 1024 * 1024;
-        let num_foreground_threads = accounts_db_config
-            .num_foreground_threads
-            .map(Into::into)
-            .unwrap_or_else(default_num_foreground_threads);
-        let thread_pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(num_foreground_threads)
-            .thread_name(|i| format!("solAccounts{i:02}"))
-            .stack_size(ACCOUNTS_STACK_SIZE)
-            .build()
-            .expect("new rayon threadpool");
-
-        let num_clean_threads = accounts_db_config
-            .num_clean_threads
-            .map(Into::into)
-            .unwrap_or_else(quarter_thread_count);
-        let thread_pool_clean = rayon::ThreadPoolBuilder::new()
-            .thread_name(|i| format!("solAccountsLo{i:02}"))
-            .num_threads(num_clean_threads)
-            .build()
-            .expect("new rayon threadpool");
-
-        let thread_pool_hash = make_hash_thread_pool(accounts_db_config.num_hash_threads);
-
         let mut new = Self {
             accounts_index,
             paths,
@@ -2046,9 +2055,7 @@ impl AccountsDb {
                 .into(),
             verify_experimental_accumulator_hash: accounts_db_config
                 .verify_experimental_accumulator_hash,
-            thread_pool,
-            thread_pool_clean,
-            thread_pool_hash,
+            rayon_pools,
             verify_accounts_hash_in_bg: VerifyAccountsHashInBackground::default(),
             active_stats: ActiveStats::default(),
             storage: AccountStorage::default(),
@@ -2615,7 +2622,7 @@ impl AccountsDb {
             // Free to consume all the cores during startup
             dirty_store_routine();
         } else {
-            self.thread_pool_clean.install(|| {
+            self.rayon_pools.background.install(|| {
                 dirty_store_routine();
             });
         }
@@ -2708,37 +2715,41 @@ impl AccountsDb {
         });
         let total = pubkey_refcount.len();
         let failed = AtomicBool::default();
-        let threads = quarter_thread_count();
+        let pool = &self.rayon_pools.background;
+        let threads = pool.config.worker_threads;
         let per_batch = total / threads;
-        (0..=threads).into_par_iter().for_each(|attempt| {
-            pubkey_refcount
-                .iter()
-                .skip(attempt * per_batch)
-                .take(per_batch)
-                .for_each(|entry| {
-                    if failed.load(Ordering::Relaxed) {
-                        return;
-                    }
+        pool.install(|| {
+            (0..=threads).into_par_iter().for_each(|attempt| {
+                pubkey_refcount
+                    .iter()
+                    .skip(attempt * per_batch)
+                    .take(per_batch)
+                    .for_each(|entry| {
+                        if failed.load(Ordering::Relaxed) {
+                            return;
+                        }
 
-                    self.accounts_index
-                        .get_and_then(entry.key(), |index_entry| {
-                            if let Some(index_entry) = index_entry {
-                                match (index_entry.ref_count() as usize).cmp(&entry.value().len()) {
-                                    std::cmp::Ordering::Equal => {
-                                        // ref counts match, nothing to do here
-                                    }
-                                    std::cmp::Ordering::Greater => {
-                                        let slot_list = index_entry.slot_list.read().unwrap();
-                                        let num_too_new = slot_list
-                                            .iter()
-                                            .filter(|(slot, _)| slot > &max_slot_inclusive)
-                                            .count();
+                        self.accounts_index
+                            .get_and_then(entry.key(), |index_entry| {
+                                if let Some(index_entry) = index_entry {
+                                    match (index_entry.ref_count() as usize)
+                                        .cmp(&entry.value().len())
+                                    {
+                                        std::cmp::Ordering::Equal => {
+                                            // ref counts match, nothing to do here
+                                        }
+                                        std::cmp::Ordering::Greater => {
+                                            let slot_list = index_entry.slot_list.read().unwrap();
+                                            let num_too_new = slot_list
+                                                .iter()
+                                                .filter(|(slot, _)| slot > &max_slot_inclusive)
+                                                .count();
 
-                                        if ((index_entry.ref_count() as usize) - num_too_new)
-                                            > entry.value().len()
-                                        {
-                                            failed.store(true, Ordering::Relaxed);
-                                            error!(
+                                            if ((index_entry.ref_count() as usize) - num_too_new)
+                                                > entry.value().len()
+                                            {
+                                                failed.store(true, Ordering::Relaxed);
+                                                error!(
                                                 "exhaustively_verify_refcounts: {} refcount too \
                                                  large: {}, should be: {}, {:?}, {:?}, too_new: \
                                                  {num_too_new}",
@@ -2748,24 +2759,25 @@ impl AccountsDb {
                                                 *entry.value(),
                                                 slot_list
                                             );
+                                            }
+                                        }
+                                        std::cmp::Ordering::Less => {
+                                            error!(
+                                                "exhaustively_verify_refcounts: {} refcount too \
+                                             small: {}, should be: {}, {:?}, {:?}",
+                                                entry.key(),
+                                                index_entry.ref_count(),
+                                                entry.value().len(),
+                                                *entry.value(),
+                                                index_entry.slot_list.read().unwrap()
+                                            );
                                         }
                                     }
-                                    std::cmp::Ordering::Less => {
-                                        error!(
-                                            "exhaustively_verify_refcounts: {} refcount too \
-                                             small: {}, should be: {}, {:?}, {:?}",
-                                            entry.key(),
-                                            index_entry.ref_count(),
-                                            entry.value().len(),
-                                            *entry.value(),
-                                            index_entry.slot_list.read().unwrap()
-                                        );
-                                    }
-                                }
-                            };
-                            (false, ())
-                        });
-                });
+                                };
+                                (false, ())
+                            });
+                    });
+            });
         });
         if failed.load(Ordering::Relaxed) {
             panic!("exhaustively_verify_refcounts failed");
@@ -2943,7 +2955,7 @@ impl AccountsDb {
         if is_startup {
             do_clean_scan();
         } else {
-            self.thread_pool_clean.install(do_clean_scan);
+            self.rayon_pools.background.install(do_clean_scan);
         }
 
         accounts_scan.stop();
@@ -3654,7 +3666,7 @@ impl AccountsDb {
             .num_duplicated_accounts
             .fetch_add(*num_duplicated_accounts as u64, Ordering::Relaxed);
         let all_are_zero_lamports_collect = Mutex::new(true);
-        self.thread_pool_clean.install(|| {
+        self.rayon_pools.background.install(|| {
             stored_accounts
                 .par_chunks(SHRINK_COLLECT_CHUNK_SIZE)
                 .for_each(|stored_accounts| {
@@ -4667,7 +4679,7 @@ impl AccountsDb {
 
         let num_selected = shrink_slots.len();
         let (_, shrink_all_us) = measure_us!({
-            self.thread_pool_clean.install(|| {
+            self.rayon_pools.background.install(|| {
                 shrink_slots
                     .into_par_iter()
                     .for_each(|(slot, slot_shrink_candidate)| {
@@ -4912,7 +4924,7 @@ impl AccountsDb {
             // If we see the slot in the cache, then all the account information
             // is in this cached slot
             if slot_cache.len() > SCAN_SLOT_PAR_ITER_THRESHOLD {
-                ScanStorageResult::Cached(self.thread_pool.install(|| {
+                ScanStorageResult::Cached(self.rayon_pools.foreground.install(|| {
                     slot_cache
                         .par_iter()
                         .filter_map(|cached_account| {
@@ -6686,7 +6698,8 @@ impl AccountsDb {
         };
 
         let mut scan = Measure::start("scan");
-        let account_hashes: Vec<Vec<Hash>> = self.thread_pool_clean.install(get_account_hashes);
+        let account_hashes: Vec<Vec<Hash>> =
+            self.rayon_pools.background.install(get_account_hashes);
         scan.stop();
 
         let total_lamports = *total_lamports.lock().unwrap();
@@ -7319,7 +7332,7 @@ impl AccountsDb {
         };
 
         let result = if use_bg_thread_pool {
-            self.thread_pool_hash.install(scan_and_hash)
+            self.rayon_pools.hash.install(scan_and_hash)
         } else {
             scan_and_hash()
         };
@@ -7563,7 +7576,8 @@ impl AccountsDb {
         }
 
         let accounts_delta_hash = self
-            .thread_pool
+            .rayon_pools
+            .foreground
             .install(|| AccountsDeltaHash(AccountsHasher::accumulate_account_hashes(hashes)));
         accumulate.stop();
         let mut uncleaned_time = Measure::start("uncleaned_index");
@@ -7660,17 +7674,21 @@ impl AccountsDb {
             UpdateIndexThreadSelection::PoolWithThreshold,
         ) && len > threshold
         {
-            let chunk_size = std::cmp::max(1, len / quarter_thread_count()); // # pubkeys/thread
+            let pool = &self.rayon_pools.background;
+            let workers = pool.config.worker_threads;
+            let chunk_size = std::cmp::max(1, len / workers); // # pubkeys/thread
             let batches = 1 + len / chunk_size;
-            (0..batches)
-                .into_par_iter()
-                .map(|batch| {
-                    let start = batch * chunk_size;
-                    let end = std::cmp::min(start + chunk_size, len);
-                    update(start, end)
-                })
-                .flatten()
-                .collect::<Vec<_>>()
+            pool.install(|| {
+                (0..batches)
+                    .into_par_iter()
+                    .map(|batch| {
+                        let start = batch * chunk_size;
+                        let end = std::cmp::min(start + chunk_size, len);
+                        update(start, end)
+                    })
+                    .flatten()
+                    .collect::<Vec<_>>()
+            })
         } else {
             update(0, len)
         }
@@ -7861,7 +7879,7 @@ impl AccountsDb {
         pubkeys_removed_from_accounts_index: &'a PubkeysRemovedFromAccountsIndex,
     ) {
         let batches = 1 + (num_pubkeys / UNREF_ACCOUNTS_BATCH_SIZE);
-        self.thread_pool_clean.install(|| {
+        self.rayon_pools.background.install(|| {
             (0..batches).into_par_iter().for_each(|batch| {
                 let skip = batch * UNREF_ACCOUNTS_BATCH_SIZE;
                 self.accounts_index.scan(
@@ -7994,7 +8012,7 @@ impl AccountsDb {
         }
         // get all pubkeys in all dead slots
         let purged_slot_pubkeys: HashSet<(Slot, Pubkey)> = {
-            self.thread_pool_clean.install(|| {
+            self.rayon_pools.background.install(|| {
                 stores
                     .into_par_iter()
                     .map(|store| {

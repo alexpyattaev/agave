@@ -302,6 +302,7 @@ mod tests {
             unprocessed_packet_batches::{DeserializedPacket, UnprocessedPacketBatches},
             unprocessed_transaction_storage::ThreadType,
         },
+        agave_thread_manager::TokioRuntime,
         solana_client::rpc_client::SerializableTransaction,
         solana_gossip::cluster_info::{ClusterInfo, Node},
         solana_ledger::{blockstore::Blockstore, genesis_utils::GenesisConfigInfo},
@@ -312,11 +313,8 @@ mod tests {
             hash::Hash, poh_config::PohConfig, signature::Keypair, signer::Signer,
             system_transaction, transaction::VersionedTransaction,
         },
-        solana_streamer::{
-            nonblocking::testing_utilities::{
-                setup_quic_server_with_sockets, SpawnTestServerResult, TestServerConfig,
-            },
-            quic::rt,
+        solana_streamer::nonblocking::testing_utilities::{
+            setup_quic_server_with_sockets, SpawnTestServerResult, TestServerConfig,
         },
         std::{
             sync::atomic::AtomicBool,
@@ -451,7 +449,7 @@ mod tests {
             ("budget-restricted", DataBudget::restricted(), 0),
             ("budget-available", DataBudget::default(), 1),
         ];
-        let runtime = rt("solQuicTestRt".to_string());
+        let runtime = TokioRuntime::new_for_tests();
         for (_name, data_budget, expected_num_forwarded) in test_cases {
             let mut forwarder = Forwarder::new(
                 poh_recorder.clone(),
@@ -564,7 +562,7 @@ mod tests {
             Arc::new(connection_cache),
             Arc::new(DataBudget::default()),
         );
-        let runtime = rt("solQuicTestRt".to_string());
+        let runtime = TokioRuntime::new_for_tests();
         for (name, hold, expected_num_unprocessed, expected_num_processed) in test_cases {
             let stats = BankingStageStats::default();
             forwarder.handle_forwarding(

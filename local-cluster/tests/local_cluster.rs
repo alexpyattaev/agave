@@ -155,6 +155,7 @@ fn test_spend_and_verify_all_nodes_1() {
         HashSet::new(),
         SocketAddrSpace::Unspecified,
         &local.connection_cache,
+        &local.thread_manager,
     );
 }
 
@@ -177,6 +178,7 @@ fn test_spend_and_verify_all_nodes_2() {
         HashSet::new(),
         SocketAddrSpace::Unspecified,
         &local.connection_cache,
+        &local.thread_manager,
     );
 }
 
@@ -199,6 +201,7 @@ fn test_spend_and_verify_all_nodes_3() {
         HashSet::new(),
         SocketAddrSpace::Unspecified,
         &local.connection_cache,
+        &local.thread_manager,
     );
 }
 
@@ -342,6 +345,7 @@ fn test_forwarding() {
         &cluster.entry_point_info.gossip().unwrap(),
         2,
         SocketAddrSpace::Unspecified,
+        &cluster.thread_manager,
     )
     .unwrap();
     assert!(cluster_nodes.len() >= 2);
@@ -427,6 +431,7 @@ fn test_mainnet_beta_cluster_type() {
         &cluster.entry_point_info.gossip().unwrap(),
         1,
         SocketAddrSpace::Unspecified,
+        &cluster.thread_manager,
     )
     .unwrap();
     assert_eq!(cluster_nodes.len(), 1);
@@ -1292,6 +1297,7 @@ fn test_snapshot_restart_tower() {
         HashSet::new(),
         SocketAddrSpace::Unspecified,
         &cluster.connection_cache,
+        &cluster.thread_manager,
     );
 }
 
@@ -1357,6 +1363,7 @@ fn test_snapshots_blockstore_floor() {
         &cluster.entry_point_info.gossip().unwrap(),
         1,
         SocketAddrSpace::Unspecified,
+        &cluster.thread_manager,
     )
     .unwrap();
     let mut known_validators = HashSet::new();
@@ -1490,6 +1497,7 @@ fn test_snapshots_restart_validity() {
             HashSet::new(),
             SocketAddrSpace::Unspecified,
             &cluster.connection_cache,
+            &cluster.thread_manager,
         );
     }
 }
@@ -2771,6 +2779,7 @@ fn test_oc_bad_signatures() {
         cluster.validators.len().saturating_sub(1),
         0,
         0,
+        &cluster.thread_manager,
     );
 
     let (mut block_subscribe_client, receiver) = PubsubClient::block_subscribe(
@@ -4036,6 +4045,7 @@ fn run_duplicate_shreds_broadcast_leader(vote_on_duplicate: bool) {
         cluster.validators.len().saturating_sub(1),
         5000, // Refresh if 5 seconds of inactivity
         5,    // Refresh the past 5 votes
+        &cluster.thread_manager,
     );
 
     // 4) Check that the cluster is making progress
@@ -4304,6 +4314,7 @@ fn test_listener_startup() {
         &cluster.entry_point_info.gossip().unwrap(),
         4,
         SocketAddrSpace::Unspecified,
+        &cluster.thread_manager,
     )
     .unwrap();
     assert_eq!(cluster_nodes.len(), 4);
@@ -4440,6 +4451,7 @@ fn test_leader_failure_4() {
         num_nodes,
         config.ticks_per_slot * config.poh_config.target_tick_duration.as_millis() as u64,
         SocketAddrSpace::Unspecified,
+        &local.thread_manager,
     );
 }
 
@@ -5803,6 +5815,7 @@ fn test_randomly_mixed_block_verification_methods_between_bootstrap_and_not() {
         HashSet::new(),
         SocketAddrSpace::Unspecified,
         &local.connection_cache,
+        &local.thread_manager,
     );
 }
 

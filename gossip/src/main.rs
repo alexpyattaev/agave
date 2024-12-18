@@ -1,6 +1,7 @@
 //! A command-line executable for monitoring a cluster's gossip plane.
 
 use {
+    agave_thread_manager::{ThreadManager, ThreadManagerConfig},
     clap::{
         crate_description, crate_name, value_t, value_t_or_exit, App, AppSettings, Arg, ArgMatches,
         SubCommand,
@@ -238,7 +239,11 @@ fn get_entrypoint_shred_version(entrypoint: &Option<SocketAddr>) -> Option<u16> 
     }
 }
 
-fn process_spy(matches: &ArgMatches, socket_addr_space: SocketAddrSpace) -> std::io::Result<()> {
+fn process_spy(
+    matches: &ArgMatches,
+    socket_addr_space: SocketAddrSpace,
+    thread_manager: &ThreadManager,
+) -> std::io::Result<()> {
     let num_nodes_exactly = matches
         .value_of("num_nodes_exactly")
         .map(|num| num.to_string().parse().unwrap());
@@ -271,6 +276,7 @@ fn process_spy(matches: &ArgMatches, socket_addr_space: SocketAddrSpace) -> std:
         Some(&gossip_addr), // my_gossip_addr
         shred_version,
         socket_addr_space,
+        thread_manager,
     )?;
 
     process_spy_results(
@@ -296,6 +302,7 @@ fn parse_entrypoint(matches: &ArgMatches) -> Option<SocketAddr> {
 fn process_rpc_url(
     matches: &ArgMatches,
     socket_addr_space: SocketAddrSpace,
+    thread_manager: &ThreadManager,
 ) -> std::io::Result<()> {
     let any = matches.is_present("any");
     let all = matches.is_present("all");
@@ -319,6 +326,7 @@ fn process_rpc_url(
         Some(&gossip_addr),       // my_gossip_addr
         shred_version,
         socket_addr_space,
+        thread_manager,
     )?;
 
     let rpc_addrs: Vec<_> = validators
@@ -368,12 +376,13 @@ fn main() -> Result<(), Box<dyn error::Error>> {
 
     let matches = parse_matches();
     let socket_addr_space = SocketAddrSpace::new(matches.is_present("allow_private_addr"));
+    let thread_manager = ThreadManager::new(ThreadManagerConfig::default())?;
     match matches.subcommand() {
         ("spy", Some(matches)) => {
-            process_spy(matches, socket_addr_space)?;
+            process_spy(matches, socket_addr_space, &thread_manager)?;
         }
         ("rpc-url", Some(matches)) => {
-            process_rpc_url(matches, socket_addr_space)?;
+            process_rpc_url(matches, socket_addr_space, &thread_manager)?;
         }
         _ => unreachable!(),
     }

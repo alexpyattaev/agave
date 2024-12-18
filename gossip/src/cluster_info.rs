@@ -46,10 +46,11 @@ use {
         },
         weighted_shuffle::WeightedShuffle,
     },
+    agave_thread_manager::{JoinHandle, NativeThreadRuntime, RayonRuntime},
     crossbeam_channel::{Receiver, RecvTimeoutError, Sender},
     itertools::Itertools,
     rand::{seq::SliceRandom, thread_rng, CryptoRng, Rng},
-    rayon::{prelude::*, ThreadPool, ThreadPoolBuilder},
+    rayon::{prelude::*, ThreadPool},
     solana_feature_set::FeatureSet,
     solana_ledger::shred::Shred,
     solana_measure::measure::Measure,
@@ -63,7 +64,6 @@ use {
         data_budget::DataBudget,
         packet::{Packet, PacketBatch, PacketBatchRecycler, PACKET_DATA_SIZE},
     },
-    solana_rayon_threadlimit::get_thread_count,
     solana_runtime::bank_forks::BankForks,
     solana_sanitize::Sanitize,
     solana_sdk::{
@@ -98,7 +98,7 @@ use {
             atomic::{AtomicBool, Ordering},
             Arc, Mutex, RwLock, RwLockReadGuard,
         },
-        thread::{sleep, Builder, JoinHandle},
+        thread::sleep,
         time::{Duration, Instant},
     },
     thiserror::Error,
@@ -1526,14 +1526,10 @@ impl ClusterInfo {
         sender: PacketBatchSender,
         gossip_validators: Option<HashSet<Pubkey>>,
         exit: Arc<AtomicBool>,
+        thread_pool: RayonRuntime,
+        thread_builder: &NativeThreadRuntime,
     ) -> JoinHandle<()> {
-        let thread_pool = ThreadPoolBuilder::new()
-            .num_threads(std::cmp::min(get_thread_count(), 8))
-            .thread_name(|i| format!("solRunGossip{i:02}"))
-            .build()
-            .unwrap();
-        Builder::new()
-            .name("solGossip".to_string())
+        thread_builder
             .spawn(move || {
                 let mut last_push = 0;
                 let mut last_contact_info_trace = timestamp();
@@ -2417,12 +2413,9 @@ impl ClusterInfo {
         receiver: PacketBatchReceiver,
         sender: Sender<Vec<(/*from:*/ SocketAddr, Protocol)>>,
         exit: Arc<AtomicBool>,
+        thread_pool: RayonRuntime,
+        thread_builder: &NativeThreadRuntime,
     ) -> JoinHandle<()> {
-        let thread_pool = ThreadPoolBuilder::new()
-            .num_threads(get_thread_count().min(8))
-            .thread_name(|i| format!("solGossipCons{i:02}"))
-            .build()
-            .unwrap();
         let run_consume = move || {
             while !exit.load(Ordering::Relaxed) {
                 match self.run_socket_consume(&receiver, &sender, &thread_pool) {
@@ -2436,8 +2429,9 @@ impl ClusterInfo {
                 }
             }
         };
-        let thread_name = String::from("solGossipConsum");
-        Builder::new().name(thread_name).spawn(run_consume).unwrap()
+        thread_builder
+            .spawn_named(String::from("solGossipConsum"), run_consume)
+            .unwrap()
     }
 
     pub(crate) fn listen(
@@ -2447,17 +2441,13 @@ impl ClusterInfo {
         response_sender: PacketBatchSender,
         should_check_duplicate_instance: bool,
         exit: Arc<AtomicBool>,
+        thread_pool: RayonRuntime,
+        thread_builder: &NativeThreadRuntime,
     ) -> JoinHandle<()> {
         let mut last_print = Instant::now();
         let recycler = PacketBatchRecycler::default();
-        let thread_pool = ThreadPoolBuilder::new()
-            .num_threads(get_thread_count().min(8))
-            .thread_name(|i| format!("solGossipWork{i:02}"))
-            .build()
-            .unwrap();
-        Builder::new()
-            .name("solGossipListen".to_string())
-            .spawn(move || {
+        thread_builder
+            .spawn_named("solGossipListen".to_string(), move || {
                 while !exit.load(Ordering::Relaxed) {
                     if let Err(err) = self.run_listen(
                         &recycler,
@@ -3133,6 +3123,7 @@ mod tests {
         },
         bincode::serialize,
         itertools::izip,
+        rayon::ThreadPoolBuilder,
         solana_ledger::shred::Shredder,
         solana_net_utils::bind_to,
         solana_sdk::signature::{Keypair, Signer},

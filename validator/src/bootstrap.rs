@@ -1,4 +1,5 @@
 use {
+    agave_thread_manager::{ThreadManager, ThreadManagerConfig},
     itertools::Itertools,
     log::*,
     rand::{seq::SliceRandom, thread_rng, Rng},
@@ -148,6 +149,7 @@ fn start_gossip_node(
     gossip_validators: Option<HashSet<Pubkey>>,
     should_check_duplicate_instance: bool,
     socket_addr_space: SocketAddrSpace,
+    thread_manager: &ThreadManager,
 ) -> (Arc<ClusterInfo>, Arc<AtomicBool>, GossipService) {
     let contact_info = ClusterInfo::gossip_contact_info(
         identity_keypair.pubkey(),
@@ -168,6 +170,7 @@ fn start_gossip_node(
         should_check_duplicate_instance,
         None,
         gossip_exit_flag.clone(),
+        thread_manager,
     );
     (cluster_info, gossip_exit_flag, gossip_service)
 }
@@ -232,7 +235,7 @@ fn get_rpc_peers(
     let rpc_known_peers = rpc_peers
         .iter()
         .filter(|rpc_peer| {
-            is_known_validator(rpc_peer.pubkey(), &validator_config.known_validators)
+            is_known_validator(&rpc_peer.pubkey(), &validator_config.known_validators)
         })
         .count();
 
@@ -618,6 +621,7 @@ pub fn rpc_bootstrap(
     let mut gossip = None;
     let mut vetted_rpc_nodes = vec![];
     let mut download_abort_count = 0;
+    let thread_manager = ThreadManager::new(ThreadManagerConfig::default()).unwrap();
     loop {
         if gossip.is_none() {
             *start_progress.write().unwrap() = ValidatorStartProgress::SearchingForRpcService;
@@ -635,6 +639,7 @@ pub fn rpc_bootstrap(
                 validator_config.gossip_validators.clone(),
                 should_check_duplicate_instance,
                 socket_addr_space,
+                &thread_manager,
             ));
         }
 

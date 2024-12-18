@@ -1034,7 +1034,7 @@ impl TestValidator {
             validator_config.tower_storage = tower_storage.clone();
         }
 
-        let validator = Some(Validator::new(
+        let validator = Validator::new(
             node,
             Arc::new(validator_identity),
             &ledger_path,
@@ -1054,11 +1054,11 @@ impl TestValidator {
                 tpu_max_connections_per_ipaddr_per_minute: 32, // max connections per IpAddr per minute for test
             },
             config.admin_rpc_service_post_init.clone(),
-        )?);
+        )?;
 
         // Needed to avoid panics in `solana-responder-gossip` in tests that create a number of
         // test validators concurrently...
-        discover_cluster(&gossip, 1, socket_addr_space)
+        discover_cluster(&gossip, 1, socket_addr_space, &validator.thread_manager)
             .map_err(|err| format!("TestValidator startup failed: {err:?}"))?;
 
         let test_validator = TestValidator {
@@ -1068,7 +1068,7 @@ impl TestValidator {
             rpc_url,
             tpu,
             gossip,
-            validator,
+            validator: Some(validator),
             vote_account_address,
         };
         Ok(test_validator)

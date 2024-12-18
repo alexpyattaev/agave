@@ -10,6 +10,7 @@ use {
             result::{Error, RepairVerifyError, Result},
         },
     },
+    agave_thread_manager::{JoinHandle, NativeThreadRuntime},
     bincode::{serialize, Options},
     bytes::Bytes,
     crossbeam_channel::{Receiver, RecvTimeoutError},
@@ -57,7 +58,6 @@ use {
             atomic::{AtomicBool, Ordering},
             Arc, RwLock,
         },
-        thread::{Builder, JoinHandle},
         time::{Duration, Instant},
     },
     tokio::sync::mpsc::Sender as AsyncSender,
@@ -806,6 +806,7 @@ impl ServeRepair {
         response_sender: PacketBatchSender,
         repair_response_quic_sender: AsyncSender<(SocketAddr, Bytes)>,
         exit: Arc<AtomicBool>,
+        thread_builder: &NativeThreadRuntime,
     ) -> JoinHandle<()> {
         const INTERVAL_MS: u64 = 1000;
         const MAX_BYTES_PER_SECOND: usize = 12_000_000;
@@ -823,9 +824,8 @@ impl ServeRepair {
         );
 
         let recycler = PacketBatchRecycler::default();
-        Builder::new()
-            .name("solRepairListen".to_string())
-            .spawn(move || {
+        thread_builder
+            .spawn_named("solRepairListen".to_string(), move || {
                 let mut last_print = Instant::now();
                 let mut stats = ServeRepairStats::default();
                 let data_budget = DataBudget::default();

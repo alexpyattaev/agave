@@ -1,5 +1,6 @@
 #![allow(clippy::arithmetic_side_effects)]
 use {
+    agave_thread_manager::{ThreadManager, ThreadManagerConfig},
     clap::{crate_description, crate_name, value_t, values_t, values_t_or_exit, App, Arg},
     log::*,
     rand::{thread_rng, Rng},
@@ -1310,6 +1311,7 @@ fn main() {
         payer_keypair_refs.push(keypair);
     }
 
+    let thread_manager = ThreadManager::new(ThreadManagerConfig::default()).unwrap();
     let client = if let Some(addr) = matches.value_of("entrypoint") {
         let entrypoint_addr = solana_net_utils::parse_host_port(addr).unwrap_or_else(|e| {
             eprintln!("failed to parse entrypoint address: {e}");
@@ -1328,6 +1330,7 @@ fn main() {
                 None,                    // my_gossip_addr
                 0,                       // my_shred_version
                 SocketAddrSpace::Unspecified,
+                &thread_manager,
             )
             .unwrap_or_else(|err| {
                 eprintln!("Failed to discover {entrypoint_addr} node: {err:?}");

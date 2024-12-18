@@ -184,6 +184,7 @@ use {
     solana_vote::vote_account::{VoteAccount, VoteAccountsHashMap},
     solana_vote_program::vote_state::VoteState,
     std::{
+        cmp::max,
         collections::{HashMap, HashSet},
         convert::TryFrom,
         fmt,
@@ -1194,8 +1195,13 @@ impl Bank {
         #[allow(unused)] genesis_hash: Option<Hash>,
         #[allow(unused)] feature_set: Option<FeatureSet>,
     ) -> Self {
-        let accounts_db =
-            AccountsDb::new_with_config(paths, accounts_db_config, accounts_update_notifier, exit);
+        let accounts_db = AccountsDb::new_with_config(
+            paths,
+            accounts_db_config.unwrap_or_default(),
+            accounts_update_notifier,
+            solana_accounts_db::accounts_db::RayonPools::default(),
+            exit,
+        );
         let accounts = Accounts::new(Arc::new(accounts_db));
         let mut bank = Self::default_with_accounts(accounts);
         bank.ancestors = Ancestors::from(vec![bank.slot()]);
@@ -4541,7 +4547,7 @@ impl Bank {
             }
 
             if parallel {
-                let thread_pool = &self.rc.accounts.accounts_db.thread_pool;
+                let thread_pool = &self.rc.accounts.accounts_db.rayon_pools.foreground;
                 thread_pool.install(|| {
                     ranges.into_par_iter().for_each(|range| {
                         self.collect_rent_in_range(range.0, range.1, &rent_metrics)
@@ -4772,7 +4778,8 @@ impl Bank {
         metrics: &RentMetrics,
     ) {
         let mut hold_range = Measure::start("hold_range");
-        let thread_pool = &self.rc.accounts.accounts_db.thread_pool;
+        let thread_pool = &self.rc.accounts.accounts_db.rayon_pools.foreground;
+        let num_threads = max(thread_pool.config.worker_threads / 4, 1) as u64;
         thread_pool.install(|| {
             self.rc
                 .accounts
@@ -4786,7 +4793,6 @@ impl Bank {
             // divide the range into num_threads smaller ranges and process in parallel
             // Note that 'pubkey_range_from_partition' cannot easily be re-used here to break the range smaller.
             // It has special handling of 0..0 and partition_count changes affect all ranges unevenly.
-            let num_threads = solana_accounts_db::accounts_db::quarter_thread_count() as u64;
             let sz = std::mem::size_of::<u64>();
             let start_prefix = accounts_partition::prefix_from_pubkey(subrange_full.start());
             let end_prefix_inclusive = accounts_partition::prefix_from_pubkey(subrange_full.end());
@@ -5925,7 +5931,7 @@ impl Bank {
                                 // accounts lt hash is *enabled* so use lattice-based verification
                                 let accounts_db = &accounts_.accounts_db;
                                 let (calculated_accounts_lt_hash, duration) =
-                                    meas_dur!(accounts_db.thread_pool_hash.install(|| {
+                                    meas_dur!(accounts_db.rayon_pools.hash.install(|| {
                                         accounts_db
                                             .calculate_accounts_lt_hash_at_startup_from_storages(
                                                 snapshot_storages.0.as_slice(),

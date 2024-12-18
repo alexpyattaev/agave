@@ -21,7 +21,7 @@ use {
             atomic::{AtomicBool, AtomicUsize, Ordering},
             Arc,
         },
-        thread::{self, spawn, JoinHandle, Result},
+        thread::{self, spawn, Builder, JoinHandle, Result},
         time::{Duration, Instant, SystemTime},
     },
 };
@@ -151,18 +151,21 @@ fn main() -> Result<()> {
 
             let (s_reader, r_reader) = unbounded();
             read_channels.push(r_reader);
-            read_threads.push(receiver(
-                "solRcvrBenStrmr".to_string(),
-                Arc::new(read),
-                exit.clone(),
-                s_reader,
-                recycler.clone(),
-                stats.clone(),
-                COALESCE_TIME, // coalesce
-                true,          // use_pinned_memory
-                None,          // in_vote_only_mode
-                false,         // is_staked_service
-            ));
+            let rx = Builder::new()
+                .name("solRcvrBenStrmr".to_string())
+                .spawn(receiver(
+                    Arc::new(read),
+                    exit.clone(),
+                    s_reader,
+                    recycler.clone(),
+                    stats.clone(),
+                    COALESCE_TIME, // coalesce
+                    true,          // use_pinned_memory
+                    None,          // in_vote_only_mode
+                    false,         // is_staked_service
+                ))
+                .unwrap();
+            read_threads.push(rx)
         }
 
         let received_size = Arc::new(AtomicUsize::new(0));

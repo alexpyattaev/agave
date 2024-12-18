@@ -2,6 +2,7 @@
 
 use {
     crate::{cluster_info::ClusterInfo, contact_info::ContactInfo},
+    agave_thread_manager::{JoinHandle, ThreadManager},
     crossbeam_channel::{unbounded, Sender},
     rand::{thread_rng, Rng},
     solana_client::{connection_cache::ConnectionCache, tpu_client::TpuClientWrapper},
@@ -25,7 +26,7 @@ use {
             atomic::{AtomicBool, Ordering},
             Arc, RwLock,
         },
-        thread::{self, sleep, JoinHandle},
+        thread::{self, sleep},
         time::{Duration, Instant},
     },
 };
@@ -43,6 +44,7 @@ impl GossipService {
         should_check_duplicate_instance: bool,
         stats_reporter_sender: Option<Sender<Box<dyn FnOnce() + Send>>>,
         exit: Arc<AtomicBool>,
+        thread_manager: &ThreadManager,
     ) -> Self {
         let (request_sender, request_receiver) = unbounded();
         let gossip_socket = Arc::new(gossip_socket);
@@ -52,23 +54,37 @@ impl GossipService {
             gossip_socket.local_addr().unwrap()
         );
         let socket_addr_space = *cluster_info.socket_addr_space();
-        let t_receiver = streamer::receiver(
-            "solRcvrGossip".to_string(),
-            gossip_socket.clone(),
-            exit.clone(),
-            request_sender,
-            Recycler::default(),
-            Arc::new(StreamerReceiveStats::new("gossip_receiver")),
-            Duration::from_millis(1), // coalesce
-            false,
-            None,
-            false,
-        );
+        let native_thread_builder = thread_manager
+            .get_native("solGossip")
+            .expect("Gossip runtime not configured");
+
+        let t_receiver = {
+            let rx = streamer::receiver(
+                gossip_socket.clone(),
+                exit.clone(),
+                request_sender,
+                Recycler::default(),
+                Arc::new(StreamerReceiveStats::new("gossip_receiver")),
+                Duration::from_millis(1), // coalesce
+                false,
+                None,
+                false,
+            );
+            native_thread_builder
+                .spawn_named("solRcvrGossip".to_owned(), rx)
+                .unwrap()
+        };
+
         let (consume_sender, listen_receiver) = unbounded();
         let t_socket_consume = cluster_info.clone().start_socket_consume_thread(
             request_receiver,
             consume_sender,
             exit.clone(),
+            thread_manager
+                .get_rayon("solGossipCons")
+                .expect("Gossip consume pool missing")
+                .clone(),
+            native_thread_builder,
         );
         let (response_sender, response_receiver) = unbounded();
         let t_listen = cluster_info.clone().listen(
@@ -77,13 +93,26 @@ impl GossipService {
             response_sender.clone(),
             should_check_duplicate_instance,
             exit.clone(),
+            thread_manager
+                .get_rayon("solGossipWork")
+                .expect("Gossip rayon pool Work missing")
+                .clone(),
+            native_thread_builder,
         );
-        let t_gossip =
-            cluster_info
-                .clone()
-                .gossip(bank_forks, response_sender, gossip_validators, exit);
+        let t_gossip = cluster_info.clone().gossip(
+            bank_forks,
+            response_sender,
+            gossip_validators,
+            exit,
+            thread_manager
+                .get_rayon("solRunGossip")
+                .expect("Gossip runner pool missing")
+                .clone(),
+            native_thread_builder,
+        );
         let t_responder = streamer::responder(
             "Gossip",
+            &native_thread_builder,
             gossip_socket,
             response_receiver,
             socket_addr_space,
@@ -112,6 +141,7 @@ pub fn discover_cluster(
     entrypoint: &SocketAddr,
     num_nodes: usize,
     socket_addr_space: SocketAddrSpace,
+    thread_manager: &ThreadManager,
 ) -> std::io::Result<Vec<ContactInfo>> {
     const DISCOVER_CLUSTER_TIMEOUT: Duration = Duration::from_secs(120);
     let (_all_peers, validators) = discover(
@@ -124,6 +154,7 @@ pub fn discover_cluster(
         None, // my_gossip_addr
         0,    // my_shred_version
         socket_addr_space,
+        thread_manager,
     )?;
     Ok(validators)
 }
@@ -138,6 +169,7 @@ pub fn discover(
     my_gossip_addr: Option<&SocketAddr>,
     my_shred_version: u16,
     socket_addr_space: SocketAddrSpace,
+    thread_manager: &ThreadManager,
 ) -> std::io::Result<(
     Vec<ContactInfo>, // all gossip peers
     Vec<ContactInfo>, // tvu peers (validators)
@@ -152,6 +184,7 @@ pub fn discover(
         my_shred_version,
         true, // should_check_duplicate_instance,
         socket_addr_space,
+        thread_manager,
     );
 
     let id = spy_ref.id();
@@ -319,6 +352,7 @@ pub fn make_gossip_node(
     shred_version: u16,
     should_check_duplicate_instance: bool,
     socket_addr_space: SocketAddrSpace,
+    thread_manager: &ThreadManager,
 ) -> (GossipService, Option<TcpListener>, Arc<ClusterInfo>) {
     let (node, gossip_socket, ip_echo) = if let Some(gossip_addr) = gossip_addr {
         ClusterInfo::gossip_node(keypair.pubkey(), gossip_addr, shred_version)
@@ -338,6 +372,7 @@ pub fn make_gossip_node(
         should_check_duplicate_instance,
         None,
         exit,
+        thread_manager,
     );
     (gossip_service, ip_echo, cluster_info)
 }
@@ -350,6 +385,7 @@ mod tests {
             cluster_info::{ClusterInfo, Node},
             contact_info::ContactInfo,
         },
+        agave_thread_manager::ThreadManagerConfig,
         std::sync::{atomic::AtomicBool, Arc},
     };
 
@@ -365,6 +401,7 @@ mod tests {
             SocketAddrSpace::Unspecified,
         );
         let c = Arc::new(cluster_info);
+        let thread_manager = ThreadManager::new(ThreadManagerConfig::default()).unwrap();
         let d = GossipService::new(
             &c,
             None,
@@ -373,6 +410,7 @@ mod tests {
             true, // should_check_duplicate_instance
             None,
             exit.clone(),
+            &thread_manager,
         );
         exit.store(true, Ordering::Relaxed);
         d.join().unwrap();

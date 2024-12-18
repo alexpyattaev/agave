@@ -16,6 +16,7 @@ use {
         },
         result::{Error, Result},
     },
+    agave_thread_manager::NativeThreadRuntime,
     bytes::Bytes,
     crossbeam_channel::{unbounded, Receiver, RecvTimeoutError, Sender},
     rayon::{prelude::*, ThreadPool},
@@ -390,6 +391,7 @@ impl WindowService {
         dumped_slots_receiver: DumpedSlotsReceiver,
         popular_pruned_forks_sender: PopularPrunedForksSender,
         outstanding_repair_requests: Arc<RwLock<OutstandingShredRepairs>>,
+        thread_builder: &NativeThreadRuntime,
     ) -> WindowService {
         let cluster_info = repair_info.cluster_info.clone();
         let bank_forks = repair_info.bank_forks.clone();
@@ -412,6 +414,7 @@ impl WindowService {
             ancestor_hashes_replay_update_receiver,
             dumped_slots_receiver,
             popular_pruned_forks_sender,
+            thread_builder,
         );
 
         let (duplicate_sender, duplicate_receiver) = unbounded();

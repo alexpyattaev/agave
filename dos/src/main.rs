@@ -42,6 +42,7 @@
 #![allow(clippy::arithmetic_side_effects)]
 #![allow(deprecated)]
 use {
+    agave_thread_manager::{ThreadManager, ThreadManagerConfig},
     crossbeam_channel::{select, tick, unbounded, Receiver, Sender},
     itertools::Itertools,
     log::*,
@@ -762,6 +763,7 @@ fn main() {
     solana_logger::setup_with_default_filter();
     let cmd_params = build_cli_parameters();
 
+    let thread_manager = ThreadManager::new(ThreadManagerConfig::default()).unwrap();
     let (nodes, client) = if !cmd_params.skip_gossip {
         info!("Finding cluster entry: {:?}", cmd_params.entrypoint_addr);
         let socket_addr_space = SocketAddrSpace::new(cmd_params.allow_private_addr);
@@ -775,6 +777,7 @@ fn main() {
             None,                              // my_gossip_addr
             0,                                 // my_shred_version
             socket_addr_space,
+            &thread_manager,
         )
         .unwrap_or_else(|err| {
             eprintln!(

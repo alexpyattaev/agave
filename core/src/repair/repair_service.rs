@@ -20,6 +20,7 @@ use {
             },
         },
     },
+    agave_thread_manager::{JoinHandle, NativeThreadRuntime},
     bytes::Bytes,
     crossbeam_channel::{Receiver as CrossbeamReceiver, Sender as CrossbeamSender},
     lru::LruCache,
@@ -49,7 +50,7 @@ use {
             atomic::{AtomicBool, Ordering},
             Arc, RwLock,
         },
-        thread::{self, sleep, Builder, JoinHandle},
+        thread::{self, sleep},
         time::{Duration, Instant},
     },
     tokio::sync::mpsc::Sender as AsyncSender,
@@ -263,14 +264,14 @@ impl RepairService {
         ancestor_hashes_replay_update_receiver: AncestorHashesReplayUpdateReceiver,
         dumped_slots_receiver: DumpedSlotsReceiver,
         popular_pruned_forks_sender: PopularPrunedForksSender,
+        thread_builder: &NativeThreadRuntime,
     ) -> Self {
         let t_repair = {
             let blockstore = blockstore.clone();
             let exit = exit.clone();
             let repair_info = repair_info.clone();
-            Builder::new()
-                .name("solRepairSvc".to_string())
-                .spawn(move || {
+            thread_builder
+                .spawn_named("solRepairSvc".to_string(), move || {
                     Self::run(
                         &blockstore,
                         &exit,
@@ -294,6 +295,7 @@ impl RepairService {
             ancestor_hashes_response_quic_receiver,
             repair_info,
             ancestor_hashes_replay_update_receiver,
+            thread_builder,
         );
 
         RepairService {

@@ -7,6 +7,7 @@
 
 use {
     crate::sigverify,
+    agave_thread_manager::{JoinHandle, NativeThreadRuntime},
     core::time::Duration,
     crossbeam_channel::{Receiver, RecvTimeoutError, SendError},
     itertools::Itertools,
@@ -20,10 +21,7 @@ use {
     },
     solana_sdk::timing,
     solana_streamer::streamer::{self, StreamerError},
-    std::{
-        thread::{self, Builder, JoinHandle},
-        time::Instant,
-    },
+    std::time::Instant,
     thiserror::Error,
 };
 
@@ -234,11 +232,10 @@ impl SigVerifyStage {
     pub fn new<T: SigVerifier + 'static + Send>(
         packet_receiver: Receiver<PacketBatch>,
         verifier: T,
-        thread_name: &'static str,
+        runtime: &NativeThreadRuntime,
         metrics_name: &'static str,
     ) -> Self {
-        let thread_hdl =
-            Self::verifier_service(packet_receiver, verifier, thread_name, metrics_name);
+        let thread_hdl = Self::verifier_service(packet_receiver, verifier, runtime, metrics_name);
         Self { thread_hdl }
     }
 
@@ -381,7 +378,7 @@ impl SigVerifyStage {
     fn verifier_service<T: SigVerifier + 'static + Send>(
         packet_receiver: Receiver<PacketBatch>,
         mut verifier: T,
-        thread_name: &'static str,
+        runtime: &NativeThreadRuntime,
         metrics_name: &'static str,
     ) -> JoinHandle<()> {
         let mut stats = SigVerifierStats::default();
@@ -389,8 +386,7 @@ impl SigVerifyStage {
         const MAX_DEDUPER_AGE: Duration = Duration::from_secs(2);
         const DEDUPER_FALSE_POSITIVE_RATE: f64 = 0.001;
         const DEDUPER_NUM_BITS: u64 = 63_999_979;
-        Builder::new()
-            .name(thread_name.to_string())
+        runtime
             .spawn(move || {
                 let mut rng = rand::thread_rng();
                 let mut deduper = Deduper::<2, [u8]>::new(&mut rng, DEDUPER_NUM_BITS);
@@ -424,7 +420,7 @@ impl SigVerifyStage {
             .unwrap()
     }
 
-    pub fn join(self) -> thread::Result<()> {
+    pub fn join(self) -> std::thread::Result<()> {
         self.thread_hdl.join()
     }
 }
@@ -434,6 +430,7 @@ mod tests {
     use {
         super::*,
         crate::{banking_trace::BankingTracer, sigverify::TransactionSigVerifier},
+        agave_thread_manager::NativeConfig,
         crossbeam_channel::unbounded,
         solana_perf::{
             packet::{to_packet_batches, Packet},
@@ -499,7 +496,8 @@ mod tests {
         let (packet_s, packet_r) = unbounded();
         let (verified_s, verified_r) = BankingTracer::channel_for_test();
         let verifier = TransactionSigVerifier::new(verified_s);
-        let stage = SigVerifyStage::new(packet_r, verifier, "solSigVerTest", "test");
+        let runtime = NativeThreadRuntime::new("solSigVerTest".to_owned(), NativeConfig::default());
+        let stage = SigVerifyStage::new(packet_r, verifier, &runtime, "test");
 
         let now = Instant::now();
         let packets_per_batch = 128;

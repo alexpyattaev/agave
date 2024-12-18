@@ -1,3 +1,4 @@
+use agave_thread_manager::ThreadManager;
 /// Cluster independent integration tests
 ///
 /// All tests must start from an entry point and a funding keypair and
@@ -67,11 +68,13 @@ pub fn spend_and_verify_all_nodes<S: ::std::hash::BuildHasher + Sync + Send>(
     ignore_nodes: HashSet<Pubkey, S>,
     socket_addr_space: SocketAddrSpace,
     connection_cache: &Arc<ConnectionCache>,
+    thread_manager: &ThreadManager,
 ) {
     let cluster_nodes = discover_cluster(
         &entry_point_info.gossip().unwrap(),
         nodes,
         socket_addr_space,
+        thread_manager,
     )
     .unwrap();
     assert!(cluster_nodes.len() >= nodes);
@@ -235,6 +238,7 @@ pub fn kill_entry_and_spend_and_verify_rest(
     nodes: usize,
     slot_millis: u64,
     socket_addr_space: SocketAddrSpace,
+    thread_manager: &ThreadManager,
 ) {
     info!("kill_entry_and_spend_and_verify_rest...");
 
@@ -243,6 +247,7 @@ pub fn kill_entry_and_spend_and_verify_rest(
         &entry_point_info.gossip().unwrap(),
         nodes,
         socket_addr_space,
+        thread_manager,
     )
     .unwrap();
     assert!(cluster_nodes.len() >= nodes);
@@ -549,6 +554,7 @@ pub fn start_gossip_voter(
     num_expected_peers: usize,
     refresh_ms: u64,
     max_votes_to_refresh: usize,
+    thread_manager: &ThreadManager,
 ) -> GossipVoter {
     let exit = Arc::new(AtomicBool::new(false));
     let (gossip_service, tcp_listener, cluster_info) = gossip_service::make_gossip_node(
@@ -561,6 +567,7 @@ pub fn start_gossip_voter(
         0,
         false,
         SocketAddrSpace::Unspecified,
+        thread_manager,
     );
 
     // Wait for peer discovery

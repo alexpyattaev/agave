@@ -5,6 +5,7 @@ use {
         integration_tests::DEFAULT_NODE_STAKE,
         validator_configs::*,
     },
+    agave_thread_manager::{ThreadManager, ThreadManagerConfig},
     itertools::izip,
     log::*,
     solana_accounts_db::utils::create_accounts_run_and_snapshot_dirs,
@@ -150,6 +151,7 @@ pub struct LocalCluster {
     pub validators: HashMap<Pubkey, ClusterValidatorInfo>,
     pub genesis_config: GenesisConfig,
     pub connection_cache: Arc<ConnectionCache>,
+    pub thread_manager: ThreadManager,
 }
 
 impl LocalCluster {
@@ -193,6 +195,7 @@ impl LocalCluster {
     pub fn new(config: &mut ClusterConfig, socket_addr_space: SocketAddrSpace) -> Self {
         assert_eq!(config.validator_configs.len(), config.node_stakes.len());
 
+        let thread_manager = ThreadManager::new(ThreadManagerConfig::default()).unwrap();
         let connection_cache = if config.tpu_use_quic {
             let client_keypair = Keypair::new();
             let stake = DEFAULT_NODE_STAKE;
@@ -375,6 +378,7 @@ impl LocalCluster {
             validators,
             genesis_config,
             connection_cache,
+            thread_manager: thread_manager.clone(),
         };
 
         let node_pubkey_to_vote_key: HashMap<Pubkey, Arc<Keypair>> = keys_in_genesis
@@ -416,6 +420,7 @@ impl LocalCluster {
             &cluster.entry_point_info.gossip().unwrap(),
             config.node_stakes.len() + config.num_listeners as usize,
             socket_addr_space,
+            &thread_manager,
         )
         .unwrap();
 
@@ -423,6 +428,7 @@ impl LocalCluster {
             &cluster.entry_point_info.gossip().unwrap(),
             config.node_stakes.len(),
             socket_addr_space,
+            &thread_manager,
         )
         .unwrap();
 
@@ -612,6 +618,7 @@ impl LocalCluster {
             &alive_node_contact_infos[0].gossip().unwrap(),
             alive_node_contact_infos.len(),
             socket_addr_space,
+            &self.thread_manager,
         )
         .unwrap();
         info!("{} discovered {} nodes", test_name, cluster_nodes.len());
@@ -672,6 +679,7 @@ impl LocalCluster {
             &alive_node_contact_infos[0].gossip().unwrap(),
             alive_node_contact_infos.len(),
             socket_addr_space,
+            &self.thread_manager,
         )
         .unwrap();
         info!("{} discovered {} nodes", test_name, cluster_nodes.len());

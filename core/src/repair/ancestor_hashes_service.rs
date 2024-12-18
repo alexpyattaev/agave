@@ -15,6 +15,7 @@ use {
         replay_stage::DUPLICATE_THRESHOLD,
         shred_fetch_stage::receive_quic_datagrams,
     },
+    agave_thread_manager::{JoinHandle, NativeThreadRuntime},
     bytes::Bytes,
     crossbeam_channel::{unbounded, Receiver, RecvTimeoutError, Sender},
     dashmap::{mapref::entry::Entry::Occupied, DashMap},
@@ -42,7 +43,7 @@ use {
             atomic::{AtomicBool, Ordering},
             Arc, RwLock,
         },
-        thread::{self, sleep, Builder, JoinHandle},
+        thread::{self, sleep},
         time::{Duration, Instant},
     },
     tokio::sync::mpsc::Sender as AsyncSender,
@@ -155,29 +156,33 @@ impl AncestorHashesService {
         ancestor_hashes_response_quic_receiver: Receiver<(Pubkey, SocketAddr, Bytes)>,
         repair_info: RepairInfo,
         ancestor_hashes_replay_update_receiver: AncestorHashesReplayUpdateReceiver,
+        thread_builder: &NativeThreadRuntime,
     ) -> Self {
         let outstanding_requests = Arc::<RwLock<OutstandingAncestorHashesRepairs>>::default();
         let (response_sender, response_receiver) = unbounded();
-        let t_receiver = streamer::receiver(
-            "solRcvrAncHash".to_string(),
-            ancestor_hashes_request_socket.clone(),
-            exit.clone(),
-            response_sender.clone(),
-            Recycler::default(),
-            Arc::new(StreamerReceiveStats::new(
-                "ancestor_hashes_response_receiver",
-            )),
-            Duration::from_millis(1), // coalesce
-            false,                    // use_pinned_memory
-            None,                     // in_vote_only_mode
-            false,                    // is_staked_service
-        );
+        let t_receiver = {
+            let rx = streamer::receiver(
+                ancestor_hashes_request_socket.clone(),
+                exit.clone(),
+                response_sender.clone(),
+                Recycler::default(),
+                Arc::new(StreamerReceiveStats::new(
+                    "ancestor_hashes_response_receiver",
+                )),
+                Duration::from_millis(1), // coalesce
+                false,                    // use_pinned_memory
+                None,                     // in_vote_only_mode
+                false,                    // is_staked_service
+            );
+            thread_builder
+                .spawn_named("solRcvrAncHash".to_string(), rx)
+                .unwrap()
+        };
 
         let t_receiver_quic = {
             let exit = exit.clone();
-            Builder::new()
-                .name(String::from("solAncHashQuic"))
-                .spawn(|| {
+            thread_builder
+                .spawn_named(String::from("solAncHashQuic"), || {
                     receive_quic_datagrams(
                         ancestor_hashes_response_quic_receiver,
                         PacketFlags::REPAIR,
@@ -203,6 +208,7 @@ impl AncestorHashesService {
             retryable_slots_sender,
             repair_info.cluster_info.clone(),
             ancestor_hashes_request_socket.clone(),
+            thread_builder,
         );
 
         // Generate ancestor requests for dead slots that are repairable
@@ -215,6 +221,7 @@ impl AncestorHashesService {
             exit,
             ancestor_hashes_replay_update_receiver,
             retryable_slots_receiver,
+            thread_builder,
         );
         Self {
             thread_hdls: vec![
@@ -241,10 +248,10 @@ impl AncestorHashesService {
         retryable_slots_sender: RetryableSlotsSender,
         cluster_info: Arc<ClusterInfo>,
         ancestor_socket: Arc<UdpSocket>,
+        thread_builder: &NativeThreadRuntime,
     ) -> JoinHandle<()> {
-        Builder::new()
-            .name("solAncHashesSvc".to_string())
-            .spawn(move || {
+        thread_builder
+            .spawn_named("solAncHashesSvc".to_string(), move || {
                 let mut last_stats_report = Instant::now();
                 let mut stats = AncestorHashesResponsesStats::default();
                 let mut packet_threshold = DynamicPacketToProcessThreshold::default();
@@ -588,6 +595,7 @@ impl AncestorHashesService {
         exit: Arc<AtomicBool>,
         ancestor_hashes_replay_update_receiver: AncestorHashesReplayUpdateReceiver,
         retryable_slots_receiver: RetryableSlotsReceiver,
+        thread_builder: &NativeThreadRuntime,
     ) -> JoinHandle<()> {
         let serve_repair = ServeRepair::new(
             repair_info.cluster_info.clone(),
@@ -613,9 +621,8 @@ impl AncestorHashesService {
         // Sliding window that limits the number of slots repaired via AncestorRepair
         // to MAX_ANCESTOR_HASHES_SLOT_REQUESTS_PER_SECOND/second
         let mut request_throttle = vec![];
-        Builder::new()
-            .name("solManAncReqs".to_string())
-            .spawn(move || loop {
+        thread_builder
+            .spawn_named("solManAncReqs".to_string(), move || loop {
                 if exit.load(Ordering::Relaxed) {
                     return;
                 }
@@ -906,6 +913,7 @@ mod test {
             },
             vote_simulator::VoteSimulator,
         },
+        agave_thread_manager::NativeConfig,
         solana_gossip::{
             cluster_info::{ClusterInfo, Node},
             contact_info::{ContactInfo, Protocol},
@@ -1226,7 +1234,7 @@ mod test {
     }
 
     struct ResponderThreads {
-        t_request_receiver: JoinHandle<()>,
+        t_request_receiver: agave_thread_manager::JoinHandle<()>,
         t_listen: JoinHandle<()>,
         t_packet_adapter: JoinHandle<()>,
         exit: Arc<AtomicBool>,
@@ -1284,22 +1292,27 @@ mod test {
                 correct_bank_hashes.insert(duplicate_confirmed_slot, hash);
                 blockstore.insert_bank_hash(duplicate_confirmed_slot, hash, true);
             }
-
+            let thread_builder =
+                NativeThreadRuntime::new("Test".to_owned(), NativeConfig::default());
             // Set up repair request receiver threads
-            let t_request_receiver = streamer::receiver(
-                "solRcvrTest".to_string(),
-                Arc::new(responder_node.sockets.serve_repair),
-                exit.clone(),
-                requests_sender,
-                Recycler::default(),
-                Arc::new(StreamerReceiveStats::new("repair_request_receiver")),
-                Duration::from_millis(1), // coalesce
-                false,
-                None,
-                false,
-            );
+            let t_request_receiver = thread_builder
+                .spawn_named(
+                    "solRcvrTest".to_string(),
+                    streamer::receiver(
+                        Arc::new(responder_node.sockets.serve_repair),
+                        exit.clone(),
+                        requests_sender,
+                        Recycler::default(),
+                        Arc::new(StreamerReceiveStats::new("repair_request_receiver")),
+                        Duration::from_millis(1), // coalesce
+                        false,
+                        None,
+                        false,
+                    ),
+                )
+                .unwrap();
             let (remote_request_sender, remote_request_receiver) = unbounded();
-            let t_packet_adapter = Builder::new()
+            let t_packet_adapter = thread_builder
                 .spawn(|| adapt_repair_requests_packets(requests_receiver, remote_request_sender))
                 .unwrap();
             let (repair_response_quic_sender, _) = tokio::sync::mpsc::channel(/*buffer:*/ 128);
@@ -1309,6 +1322,7 @@ mod test {
                 response_sender,
                 repair_response_quic_sender,
                 exit.clone(),
+                &thread_builder,
             );
 
             Self {

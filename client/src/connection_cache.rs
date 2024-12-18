@@ -231,13 +231,13 @@ mod tests {
         let (sender2, _receiver2) = unbounded();
 
         let staked_nodes = Arc::new(RwLock::new(StakedNodes::default()));
-
+        let runtime = agave_thread_manager::TokioRuntime::new_for_tests();
         let SpawnServerResult {
             endpoints: mut response_recv_endpoints,
             join_handle: response_recv_thread,
             key_updater: _,
         } = solana_streamer::quic::spawn_server(
-            "solQuicTest",
+            &runtime,
             "quic_streamer_test",
             response_recv_socket,
             &keypair2,

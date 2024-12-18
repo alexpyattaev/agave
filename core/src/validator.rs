@@ -30,7 +30,7 @@ use {
         tpu::{Tpu, TpuSockets, DEFAULT_TPU_COALESCE},
         tvu::{Tvu, TvuConfig, TvuSockets},
     },
-    agave_thread_manager::{RuntimeManagerConfig, ThreadManager},
+    agave_thread_manager::{ThreadManager, ThreadManagerConfig},
     anyhow::{anyhow, Context, Result},
     crossbeam_channel::{bounded, unbounded, Receiver},
     lazy_static::lazy_static,
@@ -519,7 +519,7 @@ pub struct Validator {
     pub bank_forks: Arc<RwLock<BankForks>>,
     pub blockstore: Arc<Blockstore>,
     geyser_plugin_service: Option<GeyserPluginService>,
-    thread_manager: agave_thread_manager::ThreadManager,
+    pub thread_manager: ThreadManager,
     blockstore_metric_report_service: BlockstoreMetricReportService,
     accounts_background_service: AccountsBackgroundService,
     accounts_hash_verifier: AccountsHashVerifier,
@@ -571,7 +571,7 @@ impl Validator {
             buf
         };
 
-        let cfg: RuntimeManagerConfig = toml::from_str(&confdata)?;
+        let cfg: ThreadManagerConfig = toml::from_str(&confdata)?;
         let thread_manager = ThreadManager::new(cfg)?;
 
         {
@@ -581,18 +581,12 @@ impl Validator {
             solana_quic_client::quic_client::init_runtime(runtime.tokio.handle().clone());
         }
 
-        /*let rayon_global = thread_manager
-        .get_rayon("solRayonGlob")
-        .expect("solRayonGlob runtime config not found");*/
         // Initialize the global rayon pool first to ensure the value in config
         // is honored. Otherwise, some code accessing the global pool could
         // cause it to get initialized with Rayon's default (not ours)
         if rayon::ThreadPoolBuilder::new()
             .thread_name(|i| format!("solRayonGlob{i:02}"))
-            .num_threads(config.rayon_global_threads.get())
-            .start_handler(|_i| {
-                dbg!("OhNo!");
-            })
+            .num_threads(1)
             .build_global()
             .is_err()
         {
@@ -766,28 +760,7 @@ impl Validator {
         let poh_timing_report_service =
             PohTimingReportService::new(poh_timing_point_receiver, exit.clone());
 
-        let (
-            bank_forks,
-            blockstore,
-            original_blockstore_root,
-            ledger_signal_receiver,
-            leader_schedule_cache,
-            starting_snapshot_hashes,
-            TransactionHistoryServices {
-                transaction_status_sender,
-                transaction_status_service,
-                max_complete_transaction_status_slot,
-                rewards_recorder_sender,
-                rewards_recorder_service,
-                max_complete_rewards_slot,
-                cache_block_meta_sender,
-                cache_block_meta_service,
-            },
-            blockstore_process_options,
-            blockstore_root_scan,
-            pruned_banks_receiver,
-            entry_notifier_service,
-        ) = load_blockstore(
+        let ledger = LedgerLoader::load(
             config,
             ledger_path,
             &genesis_config,
@@ -799,6 +772,30 @@ impl Validator {
             Some(poh_timing_point_sender.clone()),
         )
         .map_err(ValidatorError::Other)?;
+
+        let LedgerLoader {
+            bank_forks,
+            blockstore,
+            original_blockstore_root,
+            ledger_signal_receiver,
+            leader_schedule_cache,
+            starting_snapshot_hashes,
+            transaction_history_services:
+                TransactionHistoryServices {
+                    transaction_status_sender,
+                    transaction_status_service,
+                    max_complete_transaction_status_slot,
+                    rewards_recorder_sender,
+                    rewards_recorder_service,
+                    max_complete_rewards_slot,
+                    cache_block_meta_sender,
+                    cache_block_meta_service,
+                },
+            blockstore_process_options,
+            blockstore_root_scan,
+            pruned_banks_receiver,
+            entry_notifier_service,
+        } = ledger;
 
         if !config.no_poh_speed_test {
             check_poh_speed(&bank_forks.read().unwrap().root_bank(), None)?;
@@ -1257,6 +1254,7 @@ impl Validator {
             should_check_duplicate_instance,
             Some(stats_reporter_sender.clone()),
             exit.clone(),
+            &thread_manager,
         );
         let serve_repair = ServeRepair::new(
             cluster_info.clone(),
@@ -1408,6 +1406,9 @@ impl Validator {
             socket_addr_space,
             stats_reporter_sender,
             exit.clone(),
+            thread_manager
+                .get_native("solRepair")
+                .expect("Repair thread pool not configured"),
         );
 
         let in_wen_restart = config.wen_restart_proto_path.is_some() && !waited_for_supermajority;
@@ -1498,6 +1499,7 @@ impl Validator {
             wen_restart_repair_slots.clone(),
             slot_status_notifier,
             vote_connection_cache,
+            &thread_manager,
         )
         .map_err(ValidatorError::Other)?;
 
@@ -1774,7 +1776,6 @@ impl Validator {
             self.thread_manager
                 .get_tokio(RUNTIME_NAME_TURBINE)
                 .unwrap()
-                .tokio
                 .block_on(turbine_quic_endpoint_join_handle)
                 .unwrap();
         }
@@ -1960,133 +1961,133 @@ fn load_genesis(
     Ok(genesis_config)
 }
 
-#[allow(clippy::type_complexity)]
-fn load_blockstore(
-    config: &ValidatorConfig,
-    ledger_path: &Path,
-    genesis_config: &GenesisConfig,
-    exit: Arc<AtomicBool>,
-    start_progress: &Arc<RwLock<ValidatorStartProgress>>,
-    accounts_update_notifier: Option<AccountsUpdateNotifier>,
-    transaction_notifier: Option<TransactionNotifierArc>,
-    entry_notifier: Option<EntryNotifierArc>,
-    poh_timing_point_sender: Option<PohTimingSender>,
-) -> Result<
-    (
-        Arc<RwLock<BankForks>>,
-        Arc<Blockstore>,
-        Slot,
-        Receiver<bool>,
-        LeaderScheduleCache,
-        Option<StartingSnapshotHashes>,
-        TransactionHistoryServices,
-        blockstore_processor::ProcessOptions,
-        BlockstoreRootScan,
-        DroppedSlotsReceiver,
-        Option<EntryNotifierService>,
-    ),
-    String,
-> {
-    info!("loading ledger from {:?}...", ledger_path);
-    *start_progress.write().unwrap() = ValidatorStartProgress::LoadingLedger;
+struct LedgerLoader {
+    bank_forks: Arc<RwLock<BankForks>>,
+    blockstore: Arc<Blockstore>,
+    original_blockstore_root: Slot,
+    ledger_signal_receiver: Receiver<bool>,
+    leader_schedule_cache: LeaderScheduleCache,
+    starting_snapshot_hashes: Option<StartingSnapshotHashes>,
+    transaction_history_services: TransactionHistoryServices,
+    blockstore_process_options: blockstore_processor::ProcessOptions,
+    blockstore_root_scan: BlockstoreRootScan,
+    pruned_banks_receiver: DroppedSlotsReceiver,
+    entry_notifier_service: Option<EntryNotifierService>,
+}
+impl LedgerLoader {
+    fn load(
+        config: &ValidatorConfig,
+        ledger_path: &Path,
+        genesis_config: &GenesisConfig,
+        exit: Arc<AtomicBool>,
+        start_progress: &Arc<RwLock<ValidatorStartProgress>>,
+        accounts_update_notifier: Option<AccountsUpdateNotifier>,
+        transaction_notifier: Option<TransactionNotifierArc>,
+        entry_notifier: Option<EntryNotifierArc>,
+        poh_timing_point_sender: Option<PohTimingSender>,
+    ) -> Result<Self, String> {
+        info!("loading ledger from {:?}...", ledger_path);
+        *start_progress.write().unwrap() = ValidatorStartProgress::LoadingLedger;
 
-    let mut blockstore =
-        Blockstore::open_with_options(ledger_path, config.blockstore_options.clone())
-            .map_err(|err| format!("Failed to open Blockstore: {err:?}"))?;
+        let mut blockstore =
+            Blockstore::open_with_options(ledger_path, config.blockstore_options.clone())
+                .map_err(|err| format!("Failed to open Blockstore: {err:?}"))?;
 
-    let (ledger_signal_sender, ledger_signal_receiver) = bounded(MAX_REPLAY_WAKE_UP_SIGNALS);
-    blockstore.add_new_shred_signal(ledger_signal_sender);
+        let (ledger_signal_sender, ledger_signal_receiver) = bounded(MAX_REPLAY_WAKE_UP_SIGNALS);
+        blockstore.add_new_shred_signal(ledger_signal_sender);
 
-    blockstore.shred_timing_point_sender = poh_timing_point_sender;
-    // following boot sequence (esp BankForks) could set root. so stash the original value
-    // of blockstore root away here as soon as possible.
-    let original_blockstore_root = blockstore.max_root();
+        blockstore.shred_timing_point_sender = poh_timing_point_sender;
+        // following boot sequence (esp BankForks) could set root. so stash the original value
+        // of blockstore root away here as soon as possible.
+        let original_blockstore_root = blockstore.max_root();
 
-    let blockstore = Arc::new(blockstore);
-    let blockstore_root_scan = BlockstoreRootScan::new(config, blockstore.clone(), exit.clone());
-    let halt_at_slot = config
-        .halt_at_slot
-        .or_else(|| blockstore.highest_slot().unwrap_or(None));
+        let blockstore = Arc::new(blockstore);
+        let blockstore_root_scan =
+            BlockstoreRootScan::new(config, blockstore.clone(), exit.clone());
+        let halt_at_slot = config
+            .halt_at_slot
+            .or_else(|| blockstore.highest_slot().unwrap_or(None));
 
-    let process_options = blockstore_processor::ProcessOptions {
-        run_verification: config.run_verification,
-        halt_at_slot,
-        new_hard_forks: config.new_hard_forks.clone(),
-        debug_keys: config.debug_keys.clone(),
-        accounts_db_config: config.accounts_db_config.clone(),
-        accounts_db_test_hash_calculation: config.accounts_db_test_hash_calculation,
-        accounts_db_skip_shrink: config.accounts_db_skip_shrink,
-        accounts_db_force_initial_clean: config.accounts_db_force_initial_clean,
-        runtime_config: config.runtime_config.clone(),
-        use_snapshot_archives_at_startup: config.use_snapshot_archives_at_startup,
-        ..blockstore_processor::ProcessOptions::default()
-    };
-
-    let enable_rpc_transaction_history =
-        config.rpc_addrs.is_some() && config.rpc_config.enable_rpc_transaction_history;
-    let is_plugin_transaction_history_required = transaction_notifier.as_ref().is_some();
-    let transaction_history_services =
-        if enable_rpc_transaction_history || is_plugin_transaction_history_required {
-            initialize_rpc_transaction_history_services(
-                blockstore.clone(),
-                exit.clone(),
-                enable_rpc_transaction_history,
-                config.rpc_config.enable_extended_tx_metadata_storage,
-                transaction_notifier,
-            )
-        } else {
-            TransactionHistoryServices::default()
+        let blockstore_process_options = blockstore_processor::ProcessOptions {
+            run_verification: config.run_verification,
+            halt_at_slot,
+            new_hard_forks: config.new_hard_forks.clone(),
+            debug_keys: config.debug_keys.clone(),
+            accounts_db_config: config.accounts_db_config.clone(),
+            accounts_db_test_hash_calculation: config.accounts_db_test_hash_calculation,
+            accounts_db_skip_shrink: config.accounts_db_skip_shrink,
+            accounts_db_force_initial_clean: config.accounts_db_force_initial_clean,
+            runtime_config: config.runtime_config.clone(),
+            use_snapshot_archives_at_startup: config.use_snapshot_archives_at_startup,
+            ..blockstore_processor::ProcessOptions::default()
         };
 
-    let entry_notifier_service = entry_notifier
-        .map(|entry_notifier| EntryNotifierService::new(entry_notifier, exit.clone()));
+        let enable_rpc_transaction_history =
+            config.rpc_addrs.is_some() && config.rpc_config.enable_rpc_transaction_history;
+        let is_plugin_transaction_history_required = transaction_notifier.as_ref().is_some();
+        let transaction_history_services =
+            if enable_rpc_transaction_history || is_plugin_transaction_history_required {
+                initialize_rpc_transaction_history_services(
+                    blockstore.clone(),
+                    exit.clone(),
+                    enable_rpc_transaction_history,
+                    config.rpc_config.enable_extended_tx_metadata_storage,
+                    transaction_notifier,
+                )
+            } else {
+                TransactionHistoryServices::default()
+            };
 
-    let (bank_forks, mut leader_schedule_cache, starting_snapshot_hashes) =
-        bank_forks_utils::load_bank_forks(
-            genesis_config,
-            &blockstore,
-            config.account_paths.clone(),
-            Some(&config.snapshot_config),
-            &process_options,
-            transaction_history_services
-                .cache_block_meta_sender
-                .as_ref(),
-            entry_notifier_service
-                .as_ref()
-                .map(|service| service.sender()),
-            accounts_update_notifier,
-            exit,
-        )
-        .map_err(|err| err.to_string())?;
+        let entry_notifier_service = entry_notifier
+            .map(|entry_notifier| EntryNotifierService::new(entry_notifier, exit.clone()));
 
-    // Before replay starts, set the callbacks in each of the banks in BankForks so that
-    // all dropped banks come through the `pruned_banks_receiver` channel. This way all bank
-    // drop behavior can be safely synchronized with any other ongoing accounts activity like
-    // cache flush, clean, shrink, as long as the same thread performing those activities also
-    // is processing the dropped banks from the `pruned_banks_receiver` channel.
-    let pruned_banks_receiver =
-        AccountsBackgroundService::setup_bank_drop_callback(bank_forks.clone());
+        let (bank_forks, mut leader_schedule_cache, starting_snapshot_hashes) =
+            bank_forks_utils::load_bank_forks(
+                genesis_config,
+                &blockstore,
+                config.account_paths.clone(),
+                Some(&config.snapshot_config),
+                &blockstore_process_options,
+                transaction_history_services
+                    .cache_block_meta_sender
+                    .as_ref(),
+                entry_notifier_service
+                    .as_ref()
+                    .map(|service| service.sender()),
+                accounts_update_notifier,
+                exit,
+            )
+            .map_err(|err| err.to_string())?;
 
-    leader_schedule_cache.set_fixed_leader_schedule(config.fixed_leader_schedule.clone());
-    {
-        let mut bank_forks = bank_forks.write().unwrap();
-        bank_forks.set_snapshot_config(Some(config.snapshot_config.clone()));
-        bank_forks.set_accounts_hash_interval_slots(config.accounts_hash_interval_slots);
+        // Before replay starts, set the callbacks in each of the banks in BankForks so that
+        // all dropped banks come through the `pruned_banks_receiver` channel. This way all bank
+        // drop behavior can be safely synchronized with any other ongoing accounts activity like
+        // cache flush, clean, shrink, as long as the same thread performing those activities also
+        // is processing the dropped banks from the `pruned_banks_receiver` channel.
+        let pruned_banks_receiver =
+            AccountsBackgroundService::setup_bank_drop_callback(bank_forks.clone());
+
+        leader_schedule_cache.set_fixed_leader_schedule(config.fixed_leader_schedule.clone());
+        {
+            let mut bank_forks = bank_forks.write().unwrap();
+            bank_forks.set_snapshot_config(Some(config.snapshot_config.clone()));
+            bank_forks.set_accounts_hash_interval_slots(config.accounts_hash_interval_slots);
+        }
+
+        Ok(Self {
+            bank_forks,
+            blockstore,
+            original_blockstore_root,
+            ledger_signal_receiver,
+            leader_schedule_cache,
+            starting_snapshot_hashes,
+            transaction_history_services,
+            blockstore_process_options,
+            blockstore_root_scan,
+            pruned_banks_receiver,
+            entry_notifier_service,
+        })
     }
-
-    Ok((
-        bank_forks,
-        blockstore,
-        original_blockstore_root,
-        ledger_signal_receiver,
-        leader_schedule_cache,
-        starting_snapshot_hashes,
-        transaction_history_services,
-        process_options,
-        blockstore_root_scan,
-        pruned_banks_receiver,
-        entry_notifier_service,
-    ))
 }
 
 pub struct ProcessBlockStore<'a> {

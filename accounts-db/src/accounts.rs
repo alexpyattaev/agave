@@ -734,8 +734,8 @@ mod tests {
         accts.hold_range_in_memory(&range2, false, &test_thread_pool());
     }
 
-    fn test_thread_pool() -> rayon::ThreadPool {
-        crate::accounts_db::make_min_priority_thread_pool()
+    fn test_thread_pool() -> agave_thread_manager::RayonRuntime {
+        crate::accounts_db::RayonPools::default().background
     }
 
     #[test]

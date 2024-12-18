@@ -11,7 +11,7 @@ use {
         account_info::{AccountInfo, StorageLocation},
         accounts::{AccountAddressFilter, Accounts},
         accounts_db::{
-            test_utils::create_test_accounts, AccountFromStorage, AccountsDb,
+            test_utils::create_test_accounts, AccountFromStorage, AccountsDb, RayonPools,
             VerifyAccountsHashAndLamportsConfig, ACCOUNTS_DB_CONFIG_FOR_BENCHMARKS,
         },
         accounts_index::ScanConfig,
@@ -36,8 +36,9 @@ use {
 fn new_accounts_db(account_paths: Vec<PathBuf>) -> AccountsDb {
     AccountsDb::new_with_config(
         account_paths,
-        Some(ACCOUNTS_DB_CONFIG_FOR_BENCHMARKS),
+        ACCOUNTS_DB_CONFIG_FOR_BENCHMARKS,
         None,
+        RayonPools::default(),
         Arc::default(),
     )
 }
@@ -294,7 +295,7 @@ fn bench_dashmap_par_iter(bencher: &mut Bencher) {
     let (accounts, dashmap) = setup_bench_dashmap_iter();
 
     bencher.iter(|| {
-        test::black_box(accounts.accounts_db.thread_pool.install(|| {
+        test::black_box(accounts.accounts_db.rayon_pools.foreground.install(|| {
             dashmap
                 .par_iter()
                 .map(|cached_account| (*cached_account.key(), cached_account.value().1))

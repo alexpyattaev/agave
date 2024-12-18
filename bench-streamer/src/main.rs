@@ -15,7 +15,7 @@ use {
             atomic::{AtomicBool, AtomicUsize, Ordering},
             Arc,
         },
-        thread::{sleep, spawn, JoinHandle, Result},
+        thread::{sleep, spawn, Builder, JoinHandle, Result},
         time::{Duration, SystemTime},
     },
 };
@@ -108,18 +108,21 @@ fn main() -> Result<()> {
         addr = read.local_addr().unwrap();
         let (s_reader, r_reader) = unbounded();
         read_channels.push(r_reader);
-        read_threads.push(receiver(
-            "solRcvrBenStrmr".to_string(),
-            Arc::new(read),
-            exit.clone(),
-            s_reader,
-            recycler.clone(),
-            stats.clone(),
-            Duration::from_millis(1), // coalesce
-            true,
-            None,
-            false,
-        ));
+        let rx = Builder::new()
+            .name("solRcvrBenStrmr".to_string())
+            .spawn(receiver(
+                Arc::new(read),
+                exit.clone(),
+                s_reader,
+                recycler.clone(),
+                stats.clone(),
+                Duration::from_millis(1), // coalesce
+                true,
+                None,
+                false,
+            ))
+            .unwrap();
+        read_threads.push(rx);
     }
 
     let producer_threads: Vec<_> = (0..num_producers)

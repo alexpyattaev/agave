@@ -7,6 +7,7 @@ use {
         sendmmsg::{batch_send, SendPktsError},
         socket::SocketAddrSpace,
     },
+    agave_thread_manager::{JoinHandle, NativeThreadRuntime},
     crossbeam_channel::{Receiver, RecvTimeoutError, SendError, Sender},
     histogram::Histogram,
     itertools::Itertools,
@@ -21,7 +22,7 @@ use {
             atomic::{AtomicBool, AtomicUsize, Ordering},
             Arc,
         },
-        thread::{sleep, Builder, JoinHandle},
+        thread::sleep,
         time::{Duration, Instant},
     },
     thiserror::Error,
@@ -163,7 +164,6 @@ fn recv_loop(
 
 #[allow(clippy::too_many_arguments)]
 pub fn receiver(
-    thread_name: String,
     socket: Arc<UdpSocket>,
     exit: Arc<AtomicBool>,
     packet_batch_sender: PacketBatchSender,
@@ -173,25 +173,22 @@ pub fn receiver(
     use_pinned_memory: bool,
     in_vote_only_mode: Option<Arc<AtomicBool>>,
     is_staked_service: bool,
-) -> JoinHandle<()> {
+) -> impl FnOnce() + 'static + Send {
     let res = socket.set_read_timeout(Some(Duration::new(1, 0)));
     assert!(res.is_ok(), "streamer::receiver set_read_timeout error");
-    Builder::new()
-        .name(thread_name)
-        .spawn(move || {
-            let _ = recv_loop(
-                &socket,
-                &exit,
-                &packet_batch_sender,
-                &recycler,
-                &stats,
-                coalesce,
-                use_pinned_memory,
-                in_vote_only_mode,
-                is_staked_service,
-            );
-        })
-        .unwrap()
+    move || {
+        let _ = recv_loop(
+            &socket,
+            &exit,
+            &packet_batch_sender,
+            &recycler,
+            &stats,
+            coalesce,
+            use_pinned_memory,
+            in_vote_only_mode,
+            is_staked_service,
+        );
+    }
 }
 
 #[derive(Debug, Default)]
@@ -391,14 +388,14 @@ pub fn recv_packet_batches(
 
 pub fn responder(
     name: &'static str,
+    thread_builder: &NativeThreadRuntime,
     sock: Arc<UdpSocket>,
     r: PacketBatchReceiver,
     socket_addr_space: SocketAddrSpace,
     stats_reporter_sender: Option<Sender<Box<dyn FnOnce() + Send>>>,
 ) -> JoinHandle<()> {
-    Builder::new()
-        .name(format!("solRspndr{name}"))
-        .spawn(move || {
+    thread_builder
+        .spawn_named(format!("solRspndr{name}"), move || {
             let mut errors = 0;
             let mut last_error = None;
             let mut last_print = 0;
@@ -444,6 +441,7 @@ mod test {
             packet::{Packet, PacketBatch, PACKET_DATA_SIZE},
             streamer::{receiver, responder},
         },
+        agave_thread_manager::NativeConfig,
         crossbeam_channel::unbounded,
         solana_net_utils::bind_to_localhost,
         solana_perf::recycler::Recycler,
@@ -488,23 +486,26 @@ mod test {
         let exit = Arc::new(AtomicBool::new(false));
         let (s_reader, r_reader) = unbounded();
         let stats = Arc::new(StreamerReceiveStats::new("test"));
-        let t_receiver = receiver(
-            "solRcvrTest".to_string(),
-            Arc::new(read),
-            exit.clone(),
-            s_reader,
-            Recycler::default(),
-            stats.clone(),
-            Duration::from_millis(1), // coalesce
-            true,
-            None,
-            false,
-        );
+        let runtime = NativeThreadRuntime::new("solRcvrTest".to_owned(), NativeConfig::default());
+        let t_receiver = runtime
+            .spawn(receiver(
+                Arc::new(read),
+                exit.clone(),
+                s_reader,
+                Recycler::default(),
+                stats.clone(),
+                Duration::from_millis(1), // coalesce
+                true,
+                None,
+                false,
+            ))
+            .unwrap();
         const NUM_PACKETS: usize = 5;
         let t_responder = {
             let (s_responder, r_responder) = unbounded();
             let t_responder = responder(
                 "SendTest",
+                &runtime,
                 Arc::new(send),
                 r_responder,
                 SocketAddrSpace::Unspecified,

@@ -20,6 +20,7 @@ use {
         warm_quic_cache_service::WarmQuicCacheService,
         window_service::WindowService,
     },
+    agave_thread_manager::ThreadManager,
     bytes::Bytes,
     crossbeam_channel::{unbounded, Receiver, Sender},
     solana_client::connection_cache::ConnectionCache,
@@ -164,6 +165,7 @@ impl Tvu {
         wen_restart_repair_slots: Option<Arc<RwLock<Vec<Slot>>>>,
         slot_status_notifier: Option<SlotStatusNotifier>,
         vote_connection_cache: Arc<ConnectionCache>,
+        thread_manager: &ThreadManager,
     ) -> Result<Self, String> {
         let in_wen_restart = wen_restart_repair_slots.is_some();
 
@@ -190,6 +192,7 @@ impl Tvu {
             cluster_info.clone(),
             turbine_disabled,
             exit.clone(),
+            thread_manager.get_native("solShredFetch").unwrap(),
         );
 
         let (verified_sender, verified_receiver) = unbounded();
@@ -239,6 +242,7 @@ impl Tvu {
                 cluster_slots: cluster_slots.clone(),
                 wen_restart_repair_slots,
             };
+
             WindowService::new(
                 blockstore.clone(),
                 verified_receiver,
@@ -258,6 +262,7 @@ impl Tvu {
                 dumped_slots_receiver,
                 popular_pruned_forks_sender,
                 outstanding_repair_requests,
+                thread_manager.get_native("solRepair").unwrap(),
             )
         };
 
@@ -441,6 +446,7 @@ pub mod tests {
             consensus::tower_storage::FileTowerStorage,
             repair::quic_endpoint::RepairQuicAsyncSenders,
         },
+        agave_thread_manager::ThreadManagerConfig,
         serial_test::serial,
         solana_gossip::cluster_info::{ClusterInfo, Node},
         solana_ledger::{
@@ -525,6 +531,7 @@ pub mod tests {
             )
         };
 
+        let thread_manager = ThreadManager::new(ThreadManagerConfig::default()).unwrap();
         let tvu = Tvu::new(
             &vote_keypair.pubkey(),
             Arc::new(RwLock::new(vec![Arc::new(vote_keypair)])),
@@ -587,6 +594,7 @@ pub mod tests {
             wen_restart_repair_slots,
             None,
             Arc::new(connection_cache),
+            &thread_manager,
         )
         .expect("assume success");
         if enable_wen_restart {

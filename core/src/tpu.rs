@@ -148,6 +148,9 @@ impl Tpu {
             tpu_coalesce,
             Some(bank_forks.read().unwrap().get_vote_only_mode_signal()),
             tpu_enable_udp,
+            thread_manager
+                .get_native("FetchStage")
+                .expect("Fetch stage thread pool missing"),
         );
 
         let staked_nodes_updater_service = StakedNodesUpdaterService::new(
@@ -246,17 +249,18 @@ impl Tpu {
 
         let sigverify_stage = {
             let verifier = TransactionSigVerifier::new(non_vote_sender);
-            SigVerifyStage::new(packet_receiver, verifier, "solSigVerTpu", "tpu-verifier")
+            let runtime = thread_manager
+                .get_native("solSigVerTpu")
+                .expect("Runtime for sigverify not found");
+            SigVerifyStage::new(packet_receiver, verifier, runtime, "tpu-verifier")
         };
 
         let vote_sigverify_stage = {
             let verifier = TransactionSigVerifier::new_reject_non_vote(tpu_vote_sender);
-            SigVerifyStage::new(
-                vote_packet_receiver,
-                verifier,
-                "solSigVerTpuVot",
-                "tpu-vote-verifier",
-            )
+            let runtime = thread_manager
+                .get_native("solSigVerTpuVot")
+                .expect("Runtime for vote sigverify not found");
+            SigVerifyStage::new(vote_packet_receiver, verifier, runtime, "tpu-vote-verifier")
         };
 
         let cluster_info_vote_listener = ClusterInfoVoteListener::new(

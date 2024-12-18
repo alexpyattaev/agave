@@ -590,7 +590,7 @@ pub fn spawn_server_multi(
     quic_server_params: QuicServerParams,
 ) -> Result<SpawnServerResult, QuicServerError> {
     let result = {
-        let _guard = runtime.tokio.enter();
+        let _guard = runtime.enter();
         crate::nonblocking::quic::spawn_server_multi(
             metrics_name,
             sockets,
@@ -601,7 +601,7 @@ pub fn spawn_server_multi(
             quic_server_params,
         )
     }?;
-    let handle = runtime.tokio.handle().clone();
+    let handle = runtime.handle().clone();
     let waiter = std::thread::Builder::new()
         .name("solWaiterThread".to_owned())
         .spawn(move || {
@@ -627,15 +627,6 @@ mod test {
         crossbeam_channel::unbounded, solana_net_utils::bind_to_localhost, std::net::SocketAddr,
     };
 
-    /// Makes test runtime with 2 threads, only for unittests
-    fn rt() -> TokioRuntime {
-        let cfg = agave_thread_manager::TokioConfig {
-            worker_threads: 2,
-            ..Default::default()
-        };
-        agave_thread_manager::TokioRuntime::new("solQuicTest".to_owned(), cfg.clone()).unwrap()
-    }
-
     fn setup_quic_server() -> (
         std::thread::JoinHandle<()>,
         Arc<AtomicBool>,
@@ -648,7 +639,7 @@ mod test {
         let keypair = Keypair::new();
         let server_address = s.local_addr().unwrap();
         let staked_nodes = Arc::new(RwLock::new(StakedNodes::default()));
-        let runtime = rt();
+        let runtime = TokioRuntime::new_for_tests();
         let SpawnServerResult {
             endpoints: _,
             join_handle: t,
@@ -678,10 +669,8 @@ mod test {
     fn test_quic_timeout() {
         solana_logger::setup();
         let (t, exit, receiver, server_address) = setup_quic_server();
-        let runtime = rt();
-        runtime
-            .tokio
-            .block_on(check_timeout(receiver, server_address));
+        let runtime = TokioRuntime::new_for_tests();
+        runtime.block_on(check_timeout(receiver, server_address));
         exit.store(true, Ordering::Relaxed);
         t.join().unwrap();
     }
@@ -691,10 +680,8 @@ mod test {
         solana_logger::setup();
         let (t, exit, _receiver, server_address) = setup_quic_server();
 
-        let runtime = rt();
-        runtime
-            .tokio
-            .block_on(check_block_multiple_connections(server_address));
+        let runtime = TokioRuntime::new_for_tests();
+        runtime.block_on(check_block_multiple_connections(server_address));
         exit.store(true, Ordering::Relaxed);
         t.join().unwrap();
     }
@@ -708,7 +695,7 @@ mod test {
         let keypair = Keypair::new();
         let server_address = s.local_addr().unwrap();
         let staked_nodes = Arc::new(RwLock::new(StakedNodes::default()));
-        let runtime = rt();
+        let runtime = TokioRuntime::new_for_tests();
         let SpawnServerResult {
             endpoints: _,
             join_handle: t,
@@ -728,10 +715,8 @@ mod test {
         )
         .unwrap();
 
-        let runtime = rt();
-        runtime
-            .tokio
-            .block_on(check_multiple_streams(receiver, server_address));
+        let runtime = TokioRuntime::new_for_tests();
+        runtime.block_on(check_multiple_streams(receiver, server_address));
         exit.store(true, Ordering::Relaxed);
         t.join().unwrap();
     }
@@ -741,10 +726,8 @@ mod test {
         solana_logger::setup();
         let (t, exit, receiver, server_address) = setup_quic_server();
 
-        let runtime = rt();
-        runtime
-            .tokio
-            .block_on(check_multiple_writes(receiver, server_address, None));
+        let runtime = TokioRuntime::new_for_tests();
+        runtime.block_on(check_multiple_writes(receiver, server_address, None));
         exit.store(true, Ordering::Relaxed);
         t.join().unwrap();
     }
@@ -758,7 +741,7 @@ mod test {
         let keypair = Keypair::new();
         let server_address = s.local_addr().unwrap();
         let staked_nodes = Arc::new(RwLock::new(StakedNodes::default()));
-        let runtime = rt();
+        let runtime = TokioRuntime::new_for_tests();
         let SpawnServerResult {
             endpoints: _,
             join_handle: t,
@@ -778,10 +761,8 @@ mod test {
         )
         .unwrap();
 
-        let runtime = rt();
-        runtime
-            .tokio
-            .block_on(check_unstaked_node_connect_failure(server_address));
+        let runtime = TokioRuntime::new_for_tests();
+        runtime.block_on(check_unstaked_node_connect_failure(server_address));
         exit.store(true, Ordering::Relaxed);
         t.join().unwrap();
     }
