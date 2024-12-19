@@ -258,7 +258,7 @@ impl Tpu {
         let vote_sigverify_stage = {
             let verifier = TransactionSigVerifier::new_reject_non_vote(tpu_vote_sender);
             let runtime = thread_manager
-                .get_native("solSigVerTpuVot")
+                .get_native("solSigVerTpuVote")
                 .expect("Runtime for vote sigverify not found");
             SigVerifyStage::new(vote_packet_receiver, verifier, runtime, "tpu-vote-verifier")
         };
