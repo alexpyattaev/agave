@@ -359,6 +359,7 @@ impl Tvu {
                 replay_stage_config,
                 replay_senders,
                 replay_receivers,
+                thread_manager,
             )?)
         };
 

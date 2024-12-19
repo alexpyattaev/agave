@@ -26,6 +26,14 @@ core_allocation.DedicatedCoreSet = { min = 16, max = 64 }
 [native_configs.solShredFetch]
 max_threads = 16
 core_allocation.DedicatedCoreSet = { min = 16, max = 64 }
+
+
+[rayon_configs.solReplayTx] #Replay transactions pool
+worker_threads = 8
+
+[rayon_configs.solReplayFork] # Replay forks pool
+worker_threads = 16
+
 [rayon_configs.solRayonGlob] # this is not used!
 worker_threads = 1
 stack_size_bytes = 100                                    # bytes because we want this to crash!

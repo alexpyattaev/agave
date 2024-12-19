@@ -30,6 +30,7 @@ use {
         voting_service::VoteOp,
         window_service::DuplicateSlotReceiver,
     },
+    agave_thread_manager::{RayonRuntime, ThreadManager},
     crossbeam_channel::{Receiver, RecvTimeoutError, Sender},
     rayon::{prelude::*, ThreadPool},
     solana_accounts_db::contains::Contains,
@@ -122,7 +123,7 @@ pub enum HeaviestForkFailures {
 
 enum ForkReplayMode {
     Serial,
-    Parallel(ThreadPool),
+    Parallel(RayonRuntime),
 }
 
 enum GenerateVoteTxResult {
@@ -539,6 +540,7 @@ impl ReplayStage {
         config: ReplayStageConfig,
         senders: ReplaySenders,
         receivers: ReplayReceivers,
+        thread_manager: &ThreadManager,
     ) -> Result<Self, String> {
         let ReplayStageConfig {
             vote_account,
@@ -599,6 +601,22 @@ impl ReplayStage {
             block_commitment_cache.clone(),
             rpc_subscriptions.clone(),
         );
+
+        let replay_mode = if replay_forks_threads.get() == 1 {
+            ForkReplayMode::Serial
+        } else {
+            let pool = thread_manager
+                .get_rayon("solReplayFork")
+                .expect("solReplayFork rayon threadpool config");
+            ForkReplayMode::Parallel(pool.clone())
+        };
+
+        // Thread pool to replay multiple transactions within one block in parallel
+        let replay_tx_thread_pool = thread_manager
+            .get_rayon("solReplayTx")
+            .expect("solReplayTx rayon threadpool config")
+            .clone();
+
         let run_replay = move || {
             let verify_recyclers = VerifyRecyclers::default();
             let _exit = Finalizer::new(exit.clone());
@@ -669,22 +687,6 @@ impl ReplayStage {
             };
             let mut last_threshold_failure_slot = 0;
             // Thread pool to (maybe) replay multiple threads in parallel
-            let replay_mode = if replay_forks_threads.get() == 1 {
-                ForkReplayMode::Serial
-            } else {
-                let pool = rayon::ThreadPoolBuilder::new()
-                    .num_threads(replay_forks_threads.get())
-                    .thread_name(|i| format!("solReplayFork{i:02}"))
-                    .build()
-                    .expect("new rayon threadpool");
-                ForkReplayMode::Parallel(pool)
-            };
-            // Thread pool to replay multiple transactions within one block in parallel
-            let replay_tx_thread_pool = rayon::ThreadPoolBuilder::new()
-                .num_threads(replay_transactions_threads.get())
-                .thread_name(|i| format!("solReplayTx{i:02}"))
-                .build()
-                .expect("new rayon threadpool");
 
             Self::reset_poh_recorder(
                 &my_pubkey,
@@ -8998,6 +9000,7 @@ pub(crate) mod tests {
         let bank_forks = BankForks::new_rw_arc(Bank::new_for_tests(&genesis_config));
         let bank0 = bank_forks.read().unwrap().get_with_scheduler(0).unwrap();
         let recyclers = VerifyRecyclers::default();
+
         let replay_tx_thread_pool = rayon::ThreadPoolBuilder::new()
             .num_threads(1)
             .thread_name(|i| format!("solReplayTx{i:02}"))
