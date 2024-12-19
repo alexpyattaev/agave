@@ -9,6 +9,7 @@ use {
         leader_schedule_cache::LeaderScheduleCache,
         use_snapshot_archives_at_startup::{self, UseSnapshotArchivesAtStartup},
     },
+    agave_thread_manager::ThreadManager,
     log::*,
     solana_accounts_db::accounts_update_notifier_interface::AccountsUpdateNotifier,
     solana_runtime::{
@@ -88,6 +89,7 @@ pub fn load(
     entry_notification_sender: Option<&EntryNotifierSender>,
     accounts_update_notifier: Option<AccountsUpdateNotifier>,
     exit: Arc<AtomicBool>,
+    thread_manager: &ThreadManager,
 ) -> LoadResult {
     let (bank_forks, leader_schedule_cache, starting_snapshot_hashes, ..) = load_bank_forks(
         genesis_config,
@@ -99,6 +101,7 @@ pub fn load(
         entry_notification_sender,
         accounts_update_notifier,
         exit,
+        thread_manager,
     )?;
     blockstore_processor::process_blockstore_from_root(
         blockstore,
@@ -127,6 +130,7 @@ pub fn load_bank_forks(
     entry_notification_sender: Option<&EntryNotifierSender>,
     accounts_update_notifier: Option<AccountsUpdateNotifier>,
     exit: Arc<AtomicBool>,
+    thread_manager: &ThreadManager,
 ) -> LoadResult {
     fn get_snapshots_to_load(
         snapshot_config: Option<&SnapshotConfig>,
@@ -197,6 +201,7 @@ pub fn load_bank_forks(
                 entry_notification_sender,
                 accounts_update_notifier,
                 exit,
+                thread_manager,
             );
             bank_forks
                 .read()

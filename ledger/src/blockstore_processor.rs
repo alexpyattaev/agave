@@ -9,6 +9,7 @@ use {
         token_balances::collect_token_balances,
         use_snapshot_archives_at_startup::UseSnapshotArchivesAtStartup,
     },
+    agave_thread_manager::{ThreadManager, ThreadManagerConfig},
     chrono_humanize::{Accuracy, HumanTime, Tense},
     crossbeam_channel::{Receiver, Sender},
     itertools::Itertools,
@@ -892,7 +893,7 @@ pub fn test_process_blockstore(
             }
         })
     };
-
+    let thread_manager = ThreadManager::new(ThreadManagerConfig::default()).unwrap();
     let (bank_forks, leader_schedule_cache, ..) = crate::bank_forks_utils::load_bank_forks(
         genesis_config,
         blockstore,
@@ -903,6 +904,7 @@ pub fn test_process_blockstore(
         None,
         None,
         exit,
+        &thread_manager,
     )
     .unwrap();
 
@@ -934,7 +936,9 @@ pub(crate) fn process_blockstore_for_bank_0(
     entry_notification_sender: Option<&EntryNotifierSender>,
     accounts_update_notifier: Option<AccountsUpdateNotifier>,
     exit: Arc<AtomicBool>,
+    thread_manager: &ThreadManager,
 ) -> Arc<RwLock<BankForks>> {
+    let pools = solana_accounts_db::accounts_db::RayonPools::from_thread_manager(thread_manager);
     // Setup bank for slot 0
     let bank0 = Bank::new_with_paths(
         genesis_config,
@@ -944,6 +948,7 @@ pub(crate) fn process_blockstore_for_bank_0(
         None,
         false,
         opts.accounts_db_config.clone(),
+        pools,
         accounts_update_notifier,
         None,
         exit,

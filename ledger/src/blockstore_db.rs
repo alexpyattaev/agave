@@ -542,6 +542,8 @@ impl Rocks {
                 options.set_write_buffer_size(1024 * 1024);
                 // Disable compactions to avoid any modifications to the column
                 options.set_disable_auto_compactions(true);
+                options.set_max_background_jobs(4);
+                options.increase_parallelism(4);
                 cf_descriptors.push(ColumnFamilyDescriptor::new(cf_name, options));
             }
         });
@@ -1998,8 +2000,8 @@ fn get_db_options(access_type: &AccessType) -> Options {
     options.create_if_missing(true);
     options.create_missing_column_families(true);
 
-    // Per the docs, a good value for this is the number of cores on the machine
-    options.increase_parallelism(num_cpus::get() as i32);
+    // RocksDB is basically never bottlenecked on reasonable hardware
+    options.increase_parallelism(std::cmp::min((num_cpus::get() / 4) as i32, 4));
 
     let mut env = rocksdb::Env::new().unwrap();
     // While a compaction is ongoing, all the background threads

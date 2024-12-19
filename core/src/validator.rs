@@ -770,6 +770,7 @@ impl Validator {
             transaction_notifier,
             entry_notifier,
             Some(poh_timing_point_sender.clone()),
+            &thread_manager,
         )
         .map_err(ValidatorError::Other)?;
 
@@ -1985,6 +1986,7 @@ impl LedgerLoader {
         transaction_notifier: Option<TransactionNotifierArc>,
         entry_notifier: Option<EntryNotifierArc>,
         poh_timing_point_sender: Option<PohTimingSender>,
+        thread_manager: &ThreadManager,
     ) -> Result<Self, String> {
         info!("loading ledger from {:?}...", ledger_path);
         *start_progress.write().unwrap() = ValidatorStartProgress::LoadingLedger;
@@ -2056,6 +2058,7 @@ impl LedgerLoader {
                     .map(|service| service.sender()),
                 accounts_update_notifier,
                 exit,
+                &thread_manager,
             )
             .map_err(|err| err.to_string())?;
 
