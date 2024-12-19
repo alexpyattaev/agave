@@ -12,6 +12,7 @@ use {
         },
         program::*,
     },
+    agave_thread_manager::{ThreadManager, ThreadManagerConfig},
     clap::{
         crate_description, crate_name, value_t, value_t_or_exit, values_t_or_exit, App,
         AppSettings, Arg, ArgMatches, SubCommand,
@@ -1644,16 +1645,20 @@ fn main() {
     let ledger_path = PathBuf::from(value_t_or_exit!(matches, "ledger_path", String));
     let verbose_level = matches.occurrences_of("verbose");
 
+    let thread_manager = ThreadManager::new(ThreadManagerConfig::default()).unwrap();
     // Name the rayon global thread pool
     rayon::ThreadPoolBuilder::new()
         .thread_name(|i| format!("solRayonGlob{i:02}"))
+        .num_threads(8)
         .build_global()
         .unwrap();
 
     match matches.subcommand() {
-        ("bigtable", Some(arg_matches)) => bigtable_process_command(&ledger_path, arg_matches),
+        ("bigtable", Some(arg_matches)) => {
+            bigtable_process_command(&ledger_path, arg_matches, &thread_manager)
+        }
         ("blockstore", Some(arg_matches)) => blockstore_process_command(&ledger_path, arg_matches),
-        ("program", Some(arg_matches)) => program(&ledger_path, arg_matches),
+        ("program", Some(arg_matches)) => program(&ledger_path, arg_matches, &thread_manager),
         // This match case provides legacy support for commands that were previously top level
         // subcommands of the binary, but have been moved under the blockstore subcommand.
         ("analyze-storage", Some(_))
@@ -1751,6 +1756,7 @@ fn main() {
                             Arc::new(blockstore),
                             process_options,
                             None,
+                            &thread_manager,
                         );
 
                     println!(
@@ -1815,6 +1821,7 @@ fn main() {
                             Arc::new(blockstore),
                             process_options,
                             transaction_status_sender,
+                            &thread_manager,
                         );
 
                     let working_bank = bank_forks.read().unwrap().working_bank();
@@ -1886,6 +1893,7 @@ fn main() {
                             Arc::new(blockstore),
                             process_options,
                             None,
+                            &thread_manager,
                         );
 
                     let dot = graph_forks(&bank_forks.read().unwrap(), &graph_config);
@@ -2074,6 +2082,7 @@ fn main() {
                         blockstore.clone(),
                         process_options,
                         None,
+                        &thread_manager,
                     );
 
                     let mut bank = bank_forks
@@ -2507,6 +2516,7 @@ fn main() {
                             blockstore.clone(),
                             process_options,
                             None, // transaction status sender
+                            &thread_manager,
                         );
 
                     let block_production_method = value_t!(
@@ -2546,6 +2556,7 @@ fn main() {
                             Arc::new(blockstore),
                             process_options,
                             None,
+                            &thread_manager,
                         );
                     let bank = bank_forks.read().unwrap().working_bank();
 
@@ -2598,6 +2609,7 @@ fn main() {
                             Arc::new(blockstore),
                             process_options,
                             None,
+                            &thread_manager,
                         );
                     let bank_forks = bank_forks.read().unwrap();
                     let slot = bank_forks.working_bank().slot();

@@ -1,5 +1,6 @@
 use {
     crate::{args::*, canonicalize_ledger_path, ledger_utils::*},
+    agave_thread_manager::ThreadManager,
     clap::{App, AppSettings, Arg, ArgMatches, SubCommand},
     log::*,
     serde_derive::{Deserialize, Serialize},
@@ -74,7 +75,11 @@ fn load_accounts(path: &Path) -> Result<Input> {
     Ok(input)
 }
 
-fn load_blockstore(ledger_path: &Path, arg_matches: &ArgMatches<'_>) -> Arc<Bank> {
+fn load_blockstore(
+    ledger_path: &Path,
+    arg_matches: &ArgMatches<'_>,
+    thread_manager: &ThreadManager,
+) -> Arc<Bank> {
     let process_options = parse_process_options(ledger_path, arg_matches);
 
     let genesis_config = open_genesis_config_by(ledger_path, arg_matches);
@@ -86,6 +91,7 @@ fn load_blockstore(ledger_path: &Path, arg_matches: &ArgMatches<'_>) -> Arc<Bank
         Arc::new(blockstore),
         process_options,
         None,
+        thread_manager,
     );
     let bank = bank_forks.read().unwrap().working_bank();
     bank
@@ -382,7 +388,7 @@ fn process_static_action(action: Action, matches: &ArgMatches<'_>) {
     };
 }
 
-pub fn program(ledger_path: &Path, matches: &ArgMatches<'_>) {
+pub fn program(ledger_path: &Path, matches: &ArgMatches<'_>, thread_manager: &ThreadManager) {
     let matches = match matches.subcommand() {
         ("cfg", Some(arg_matches)) => {
             process_static_action(Action::Cfg, arg_matches);
@@ -396,7 +402,7 @@ pub fn program(ledger_path: &Path, matches: &ArgMatches<'_>) {
         _ => unreachable!(),
     };
     let ledger_path = canonicalize_ledger_path(ledger_path);
-    let bank = load_blockstore(&ledger_path, matches);
+    let bank = load_blockstore(&ledger_path, matches, thread_manager);
     let loader_id = bpf_loader_upgradeable::id();
     let mut transaction_accounts = Vec::new();
     let mut instruction_accounts = Vec::new();

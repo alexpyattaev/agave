@@ -169,6 +169,7 @@ dependencies = [
 name = "agave-ledger-tool"
 version = "2.2.0"
 dependencies = [
+ "agave-thread-manager",
  "assert_cmd",
  "bs58",
  "bytecount",

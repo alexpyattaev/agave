@@ -10,6 +10,7 @@ use {
         },
         parse_process_options, LoadAndProcessLedgerOutput,
     },
+    agave_thread_manager::ThreadManager,
     clap::{
         value_t, value_t_or_exit, values_t_or_exit, App, AppSettings, Arg, ArgMatches, SubCommand,
     },
@@ -195,6 +196,7 @@ fn get_shred_config_from_ledger(
     allow_mock_poh: bool,
     starting_slot: Slot,
     ending_slot: Slot,
+    thread_manager: &ThreadManager,
 ) -> ShredConfig {
     let process_options = parse_process_options(ledger_path, arg_matches);
     let genesis_config = open_genesis_config_by(ledger_path, arg_matches);
@@ -204,6 +206,7 @@ fn get_shred_config_from_ledger(
         blockstore.clone(),
         process_options,
         None,
+        thread_manager,
     );
 
     let bank = bank_forks.read().unwrap().working_bank();
@@ -1347,7 +1350,11 @@ fn get_global_subcommand_arg<T: FromStr>(
     }
 }
 
-pub fn bigtable_process_command(ledger_path: &Path, matches: &ArgMatches<'_>) {
+pub fn bigtable_process_command(
+    ledger_path: &Path,
+    matches: &ArgMatches<'_>,
+    thread_manager: &ThreadManager,
+) {
     let runtime = tokio::runtime::Runtime::new().unwrap();
 
     let verbose = matches.is_present("verbose");
@@ -1464,6 +1471,7 @@ pub fn bigtable_process_command(ledger_path: &Path, matches: &ArgMatches<'_>) {
                     allow_mock_poh,
                     starting_slot,
                     ending_slot,
+                    thread_manager,
                 )
             };
 

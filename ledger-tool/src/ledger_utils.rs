@@ -1,5 +1,6 @@
 use {
     crate::LEDGER_TOOL_DIRECTORY,
+    agave_thread_manager::ThreadManager,
     clap::{value_t, value_t_or_exit, values_t_or_exit, ArgMatches},
     crossbeam_channel::unbounded,
     log::*,
@@ -115,6 +116,7 @@ pub fn load_and_process_ledger_or_exit(
     blockstore: Arc<Blockstore>,
     process_options: ProcessOptions,
     transaction_status_sender: Option<TransactionStatusSender>,
+    thread_manager: &ThreadManager,
 ) -> LoadAndProcessLedgerOutput {
     load_and_process_ledger(
         arg_matches,
@@ -122,6 +124,7 @@ pub fn load_and_process_ledger_or_exit(
         blockstore,
         process_options,
         transaction_status_sender,
+        thread_manager,
     )
     .unwrap_or_else(|err| {
         eprintln!("Exiting. Failed to load and process ledger: {err}");
@@ -135,6 +138,7 @@ pub fn load_and_process_ledger(
     blockstore: Arc<Blockstore>,
     process_options: ProcessOptions,
     transaction_status_sender: Option<TransactionStatusSender>,
+    thread_manager: &ThreadManager,
 ) -> Result<LoadAndProcessLedgerOutput, LoadAndProcessLedgerError> {
     let bank_snapshots_dir = if blockstore.is_primary_access() {
         blockstore.ledger_path().join("snapshot")
@@ -350,6 +354,7 @@ pub fn load_and_process_ledger(
             None, // Maybe support this later, though
             accounts_update_notifier,
             exit.clone(),
+            thread_manager,
         )
         .map_err(LoadAndProcessLedgerError::LoadBankForks)?;
     let block_verification_method = value_t!(
