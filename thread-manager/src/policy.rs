@@ -1,10 +1,12 @@
 use {
     serde::{Deserialize, Serialize},
     std::sync::OnceLock,
-    thread_priority::ThreadExt,
+    thread_priority::{NormalThreadSchedulePolicy, ThreadExt, ThreadSchedulePolicy},
 };
 
 static CORE_COUNT: OnceLock<usize> = OnceLock::new();
+
+pub const DEFAULT_PRIORITY: u8 = 0;
 
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub enum CoreAllocation {
@@ -50,17 +52,28 @@ pub fn set_thread_affinity(cores: &[usize]) {
 #[cfg(not(target_os = "linux"))]
 pub fn set_thread_affinity(_cores: &[usize]) {}
 
+pub fn parse_policy(policy: &str) -> ThreadSchedulePolicy {
+    match policy.to_uppercase().as_ref() {
+        "BATCH" => ThreadSchedulePolicy::Normal(NormalThreadSchedulePolicy::Batch),
+        "OTHER" => ThreadSchedulePolicy::Normal(NormalThreadSchedulePolicy::Other),
+        "IDLE" => ThreadSchedulePolicy::Normal(NormalThreadSchedulePolicy::Idle),
+        _ => panic!("Could not parse the policy"),
+    }
+}
+
 ///Applies policy to the calling thread
 pub fn apply_policy(
     alloc: &CoreAllocation,
+    policy: ThreadSchedulePolicy,
     priority: u8,
     chosen_cores_mask: &std::sync::Mutex<Vec<usize>>,
 ) {
-    std::thread::current()
-        .set_priority(thread_priority::ThreadPriority::Crossplatform(
-            (priority).try_into().unwrap(),
-        ))
-        .expect("Can not set thread priority!");
+    if let Err(e) = std::thread::current().set_priority_and_policy(
+        policy,
+        thread_priority::ThreadPriority::Crossplatform((priority).try_into().unwrap()),
+    ) {
+        panic!("Can not set thread priority, OS error {:?}", e);
+    }
 
     match alloc {
         CoreAllocation::PinnedCores { min: _, max: _ } => {

@@ -718,6 +718,7 @@ impl RayonPools {
         }
     }
     pub fn from_thread_manager(thread_manager: &ThreadManager) -> Self {
+        panic!("booo");
         Self {
             background: thread_manager
                 .get_rayon(RAYON_POOL_NAME_BACKGROUND)
@@ -6738,49 +6739,51 @@ impl AccountsDb {
         // A different parallel implementation that iterated over the bins *sequentially* and then
         // hashed the accounts *within* a bin in parallel took about 600 seconds.  That impl uses
         // less memory, as only a single index bin is loaded into mem at a time.
-        let lt_hash = self
-            .accounts_index
-            .account_maps
-            .par_iter()
-            .fold(
-                LtHash::identity,
-                |mut accumulator_lt_hash, accounts_index_bin| {
-                    for pubkey in accounts_index_bin.keys() {
-                        let account_lt_hash = self
-                            .accounts_index
-                            .get_with_and_then(
-                                &pubkey,
-                                Some(ancestors),
-                                Some(startup_slot),
-                                false,
-                                |(slot, account_info)| {
-                                    (!account_info.is_zero_lamport()).then(|| {
-                                        self.get_account_accessor(
-                                            slot,
-                                            &pubkey,
-                                            &account_info.storage_location(),
-                                        )
-                                        .get_loaded_account(|loaded_account| {
-                                            Self::lt_hash_account(&loaded_account, &pubkey)
+
+        let lt_hash = self.rayon_pools.foreground.install(|| {
+            self.accounts_index
+                .account_maps
+                .par_iter()
+                .fold(
+                    LtHash::identity,
+                    |mut accumulator_lt_hash, accounts_index_bin| {
+                        for pubkey in accounts_index_bin.keys() {
+                            let account_lt_hash = self
+                                .accounts_index
+                                .get_with_and_then(
+                                    &pubkey,
+                                    Some(ancestors),
+                                    Some(startup_slot),
+                                    false,
+                                    |(slot, account_info)| {
+                                        (!account_info.is_zero_lamport()).then(|| {
+                                            self.get_account_accessor(
+                                                slot,
+                                                &pubkey,
+                                                &account_info.storage_location(),
+                                            )
+                                            .get_loaded_account(|loaded_account| {
+                                                Self::lt_hash_account(&loaded_account, &pubkey)
+                                            })
+                                            // SAFETY: The index said this pubkey exists, so
+                                            // there must be an account to load.
+                                            .unwrap()
                                         })
-                                        // SAFETY: The index said this pubkey exists, so
-                                        // there must be an account to load.
-                                        .unwrap()
-                                    })
-                                },
-                            )
-                            .flatten();
-                        if let Some(account_lt_hash) = account_lt_hash {
-                            accumulator_lt_hash.mix_in(&account_lt_hash.0);
+                                    },
+                                )
+                                .flatten();
+                            if let Some(account_lt_hash) = account_lt_hash {
+                                accumulator_lt_hash.mix_in(&account_lt_hash.0);
+                            }
                         }
-                    }
-                    accumulator_lt_hash
-                },
-            )
-            .reduce(LtHash::identity, |mut accum, elem| {
-                accum.mix_in(&elem);
-                accum
-            });
+                        accumulator_lt_hash
+                    },
+                )
+                .reduce(LtHash::identity, |mut accum, elem| {
+                    accum.mix_in(&elem);
+                    accum
+                })
+        });
 
         AccountsLtHash(lt_hash)
     }
@@ -6796,20 +6799,24 @@ impl AccountsDb {
         storages: &[Arc<AccountStorageEntry>],
         duplicates_lt_hash: &DuplicatesLtHash,
     ) -> AccountsLtHash {
-        let mut lt_hash = storages
-            .par_iter()
-            .fold(LtHash::identity, |mut accum, storage| {
-                storage.accounts.scan_accounts(|stored_account_meta| {
-                    let account_lt_hash =
-                        Self::lt_hash_account(&stored_account_meta, stored_account_meta.pubkey());
-                    accum.mix_in(&account_lt_hash.0);
-                });
-                accum
-            })
-            .reduce(LtHash::identity, |mut accum, elem| {
-                accum.mix_in(&elem);
-                accum
-            });
+        let mut lt_hash = self.rayon_pools.foreground.install(|| {
+            storages
+                .par_iter()
+                .fold(LtHash::identity, |mut accum, storage| {
+                    storage.accounts.scan_accounts(|stored_account_meta| {
+                        let account_lt_hash = Self::lt_hash_account(
+                            &stored_account_meta,
+                            stored_account_meta.pubkey(),
+                        );
+                        accum.mix_in(&account_lt_hash.0);
+                    });
+                    accum
+                })
+                .reduce(LtHash::identity, |mut accum, elem| {
+                    accum.mix_in(&elem);
+                    accum
+                })
+        });
 
         lt_hash.mix_out(&duplicates_lt_hash.0);
 
@@ -8913,44 +8920,46 @@ impl AccountsDb {
                     num_duplicate_accounts,
                     uncleaned_roots,
                     duplicates_lt_hash,
-                } = unique_pubkeys_by_bin
-                    .par_iter()
-                    .fold(
-                        DuplicatePubkeysVisitedInfo::default,
-                        |accum, pubkeys_by_bin| {
-                            let intermediate = pubkeys_by_bin
-                                .par_chunks(4096)
-                                .fold(DuplicatePubkeysVisitedInfo::default, |accum, pubkeys| {
-                                    let (
-                                        accounts_data_len_from_duplicates,
-                                        accounts_duplicates_num,
-                                        uncleaned_roots,
-                                        duplicates_lt_hash,
-                                    ) = self.visit_duplicate_pubkeys_during_startup(
-                                        pubkeys,
-                                        &rent_collector,
-                                        &timings,
-                                        should_calculate_duplicates_lt_hash,
+                } = self.rayon_pools.foreground.install(|| {
+                    unique_pubkeys_by_bin
+                        .par_iter()
+                        .fold(
+                            DuplicatePubkeysVisitedInfo::default,
+                            |accum, pubkeys_by_bin| {
+                                let intermediate = pubkeys_by_bin
+                                    .par_chunks(4096)
+                                    .fold(DuplicatePubkeysVisitedInfo::default, |accum, pubkeys| {
+                                        let (
+                                            accounts_data_len_from_duplicates,
+                                            accounts_duplicates_num,
+                                            uncleaned_roots,
+                                            duplicates_lt_hash,
+                                        ) = self.visit_duplicate_pubkeys_during_startup(
+                                            pubkeys,
+                                            &rent_collector,
+                                            &timings,
+                                            should_calculate_duplicates_lt_hash,
+                                        );
+                                        let intermediate = DuplicatePubkeysVisitedInfo {
+                                            accounts_data_len_from_duplicates,
+                                            num_duplicate_accounts: accounts_duplicates_num,
+                                            uncleaned_roots,
+                                            duplicates_lt_hash,
+                                        };
+                                        DuplicatePubkeysVisitedInfo::reduce(accum, intermediate)
+                                    })
+                                    .reduce(
+                                        DuplicatePubkeysVisitedInfo::default,
+                                        DuplicatePubkeysVisitedInfo::reduce,
                                     );
-                                    let intermediate = DuplicatePubkeysVisitedInfo {
-                                        accounts_data_len_from_duplicates,
-                                        num_duplicate_accounts: accounts_duplicates_num,
-                                        uncleaned_roots,
-                                        duplicates_lt_hash,
-                                    };
-                                    DuplicatePubkeysVisitedInfo::reduce(accum, intermediate)
-                                })
-                                .reduce(
-                                    DuplicatePubkeysVisitedInfo::default,
-                                    DuplicatePubkeysVisitedInfo::reduce,
-                                );
-                            DuplicatePubkeysVisitedInfo::reduce(accum, intermediate)
-                        },
-                    )
-                    .reduce(
-                        DuplicatePubkeysVisitedInfo::default,
-                        DuplicatePubkeysVisitedInfo::reduce,
-                    );
+                                DuplicatePubkeysVisitedInfo::reduce(accum, intermediate)
+                            },
+                        )
+                        .reduce(
+                            DuplicatePubkeysVisitedInfo::default,
+                            DuplicatePubkeysVisitedInfo::reduce,
+                        )
+                });
                 accounts_data_len_dedup_timer.stop();
                 timings.accounts_data_len_dedup_time_us = accounts_data_len_dedup_timer.as_us();
                 timings.slots_to_clean = uncleaned_roots.len() as u64;

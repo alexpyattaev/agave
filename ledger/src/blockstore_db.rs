@@ -2000,15 +2000,14 @@ fn get_db_options(access_type: &AccessType) -> Options {
     options.create_if_missing(true);
     options.create_missing_column_families(true);
 
-    // RocksDB is basically never bottlenecked on reasonable hardware
-    options.increase_parallelism(std::cmp::min((num_cpus::get() / 4) as i32, 4));
-
+    // RocksDB is basically never bottlenecked on reasonable hardware, so 4 threads is enough
+    options.increase_parallelism(4);
     let mut env = rocksdb::Env::new().unwrap();
     // While a compaction is ongoing, all the background threads
     // could be used by the compaction. This can stall writes which
     // need to flush the memtable. Add some high-priority background threads
     // which can service these writes.
-    env.set_high_priority_background_threads(4);
+    env.set_high_priority_background_threads(2);
     options.set_env(&env);
 
     // Set max total wal size to 4G.

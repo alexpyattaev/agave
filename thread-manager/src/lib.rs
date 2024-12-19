@@ -214,6 +214,81 @@ mod tests {
     #[cfg(not(target_os = "linux"))]
     fn validate_affinity(_expect_cores: &[usize], _error_msg: &str) {}
 
+    /*#[test]
+    fn thread_priority() {
+        let priority_high = 10;
+        let priority_default = crate::policy::DEFAULT_PRIORITY;
+        let priority_low = 1;
+        let conf = ThreadManagerConfig {
+            native_configs: HashMap::from([
+                (
+                    "high".to_owned(),
+                    NativeConfig {
+                        priority: priority_high,
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "default".to_owned(),
+                    NativeConfig {
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "low".to_owned(),
+                    NativeConfig {
+                        priority: priority_low,
+                        ..Default::default()
+                    },
+                ),
+            ]),
+            ..Default::default()
+        };
+
+        let manager = ThreadManager::new(conf).unwrap();
+        let high = manager.get_native("high").unwrap();
+        let low = manager.get_native("low").unwrap();
+        let default = manager.get_native("default").unwrap();
+
+        high.spawn(move || {
+            let prio =
+                thread_priority::get_thread_priority(thread_priority::thread_native_id()).unwrap();
+            assert_eq!(
+                prio,
+                thread_priority::ThreadPriority::Crossplatform((priority_high).try_into().unwrap())
+            );
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+        low.spawn(move || {
+            let prio =
+                thread_priority::get_thread_priority(thread_priority::thread_native_id()).unwrap();
+            assert_eq!(
+                prio,
+                thread_priority::ThreadPriority::Crossplatform((priority_low).try_into().unwrap())
+            );
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+        default
+            .spawn(move || {
+                let prio =
+                    thread_priority::get_thread_priority(thread_priority::thread_native_id())
+                        .unwrap();
+                assert_eq!(
+                    prio,
+                    thread_priority::ThreadPriority::Crossplatform(
+                        (priority_default).try_into().unwrap()
+                    )
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+    */
     #[test]
     fn process_affinity() {
         let conf = ThreadManagerConfig {
@@ -222,7 +297,6 @@ mod tests {
                 NativeConfig {
                     core_allocation: CoreAllocation::DedicatedCoreSet { min: 0, max: 4 },
                     max_threads: 5,
-                    priority: 0,
                     ..Default::default()
                 },
             )]),
@@ -263,7 +337,6 @@ mod tests {
                 RayonConfig {
                     core_allocation: CoreAllocation::DedicatedCoreSet { min: 1, max: 4 },
                     worker_threads: 3,
-                    priority: 0,
                     ..Default::default()
                 },
             )]),
