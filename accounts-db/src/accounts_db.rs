@@ -2693,29 +2693,31 @@ impl AccountsDb {
         let pubkey_refcount = DashMap::<Pubkey, Vec<Slot>>::default();
         let slots = self.storage.all_slots();
         // populate
-        slots.into_par_iter().for_each(|slot| {
-            if slot > max_slot_inclusive {
-                return;
-            }
-            if let Some(storage) = self.storage.get_slot_storage_entry(slot) {
-                storage.accounts.scan_accounts(|account| {
-                    let pk = account.pubkey();
-                    match pubkey_refcount.entry(*pk) {
-                        dashmap::mapref::entry::Entry::Occupied(mut occupied_entry) => {
-                            if !occupied_entry.get().iter().any(|s| s == &slot) {
-                                occupied_entry.get_mut().push(slot);
+        let pool = &self.rayon_pools.background;
+        pool.install(|| {
+            slots.into_par_iter().for_each(|slot| {
+                if slot > max_slot_inclusive {
+                    return;
+                }
+                if let Some(storage) = self.storage.get_slot_storage_entry(slot) {
+                    storage.accounts.scan_accounts(|account| {
+                        let pk = account.pubkey();
+                        match pubkey_refcount.entry(*pk) {
+                            dashmap::mapref::entry::Entry::Occupied(mut occupied_entry) => {
+                                if !occupied_entry.get().iter().any(|s| s == &slot) {
+                                    occupied_entry.get_mut().push(slot);
+                                }
+                            }
+                            dashmap::mapref::entry::Entry::Vacant(vacant_entry) => {
+                                vacant_entry.insert(vec![slot]);
                             }
                         }
-                        dashmap::mapref::entry::Entry::Vacant(vacant_entry) => {
-                            vacant_entry.insert(vec![slot]);
-                        }
-                    }
-                });
-            }
+                    });
+                }
+            });
         });
         let total = pubkey_refcount.len();
         let failed = AtomicBool::default();
-        let pool = &self.rayon_pools.background;
         let threads = pool.config.worker_threads;
         let per_batch = total / threads;
         pool.install(|| {
