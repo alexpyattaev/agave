@@ -3,8 +3,9 @@ use {
         cluster_nodes::{self, check_feature_activation, ClusterNodesCache},
         retransmit_stage::RetransmitStage,
     },
+    agave_thread_manager::RayonRuntime,
     crossbeam_channel::{Receiver, RecvTimeoutError, SendError, Sender},
-    rayon::{prelude::*, ThreadPool, ThreadPoolBuilder},
+    rayon::{prelude::*, ThreadPool},
     solana_feature_set as feature_set,
     solana_gossip::cluster_info::ClusterInfo,
     solana_ledger::{
@@ -25,7 +26,6 @@ use {
     static_assertions::const_assert_eq,
     std::{
         collections::HashMap,
-        num::NonZeroUsize,
         sync::{
             atomic::{AtomicUsize, Ordering},
             Arc, RwLock,
@@ -66,7 +66,7 @@ pub fn spawn_shred_sigverify(
     shred_fetch_receiver: Receiver<PacketBatch>,
     retransmit_sender: Sender<Vec</*shred:*/ Vec<u8>>>,
     verified_sender: Sender<Vec<PacketBatch>>,
-    num_sigverify_threads: NonZeroUsize,
+    thread_pool: RayonRuntime,
 ) -> JoinHandle<()> {
     let recycler_cache = RecyclerCache::warmed();
     let mut stats = ShredSigVerifyStats::new(Instant::now());
@@ -75,11 +75,6 @@ pub fn spawn_shred_sigverify(
         CLUSTER_NODES_CACHE_NUM_EPOCH_CAP,
         CLUSTER_NODES_CACHE_TTL,
     );
-    let thread_pool = ThreadPoolBuilder::new()
-        .num_threads(num_sigverify_threads.get())
-        .thread_name(|i| format!("solSvrfyShred{i:02}"))
-        .build()
-        .expect("new rayon threadpool");
     let run_shred_sigverify = move || {
         let mut rng = rand::thread_rng();
         let mut deduper = Deduper::<2, [u8]>::new(&mut rng, DEDUPER_NUM_BITS);

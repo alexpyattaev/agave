@@ -938,6 +938,7 @@ pub(crate) fn process_blockstore_for_bank_0(
     exit: Arc<AtomicBool>,
     thread_manager: &ThreadManager,
 ) -> Arc<RwLock<BankForks>> {
+    panic!("Setup bank for slot 0");
     let pools = solana_accounts_db::accounts_db::RayonPools::from_thread_manager(thread_manager);
     // Setup bank for slot 0
     let bank0 = Bank::new_with_paths(

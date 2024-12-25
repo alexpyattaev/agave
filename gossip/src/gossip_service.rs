@@ -54,9 +54,6 @@ impl GossipService {
             gossip_socket.local_addr().unwrap()
         );
         let socket_addr_space = *cluster_info.socket_addr_space();
-        let native_thread_builder = thread_manager
-            .get_native("solGossip")
-            .expect("Gossip runtime not configured");
 
         let t_receiver = {
             let rx = streamer::receiver(
@@ -70,10 +67,15 @@ impl GossipService {
                 None,
                 false,
             );
-            native_thread_builder
-                .spawn_named("solRcvrGossip".to_owned(), rx)
-                .unwrap()
+            let thread_builder = thread_manager
+                .get_native("solRcvrGossip")
+                .expect("solRcvrGossip thread not configured");
+            thread_builder.spawn(rx).unwrap()
         };
+
+        let native_thread_builder = thread_manager
+            .get_native("solGossip")
+            .expect("Gossip runtime not configured");
 
         let (consume_sender, listen_receiver) = unbounded();
         let t_socket_consume = cluster_info.clone().start_socket_consume_thread(

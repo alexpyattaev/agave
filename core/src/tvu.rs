@@ -204,7 +204,8 @@ impl Tvu {
             fetch_receiver,
             retransmit_sender.clone(),
             verified_sender,
-            tvu_config.shred_sigverify_threads,
+            thread_manager.get_rayon("solSvrfyShred").unwrap().clone(),
+            //tvu_config.shred_sigverify_threads,
         );
 
         let retransmit_stage = RetransmitStage::new(

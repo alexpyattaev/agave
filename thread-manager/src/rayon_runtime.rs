@@ -2,7 +2,6 @@ use {
     crate::policy::{apply_policy, parse_policy, CoreAllocation},
     anyhow::Ok,
     serde::{Deserialize, Serialize},
-    solana_metrics::datapoint_info,
     std::{
         ops::Deref,
         sync::{
@@ -73,8 +72,6 @@ impl RayonRuntime {
             .thread_name(move |i| format!("{}_{}", &name, i))
             .stack_size(config.stack_size_bytes)
             .start_handler(move |_idx| {
-                let rc = spawned_threads.fetch_add(1, Ordering::Relaxed);
-                datapoint_info!("thread-manager-rayon", ("threads-spawned", rc, i64),);
                 apply_policy(&core_allocation, policy, priority, &chosen_cores_mask);
             })
             .build()?;

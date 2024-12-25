@@ -1196,6 +1196,7 @@ impl Bank {
         #[allow(unused)] genesis_hash: Option<Hash>,
         #[allow(unused)] feature_set: Option<FeatureSet>,
     ) -> Self {
+        panic!("WAAAAAT");
         let accounts_db = AccountsDb::new_with_config(
             paths,
             accounts_db_config.unwrap_or_default(),
