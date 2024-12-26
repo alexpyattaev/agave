@@ -3,12 +3,13 @@
 
 use {
     crate::cluster_nodes::{self, ClusterNodes, ClusterNodesCache, Error, MAX_NUM_TURBINE_HOPS},
+    agave_thread_manager::RayonRuntime,
     bytes::Bytes,
     crossbeam_channel::{Receiver, RecvTimeoutError},
     itertools::{izip, Itertools},
     lru::LruCache,
     rand::Rng,
-    rayon::{prelude::*, ThreadPool, ThreadPoolBuilder},
+    rayon::{prelude::*, ThreadPool},
     solana_gossip::{cluster_info::ClusterInfo, contact_info::Protocol},
     solana_ledger::{
         leader_schedule_cache::LeaderScheduleCache,
@@ -391,6 +392,7 @@ pub fn retransmitter(
     max_slots: Arc<MaxSlots>,
     rpc_subscriptions: Option<Arc<RpcSubscriptions>>,
     slot_status_notifier: Option<SlotStatusNotifier>,
+    thread_pool: RayonRuntime,
 ) -> JoinHandle<()> {
     let cluster_nodes_cache = ClusterNodesCache::<RetransmitStage>::new(
         CLUSTER_NODES_CACHE_NUM_EPOCH_CAP,
@@ -401,11 +403,6 @@ pub fn retransmitter(
     let mut stats = RetransmitStats::new(Instant::now());
     #[allow(clippy::manual_clamp)]
     let num_threads = get_thread_count().min(8).max(sockets.len());
-    let thread_pool = ThreadPoolBuilder::new()
-        .num_threads(num_threads)
-        .thread_name(|i| format!("solRetransmit{i:02}"))
-        .build()
-        .unwrap();
     Builder::new()
         .name("solRetransmittr".to_string())
         .spawn(move || loop {
@@ -447,6 +444,7 @@ impl RetransmitStage {
         max_slots: Arc<MaxSlots>,
         rpc_subscriptions: Option<Arc<RpcSubscriptions>>,
         slot_status_notifier: Option<SlotStatusNotifier>,
+        runtime: RayonRuntime,
     ) -> Self {
         let retransmit_thread_handle = retransmitter(
             retransmit_sockets,
@@ -458,6 +456,7 @@ impl RetransmitStage {
             max_slots,
             rpc_subscriptions,
             slot_status_notifier,
+            runtime,
         );
 
         Self {

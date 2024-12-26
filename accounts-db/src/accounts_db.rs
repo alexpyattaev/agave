@@ -514,6 +514,7 @@ pub const ACCOUNTS_DB_CONFIG_FOR_TESTING: AccountsDbConfig = AccountsDbConfig {
     enable_experimental_accumulator_hash: false,
     verify_experimental_accumulator_hash: false,
     hash_calculation_pubkey_bins: Some(4),
+    rayon_pools: None,
 };
 pub const ACCOUNTS_DB_CONFIG_FOR_BENCHMARKS: AccountsDbConfig = AccountsDbConfig {
     index: Some(ACCOUNTS_INDEX_CONFIG_FOR_BENCHMARKS),
@@ -537,6 +538,7 @@ pub const ACCOUNTS_DB_CONFIG_FOR_BENCHMARKS: AccountsDbConfig = AccountsDbConfig
     enable_experimental_accumulator_hash: false,
     verify_experimental_accumulator_hash: false,
     hash_calculation_pubkey_bins: None,
+    rayon_pools: None,
 };
 
 pub type BinnedHashData = Vec<Vec<CalculateHashIntermediate>>;
@@ -661,6 +663,7 @@ pub struct AccountsDbConfig {
     pub scan_filter_for_shrinking: ScanFilter,
     pub enable_experimental_accumulator_hash: bool,
     pub verify_experimental_accumulator_hash: bool,
+    pub rayon_pools: Option<RayonPools>,
 }
 
 pub const RAYON_POOL_NAME_BACKGROUND: &str = "solAccountsLo";
@@ -718,7 +721,6 @@ impl RayonPools {
         }
     }
     pub fn from_thread_manager(thread_manager: &ThreadManager) -> Self {
-        panic!("booo");
         Self {
             background: thread_manager
                 .get_rayon(RAYON_POOL_NAME_BACKGROUND)
@@ -1955,7 +1957,6 @@ impl AccountsDb {
             paths,
             ACCOUNTS_DB_CONFIG_FOR_TESTING,
             None,
-            RayonPools::default(),
             Arc::default(),
         );
         db.accounts_file_provider = accounts_file_provider;
@@ -1964,11 +1965,11 @@ impl AccountsDb {
 
     pub fn new_with_config(
         paths: Vec<PathBuf>,
-        accounts_db_config: AccountsDbConfig,
+        mut accounts_db_config: AccountsDbConfig,
         accounts_update_notifier: Option<AccountsUpdateNotifier>,
-        rayon_pools: RayonPools,
         exit: Arc<AtomicBool>,
     ) -> Self {
+        let rayon_pools = accounts_db_config.rayon_pools.take().unwrap();
         let accounts_index = AccountsIndex::new(accounts_db_config.index.clone(), exit);
 
         let base_working_path = accounts_db_config.base_working_path.clone();

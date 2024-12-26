@@ -218,6 +218,10 @@ impl Tvu {
             max_slots.clone(),
             Some(rpc_subscriptions.clone()),
             slot_status_notifier.clone(),
+            thread_manager
+                .get_rayon("solRetransmit")
+                .expect("solRetransmit runtime not configured")
+                .clone(),
         );
 
         let (ancestor_duplicate_slots_sender, ancestor_duplicate_slots_receiver) = unbounded();

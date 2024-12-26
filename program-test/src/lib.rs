@@ -858,7 +858,6 @@ impl ProgramTest {
             None,
             false,
             None,
-            solana_accounts_db::accounts_db::RayonPools::default(),
             None,
             None,
             Arc::default(),

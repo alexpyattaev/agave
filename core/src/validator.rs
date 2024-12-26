@@ -2010,12 +2010,21 @@ impl LedgerLoader {
             .halt_at_slot
             .or_else(|| blockstore.highest_slot().unwrap_or(None));
 
+        let mut accounts_db_config = config.accounts_db_config.clone();
+        if let Some(conf) = accounts_db_config.as_mut() {
+            dbg!("Config provided, patching pools!");
+            let pools =
+                solana_accounts_db::accounts_db::RayonPools::from_thread_manager(&thread_manager);
+            conf.rayon_pools.replace(pools);
+        } else {
+            dbg!("Config not provided, wtf?");
+        }
         let blockstore_process_options = blockstore_processor::ProcessOptions {
             run_verification: config.run_verification,
             halt_at_slot,
             new_hard_forks: config.new_hard_forks.clone(),
             debug_keys: config.debug_keys.clone(),
-            accounts_db_config: config.accounts_db_config.clone(),
+            accounts_db_config,
             accounts_db_test_hash_calculation: config.accounts_db_test_hash_calculation,
             accounts_db_skip_shrink: config.accounts_db_skip_shrink,
             accounts_db_force_initial_clean: config.accounts_db_force_initial_clean,

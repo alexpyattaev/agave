@@ -1189,19 +1189,16 @@ impl Bank {
         additional_builtins: Option<&[BuiltinPrototype]>,
         debug_do_not_add_builtins: bool,
         accounts_db_config: Option<AccountsDbConfig>,
-        accounts_db_pools: solana_accounts_db::accounts_db::RayonPools,
         accounts_update_notifier: Option<AccountsUpdateNotifier>,
         #[allow(unused)] collector_id_for_tests: Option<Pubkey>,
         exit: Arc<AtomicBool>,
         #[allow(unused)] genesis_hash: Option<Hash>,
         #[allow(unused)] feature_set: Option<FeatureSet>,
     ) -> Self {
-        panic!("WAAAAAT");
         let accounts_db = AccountsDb::new_with_config(
             paths,
             accounts_db_config.unwrap_or_default(),
             accounts_update_notifier,
-            accounts_db_pools,
             exit,
         );
         let accounts = Accounts::new(Arc::new(accounts_db));
@@ -7386,7 +7383,6 @@ impl Bank {
             None,
             false,
             Some(test_config.accounts_db_config),
-            solana_accounts_db::accounts_db::RayonPools::default(),
             None,
             Some(Pubkey::new_unique()),
             Arc::default(),
@@ -7410,7 +7406,6 @@ impl Bank {
             None,
             false,
             Some(ACCOUNTS_DB_CONFIG_FOR_BENCHMARKS),
-            solana_accounts_db::accounts_db::RayonPools::default(),
             None,
             Some(Pubkey::new_unique()),
             Arc::default(),

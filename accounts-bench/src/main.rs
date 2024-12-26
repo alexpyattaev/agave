@@ -71,7 +71,6 @@ fn main() {
         vec![path],
         ACCOUNTS_DB_CONFIG_FOR_BENCHMARKS,
         None,
-        RayonPools::default(),
         Arc::default(),
     );
     let accounts = Accounts::new(Arc::new(accounts_db));
