@@ -308,7 +308,6 @@ pub fn unpack_snapshot<A: Read>(
     account_paths: &[PathBuf],
     parallel_selector: Option<ParallelSelector>,
 ) -> Result<UnpackedAppendVecMap> {
-    panic!("Here!");
     let mut unpacked_append_vec_map = UnpackedAppendVecMap::new();
 
     unpack_snapshot_with_processors(

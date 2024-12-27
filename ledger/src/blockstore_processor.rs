@@ -957,9 +957,7 @@ pub(crate) fn process_blockstore_for_bank_0(
     let bank_forks = BankForks::new_rw_arc(bank0);
 
     info!("Processing ledger for slot 0...");
-    let replay_tx_thread_pool = thread_manager
-        .get_rayon("solReplayTx")
-        .expect("solReplayTx rayon pool not configured");
+    let replay_tx_thread_pool = thread_manager.get_rayon("solReplayTx");
     //    let replay_tx_thread_pool = create_thread_pool_for_tests(get_max_thread_count());
     process_bank_0(
         &bank_forks

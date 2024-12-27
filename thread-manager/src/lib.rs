@@ -120,16 +120,30 @@ impl ThreadManager {
         }
     }
 
-    pub fn get_native(&self, name: &str) -> Option<&NativeThreadRuntime> {
+    pub fn try_get_native(&self, name: &str) -> Option<&NativeThreadRuntime> {
         self.lookup(
             name,
             &self.native_runtime_mapping,
             &self.native_thread_runtimes,
         )
     }
+    pub fn get_native(&self, name: &str) -> &NativeThreadRuntime {
+        if let Some(runtime) = self.try_get_native(name) {
+            runtime
+        } else {
+            panic!("Native thread pool {name} not configured!");
+        }
+    }
 
-    pub fn get_rayon(&self, name: &str) -> Option<&RayonRuntime> {
+    pub fn try_get_rayon(&self, name: &str) -> Option<&RayonRuntime> {
         self.lookup(name, &self.rayon_runtime_mapping, &self.rayon_runtimes)
+    }
+    pub fn get_rayon(&self, name: &str) -> &RayonRuntime {
+        if let Some(runtime) = self.try_get_rayon(name) {
+            runtime
+        } else {
+            panic!("Rayon thread pool {name} not configured!");
+        }
     }
 
     pub fn get_tokio(&self, name: &str) -> Option<&TokioRuntime> {
@@ -306,7 +320,7 @@ mod tests {
         };
 
         let manager = ThreadManager::new(conf).unwrap();
-        let runtime = manager.get_native("test").unwrap();
+        let runtime = manager.try_get_native("test").unwrap();
 
         let thread1 = runtime
             .spawn(|| {
@@ -346,7 +360,7 @@ mod tests {
         };
 
         let manager = ThreadManager::new(conf).unwrap();
-        let rayon_runtime = manager.get_rayon("test").unwrap();
+        let rayon_runtime = manager.try_get_rayon("test").unwrap();
 
         let _rr = rayon_runtime.rayon_pool.broadcast(|ctx| {
             println!("Rayon thread {} reporting", ctx.index());

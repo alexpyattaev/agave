@@ -149,7 +149,7 @@ impl Tpu {
             Some(bank_forks.read().unwrap().get_vote_only_mode_signal()),
             tpu_enable_udp,
             thread_manager
-                .get_native("FetchStage")
+                .try_get_native("FetchStage")
                 .expect("Fetch stage thread pool missing"),
         );
 
@@ -248,18 +248,16 @@ impl Tpu {
         .unwrap();
 
         let sigverify_stage = {
-            let verifier = TransactionSigVerifier::new(non_vote_sender);
-            let runtime = thread_manager
-                .get_native("solSigVerTpu")
-                .expect("Runtime for sigverify not found");
+            let rayon_pool = thread_manager.get_rayon("solTrSigVerTpu").clone();
+            let verifier = TransactionSigVerifier::new(non_vote_sender, rayon_pool);
+            let runtime = thread_manager.get_native("solSigVerTpu");
             SigVerifyStage::new(packet_receiver, verifier, runtime, "tpu-verifier")
         };
 
         let vote_sigverify_stage = {
-            let verifier = TransactionSigVerifier::new_reject_non_vote(tpu_vote_sender);
-            let runtime = thread_manager
-                .get_native("solSigVerTpuVote")
-                .expect("Runtime for vote sigverify not found");
+            let rayon_pool = thread_manager.get_rayon("solVoteSigVerTpu").clone();
+            let verifier = TransactionSigVerifier::new_reject_non_vote(tpu_vote_sender, rayon_pool);
+            let runtime = thread_manager.get_native("solSigVerTpuVote");
             SigVerifyStage::new(vote_packet_receiver, verifier, runtime, "tpu-vote-verifier")
         };
 
@@ -276,6 +274,7 @@ impl Tpu {
             blockstore.clone(),
             bank_notification_sender,
             duplicate_confirmed_slot_sender,
+            thread_manager,
         );
 
         let banking_stage = BankingStage::new(

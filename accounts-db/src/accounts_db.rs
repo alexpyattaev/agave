@@ -722,18 +722,9 @@ impl RayonPools {
     }
     pub fn from_thread_manager(thread_manager: &ThreadManager) -> Self {
         Self {
-            background: thread_manager
-                .get_rayon(RAYON_POOL_NAME_BACKGROUND)
-                .unwrap()
-                .clone(),
-            foreground: thread_manager
-                .get_rayon(RAYON_POOL_NAME_FOREGROUND)
-                .unwrap()
-                .clone(),
-            hash: thread_manager
-                .get_rayon(RAYON_POOL_NAME_HASH)
-                .unwrap()
-                .clone(),
+            background: thread_manager.get_rayon(RAYON_POOL_NAME_BACKGROUND).clone(),
+            foreground: thread_manager.get_rayon(RAYON_POOL_NAME_FOREGROUND).clone(),
+            hash: thread_manager.get_rayon(RAYON_POOL_NAME_HASH).clone(),
         }
     }
 }

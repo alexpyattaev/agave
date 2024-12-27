@@ -606,16 +606,13 @@ impl ReplayStage {
             ForkReplayMode::Serial
         } else {
             let pool = thread_manager
-                .get_rayon("solReplayFork")
+                .try_get_rayon("solReplayFork")
                 .expect("solReplayFork rayon threadpool config");
             ForkReplayMode::Parallel(pool.clone())
         };
 
         // Thread pool to replay multiple transactions within one block in parallel
-        let replay_tx_thread_pool = thread_manager
-            .get_rayon("solReplayTx")
-            .expect("solReplayTx rayon threadpool config")
-            .clone();
+        let replay_tx_thread_pool = thread_manager.get_rayon("solReplayTx").clone();
 
         let run_replay = move || {
             let verify_recyclers = VerifyRecyclers::default();

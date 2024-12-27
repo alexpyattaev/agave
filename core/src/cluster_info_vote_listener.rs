@@ -7,6 +7,7 @@ use {
         result::{Error, Result},
         sigverify,
     },
+    agave_thread_manager::{JoinHandle, RayonRuntime, ThreadManager},
     crossbeam_channel::{unbounded, Receiver, RecvTimeoutError, Select, Sender},
     log::*,
     solana_gossip::{
@@ -50,7 +51,7 @@ use {
             atomic::{AtomicBool, Ordering},
             Arc, Mutex, RwLock,
         },
-        thread::{self, sleep, Builder, JoinHandle},
+        thread::{self, sleep},
         time::{Duration, Instant},
     },
 };
@@ -201,28 +202,31 @@ impl ClusterInfoVoteListener {
         blockstore: Arc<Blockstore>,
         bank_notification_sender: Option<BankNotificationSender>,
         duplicate_confirmed_slot_sender: DuplicateConfirmedSlotsSender,
+        thread_manager: &ThreadManager,
     ) -> Self {
         let (verified_vote_transactions_sender, verified_vote_transactions_receiver) = unbounded();
+        let native_spawner = thread_manager.get_native("solClusterInfo");
+
         let listen_thread = {
             let exit = exit.clone();
+            let rayon_pool = thread_manager.get_rayon("solSigVerify").clone();
             let mut root_bank_cache = RootBankCache::new(bank_forks.clone());
-            Builder::new()
-                .name("solCiVoteLstnr".to_string())
-                .spawn(move || {
+            native_spawner
+                .spawn_named("solCiVoteLstnr".to_string(), move || {
                     let _ = Self::recv_loop(
                         exit,
                         &cluster_info,
                         &mut root_bank_cache,
                         verified_packets_sender,
                         verified_vote_transactions_sender,
+                        &rayon_pool,
                     );
                 })
                 .unwrap()
         };
 
-        let process_thread = Builder::new()
-            .name("solCiProcVotes".to_string())
-            .spawn(move || {
+        let process_thread = native_spawner
+            .spawn_named("solCiProcVotes".to_string(), move || {
                 let mut bank_hash_cache = BankHashCache::new(bank_forks);
                 let dumped_slot_subscription = bank_hash_cache.dumped_slot_subscription();
                 let _ = Self::process_votes_loop(
@@ -257,13 +261,14 @@ impl ClusterInfoVoteListener {
         root_bank_cache: &mut RootBankCache,
         verified_packets_sender: BankingPacketSender,
         verified_vote_transactions_sender: VerifiedVoteTransactionsSender,
+        rayon_pool: &RayonRuntime,
     ) -> Result<()> {
         let mut cursor = Cursor::default();
         while !exit.load(Ordering::Relaxed) {
             let votes = cluster_info.get_votes(&mut cursor);
             inc_new_counter_debug!("cluster_info_vote_listener-recv_count", votes.len());
             if !votes.is_empty() {
-                let (vote_txs, packets) = Self::verify_votes(votes, root_bank_cache);
+                let (vote_txs, packets) = Self::verify_votes(votes, root_bank_cache, rayon_pool);
                 verified_vote_transactions_sender.send(vote_txs)?;
                 verified_packets_sender.send(BankingPacketBatch::new(packets))?;
             }
@@ -276,14 +281,17 @@ impl ClusterInfoVoteListener {
     fn verify_votes(
         votes: Vec<Transaction>,
         root_bank_cache: &mut RootBankCache,
+        rayon_pool: &RayonRuntime,
     ) -> (Vec<Transaction>, Vec<PacketBatch>) {
         let mut packet_batches = packet::to_packet_batches(&votes, 1);
 
+        //TODO: start patching here for solSigVerify rayon pool
         // Votes should already be filtered by this point.
         sigverify::ed25519_verify_cpu(
             &mut packet_batches,
             /*reject_non_vote=*/ false,
             votes.len(),
+            rayon_pool,
         );
         let root_bank = root_bank_cache.root_bank();
         let epoch_schedule = root_bank.epoch_schedule();
@@ -732,6 +740,7 @@ impl ClusterInfoVoteListener {
 mod tests {
     use {
         super::*,
+        agave_thread_manager::rayon_runtime,
         itertools::Itertools,
         solana_perf::packet,
         solana_rpc::optimistically_confirmed_bank_tracker::OptimisticallyConfirmedBank,
@@ -1507,8 +1516,9 @@ mod tests {
         let bank_forks = BankForks::new_rw_arc(bank);
         let mut root_bank_cache = RootBankCache::new(bank_forks);
         let votes = vec![];
+        let rayon_runtime = RayonRuntime::new_for_tests("test_verify_votes");
         let (vote_txs, packets) =
-            ClusterInfoVoteListener::verify_votes(votes, &mut root_bank_cache);
+            ClusterInfoVoteListener::verify_votes(votes, &mut root_bank_cache, &rayon_runtime);
         assert!(vote_txs.is_empty());
         assert!(packets.is_empty());
     }
@@ -1551,8 +1561,9 @@ mod tests {
         let mut root_bank_cache = RootBankCache::new(bank_forks);
         let vote_tx = test_vote_tx(voting_keypairs.first(), hash);
         let votes = vec![vote_tx];
+        let rayon_runtime = RayonRuntime::new_for_tests("run_test_verify_votes");
         let (vote_txs, packets) =
-            ClusterInfoVoteListener::verify_votes(votes, &mut root_bank_cache);
+            ClusterInfoVoteListener::verify_votes(votes, &mut root_bank_cache, &rayon_runtime);
         assert_eq!(vote_txs.len(), 1);
         verify_packets_len(&packets, 1);
     }
@@ -1580,8 +1591,9 @@ mod tests {
         let mut bad_vote = vote_tx.clone();
         bad_vote.signatures[0] = Signature::default();
         let votes = vec![vote_tx.clone(), bad_vote, vote_tx];
+        let rayon_runtime = RayonRuntime::new_for_tests("run_test_bad_vote");
         let (vote_txs, packets) =
-            ClusterInfoVoteListener::verify_votes(votes, &mut root_bank_cache);
+            ClusterInfoVoteListener::verify_votes(votes, &mut root_bank_cache, &rayon_runtime);
         assert_eq!(vote_txs.len(), 2);
         verify_packets_len(&packets, 2);
     }

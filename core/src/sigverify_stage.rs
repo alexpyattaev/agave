@@ -430,7 +430,7 @@ mod tests {
     use {
         super::*,
         crate::{banking_trace::BankingTracer, sigverify::TransactionSigVerifier},
-        agave_thread_manager::NativeConfig,
+        agave_thread_manager::{NativeConfig, RayonRuntime},
         crossbeam_channel::unbounded,
         solana_perf::{
             packet::{to_packet_batches, Packet},
@@ -495,7 +495,8 @@ mod tests {
         trace!("start");
         let (packet_s, packet_r) = unbounded();
         let (verified_s, verified_r) = BankingTracer::channel_for_test();
-        let verifier = TransactionSigVerifier::new(verified_s);
+        let pool = RayonRuntime::new_for_tests("sigverify_stage");
+        let verifier = TransactionSigVerifier::new(verified_s, pool);
         let runtime = NativeThreadRuntime::new("solSigVerTest".to_owned(), NativeConfig::default());
         let stage = SigVerifyStage::new(packet_r, verifier, &runtime, "test");
 

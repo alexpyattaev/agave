@@ -17,7 +17,6 @@ use {
     },
     solana_measure::measure::Measure,
     solana_perf::deduper::Deduper,
-    solana_rayon_threadlimit::get_thread_count,
     solana_rpc::{
         max_slots::MaxSlots, rpc_subscriptions::RpcSubscriptions,
         slot_status_notifier::SlotStatusNotifier,
@@ -401,8 +400,6 @@ pub fn retransmitter(
     let mut rng = rand::thread_rng();
     let mut shred_deduper = ShredDeduper::<2>::new(&mut rng, DEDUPER_NUM_BITS);
     let mut stats = RetransmitStats::new(Instant::now());
-    #[allow(clippy::manual_clamp)]
-    let num_threads = get_thread_count().min(8).max(sockets.len());
     Builder::new()
         .name("solRetransmittr".to_string())
         .spawn(move || loop {

@@ -7092,6 +7092,7 @@ dependencies = [
 name = "solana-entry"
 version = "2.2.0"
 dependencies = [
+ "agave-thread-manager",
  "assert_matches",
  "bincode",
  "crossbeam-channel",
@@ -7987,6 +7988,7 @@ dependencies = [
 name = "solana-perf"
 version = "2.2.0"
 dependencies = [
+ "agave-thread-manager",
  "ahash 0.8.11",
  "assert_matches",
  "bincode",

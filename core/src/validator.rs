@@ -1283,7 +1283,7 @@ impl Validator {
             !waited_for_supermajority && !config.no_wait_for_vote_to_start_leader;
 
         let poh_thread_spawner = thread_manager
-            .get_native("solPohTickProd")
+            .try_get_native("solPohTickProd")
             .expect("PoH tick production pool configuration missing");
         let poh_service = PohService::new(
             poh_recorder.clone(),
@@ -1408,7 +1408,7 @@ impl Validator {
             stats_reporter_sender,
             exit.clone(),
             thread_manager
-                .get_native("solRepair")
+                .try_get_native("solRepair")
                 .expect("Repair thread pool not configured"),
         );
 

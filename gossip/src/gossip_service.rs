@@ -68,13 +68,13 @@ impl GossipService {
                 false,
             );
             let thread_builder = thread_manager
-                .get_native("solRcvrGossip")
+                .try_get_native("solRcvrGossip")
                 .expect("solRcvrGossip thread not configured");
             thread_builder.spawn(rx).unwrap()
         };
 
         let native_thread_builder = thread_manager
-            .get_native("solGossip")
+            .try_get_native("solGossip")
             .expect("Gossip runtime not configured");
 
         let (consume_sender, listen_receiver) = unbounded();
@@ -82,10 +82,7 @@ impl GossipService {
             request_receiver,
             consume_sender,
             exit.clone(),
-            thread_manager
-                .get_rayon("solGossipCons")
-                .expect("Gossip consume pool missing")
-                .clone(),
+            thread_manager.get_rayon("solGossipCons").clone(),
             native_thread_builder,
         );
         let (response_sender, response_receiver) = unbounded();
@@ -95,10 +92,7 @@ impl GossipService {
             response_sender.clone(),
             should_check_duplicate_instance,
             exit.clone(),
-            thread_manager
-                .get_rayon("solGossipWork")
-                .expect("Gossip rayon pool Work missing")
-                .clone(),
+            thread_manager.get_rayon("solGossipWork").clone(),
             native_thread_builder,
         );
         let t_gossip = cluster_info.clone().gossip(
@@ -106,10 +100,7 @@ impl GossipService {
             response_sender,
             gossip_validators,
             exit,
-            thread_manager
-                .get_rayon("solRunGossip")
-                .expect("Gossip runner pool missing")
-                .clone(),
+            thread_manager.get_rayon("solRunGossip").clone(),
             native_thread_builder,
         );
         let t_responder = streamer::responder(

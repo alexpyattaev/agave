@@ -5,6 +5,7 @@ extern crate solana_core;
 extern crate test;
 
 use {
+    agave_thread_manager::RayonRuntime,
     crossbeam_channel::unbounded,
     log::*,
     rand::{
@@ -243,7 +244,8 @@ fn bench_shrink_sigverify_stage_core(bencher: &mut Bencher, discard_factor: i32)
             SigVerifyStage::maybe_shrink_batches(&mut batches);
 
         let mut verify_time = Measure::start("sigverify_batch_time");
-        let _batches = verifier.verify_batches(batches, num_valid_packets);
+        let rayon_pool = RayonRuntime::new_for_tests("SigverifyBench");
+        let _batches = verifier.verify_batches(batches, num_valid_packets, &rayon_pool);
         verify_time.stop();
 
         c += 1;

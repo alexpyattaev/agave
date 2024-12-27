@@ -495,7 +495,7 @@ mod tests {
         batches[0][1].meta_mut().size = shred.payload().len();
 
         let cache = RwLock::new(LruCache::new(/*capacity:*/ 128));
-        let thread_pool = ThreadPoolBuilder::new().num_threads(3).build().unwrap();
+        let thread_pool = RayonRuntime::new_for_tests("test_sigverify_shreds_verify_batches");
         let working_bank = bank_forks.read().unwrap().working_bank();
         verify_packets(
             &thread_pool,

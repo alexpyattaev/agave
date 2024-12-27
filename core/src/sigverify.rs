@@ -4,6 +4,7 @@
 //! to the GPU.
 //!
 
+use agave_thread_manager::RayonRuntime;
 pub use solana_perf::sigverify::{
     count_packets_in_batches, ed25519_verify_cpu, ed25519_verify_disabled, init, TxOffset,
 };
@@ -20,22 +21,27 @@ pub struct TransactionSigVerifier {
     recycler: Recycler<TxOffset>,
     recycler_out: Recycler<PinnedVec<u8>>,
     reject_non_vote: bool,
+    rayon_pool: RayonRuntime,
 }
 
 impl TransactionSigVerifier {
-    pub fn new_reject_non_vote(packet_sender: BankingPacketSender) -> Self {
-        let mut new_self = Self::new(packet_sender);
+    pub fn new_reject_non_vote(
+        packet_sender: BankingPacketSender,
+        rayon_pool: RayonRuntime,
+    ) -> Self {
+        let mut new_self = Self::new(packet_sender, rayon_pool);
         new_self.reject_non_vote = true;
         new_self
     }
 
-    pub fn new(packet_sender: BankingPacketSender) -> Self {
+    pub fn new(packet_sender: BankingPacketSender, rayon_pool: RayonRuntime) -> Self {
         init();
         Self {
             packet_sender,
             recycler: Recycler::warmed(50, 4096),
             recycler_out: Recycler::warmed(50, 4096),
             reject_non_vote: false,
+            rayon_pool,
         }
     }
 }
@@ -63,6 +69,7 @@ impl SigVerifier for TransactionSigVerifier {
             &self.recycler_out,
             self.reject_non_vote,
             valid_packets,
+            &self.rayon_pool,
         );
         batches
     }

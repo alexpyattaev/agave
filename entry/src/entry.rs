@@ -4,6 +4,7 @@
 //! represents an approximate amount of time since the last Entry was created.
 use {
     crate::poh::Poh,
+    agave_thread_manager::RayonRuntime,
     crossbeam_channel::{Receiver, Sender},
     dlopen2::symbor::{Container, SymBorApi, Symbol},
     log::*,
@@ -559,6 +560,7 @@ fn start_verify_transactions_gpu<Tx: TransactionWithMeta + Send + Sync + 'static
     let tx_offset_recycler = verify_recyclers.tx_offset_recycler;
     let out_recycler = verify_recyclers.out_recycler;
     let num_packets = transactions.len();
+    let rayon_pool = RayonRuntime::new_for_tests("PlaceHolderForNow");
     let gpu_verify_thread = thread::Builder::new()
         .name("solGpuSigVerify".into())
         .spawn(move || {
@@ -569,6 +571,7 @@ fn start_verify_transactions_gpu<Tx: TransactionWithMeta + Send + Sync + 'static
                 &out_recycler,
                 false,
                 num_packets,
+                &rayon_pool,
             );
             let verified = packet_batches
                 .iter()

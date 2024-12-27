@@ -14,7 +14,6 @@ use {
     solana_hash::Hash,
     solana_message::{MESSAGE_HEADER_LENGTH, MESSAGE_VERSION_PREFIX},
     solana_pubkey::Pubkey,
-    solana_rayon_threadlimit::get_thread_count,
     solana_short_vec::decode_shortu16_len,
     solana_signature::Signature,
     std::{convert::TryFrom, mem::size_of},
@@ -22,14 +21,6 @@ use {
 
 // Empirically derived to constrain max verify latency to ~8ms at lower packet counts
 pub const VERIFY_PACKET_CHUNK_SIZE: usize = 128;
-
-lazy_static! {
-    static ref PAR_THREAD_POOL: ThreadPool = rayon::ThreadPoolBuilder::new()
-        .num_threads(get_thread_count())
-        .thread_name(|i| format!("solSigVerify{i:02}"))
-        .build()
-        .unwrap();
-}
 
 pub type TxOffset = PinnedVec<u32>;
 
@@ -476,9 +467,15 @@ pub fn shrink_batches(batches: &mut Vec<PacketBatch>) {
     batches.truncate(last_valid_batch);
 }
 
-pub fn ed25519_verify_cpu(batches: &mut [PacketBatch], reject_non_vote: bool, packet_count: usize) {
+pub fn ed25519_verify_cpu(
+    batches: &mut [PacketBatch],
+    reject_non_vote: bool,
+    packet_count: usize,
+    rayon_pool: &ThreadPool,
+) {
     debug!("CPU ECDSA for {}", packet_count);
-    PAR_THREAD_POOL.install(|| {
+    //.thread_name(|i| format!("solSigVerify{i:02}"))
+    rayon_pool.install(|| {
         batches.par_iter_mut().flatten().for_each(|packet| {
             if !packet.meta().discard() && !verify_packet(packet, reject_non_vote) {
                 packet.meta_mut().set_discard(true);
@@ -490,6 +487,7 @@ pub fn ed25519_verify_cpu(batches: &mut [PacketBatch], reject_non_vote: bool, pa
 pub fn ed25519_verify_disabled(batches: &mut [PacketBatch]) {
     let packet_count = count_packets_in_batches(batches);
     debug!("disabled ECDSA for {}", packet_count);
+    // TODO: prevent this from running on default pool!
     batches.into_par_iter().for_each(|batch| {
         batch
             .par_iter_mut()
@@ -556,9 +554,10 @@ pub fn ed25519_verify(
     recycler_out: &Recycler<PinnedVec<u8>>,
     reject_non_vote: bool,
     valid_packet_count: usize,
+    rayon_pool: &ThreadPool,
 ) {
     let Some(api) = perf_libs::api() else {
-        return ed25519_verify_cpu(batches, reject_non_vote, valid_packet_count);
+        return ed25519_verify_cpu(batches, reject_non_vote, valid_packet_count, rayon_pool);
     };
     let total_packet_count = count_packets_in_batches(batches);
     // micro-benchmarks show GPU time for smallest batch around 15-20ms
@@ -573,7 +572,7 @@ pub fn ed25519_verify(
         return;
     };
     if valid_percentage < 90 || valid_packet_count < 64 {
-        ed25519_verify_cpu(batches, reject_non_vote, valid_packet_count);
+        ed25519_verify_cpu(batches, reject_non_vote, valid_packet_count, rayon_pool);
         return;
     }
 
@@ -636,11 +635,13 @@ mod tests {
             sigverify::{self, PacketOffsets},
             test_tx::{new_test_vote_tx, test_multisig_tx, test_tx},
         },
+        agave_thread_manager::RayonRuntime,
         bincode::{deserialize, serialize},
         curve25519_dalek::{edwards::CompressedEdwardsY, scalar::Scalar},
         rand::{thread_rng, Rng},
         solana_keypair::Keypair,
         solana_message::{compiled_instruction::CompiledInstruction, Message, MessageHeader},
+        solana_rayon_threadlimit::get_thread_count,
         solana_signature::Signature,
         solana_signer::Signer,
         solana_transaction::Transaction,
@@ -1073,7 +1074,15 @@ mod tests {
         let recycler = Recycler::default();
         let recycler_out = Recycler::default();
         let packet_count = sigverify::count_packets_in_batches(batches);
-        sigverify::ed25519_verify(batches, &recycler, &recycler_out, false, packet_count);
+        let pool = RayonRuntime::new_for_tests("ed25519_verify");
+        sigverify::ed25519_verify(
+            batches,
+            &recycler,
+            &recycler_out,
+            false,
+            packet_count,
+            &pool,
+        );
     }
 
     #[test]
@@ -1197,8 +1206,16 @@ mod tests {
             // equivalent to the CPU verification pipeline.
             let mut batches_cpu = batches.clone();
             let packet_count = sigverify::count_packets_in_batches(&batches);
-            sigverify::ed25519_verify(&mut batches, &recycler, &recycler_out, false, packet_count);
-            ed25519_verify_cpu(&mut batches_cpu, false, packet_count);
+            let pool = RayonRuntime::new_for_tests("test_verify_fuzz");
+            sigverify::ed25519_verify(
+                &mut batches,
+                &recycler,
+                &recycler_out,
+                false,
+                packet_count,
+                &pool,
+            );
+            ed25519_verify_cpu(&mut batches_cpu, false, packet_count, &pool);
 
             // check result
             batches

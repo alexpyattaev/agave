@@ -192,7 +192,7 @@ impl Tvu {
             cluster_info.clone(),
             turbine_disabled,
             exit.clone(),
-            thread_manager.get_native("solShredFetch").unwrap(),
+            thread_manager.try_get_native("solShredFetch").unwrap(),
         );
 
         let (verified_sender, verified_receiver) = unbounded();
@@ -204,7 +204,7 @@ impl Tvu {
             fetch_receiver,
             retransmit_sender.clone(),
             verified_sender,
-            thread_manager.get_rayon("solSvrfyShred").unwrap().clone(),
+            thread_manager.get_rayon("solSvrfyShred").clone(),
             //tvu_config.shred_sigverify_threads,
         );
 
@@ -218,10 +218,7 @@ impl Tvu {
             max_slots.clone(),
             Some(rpc_subscriptions.clone()),
             slot_status_notifier.clone(),
-            thread_manager
-                .get_rayon("solRetransmit")
-                .expect("solRetransmit runtime not configured")
-                .clone(),
+            thread_manager.get_rayon("solRetransmit").clone(),
         );
 
         let (ancestor_duplicate_slots_sender, ancestor_duplicate_slots_receiver) = unbounded();
@@ -267,7 +264,7 @@ impl Tvu {
                 dumped_slots_receiver,
                 popular_pruned_forks_sender,
                 outstanding_repair_requests,
-                thread_manager.get_native("solRepair").unwrap(),
+                thread_manager.try_get_native("solRepair").unwrap(),
             )
         };
 

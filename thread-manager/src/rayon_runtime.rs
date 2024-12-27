@@ -4,10 +4,7 @@ use {
     serde::{Deserialize, Serialize},
     std::{
         ops::Deref,
-        sync::{
-            atomic::{AtomicI64, Ordering},
-            Arc, Mutex,
-        },
+        sync::{Arc, Mutex},
     },
 };
 
@@ -66,7 +63,6 @@ impl RayonRuntime {
         let chosen_cores_mask = Mutex::new(core_allocation.as_core_mask_vector());
         let priority = config.priority;
         let policy = parse_policy(&config.policy);
-        let spawned_threads = AtomicI64::new(0);
         let rayon_pool = rayon::ThreadPoolBuilder::new()
             .num_threads(config.worker_threads)
             .thread_name(move |i| format!("{}_{}", &name, i))
@@ -78,5 +74,9 @@ impl RayonRuntime {
         Ok(Self {
             inner: Arc::new(RayonRuntimeInner { rayon_pool, config }),
         })
+    }
+
+    pub fn new_for_tests(name: &str) -> Self {
+        Self::new(name.to_owned(), RayonConfig::default()).unwrap()
     }
 }
