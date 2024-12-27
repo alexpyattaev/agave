@@ -16,7 +16,7 @@ use {
         },
         result::{Error, Result},
     },
-    agave_thread_manager::NativeThreadRuntime,
+    agave_thread_manager::{RayonRuntime, ThreadManager},
     bytes::Bytes,
     crossbeam_channel::{unbounded, Receiver, RecvTimeoutError, Sender},
     rayon::{prelude::*, ThreadPool},
@@ -30,7 +30,6 @@ use {
     solana_measure::measure::Measure,
     solana_metrics::inc_new_counter_error,
     solana_perf::packet::{Packet, PacketBatch},
-    solana_rayon_threadlimit::get_thread_count,
     solana_runtime::bank_forks::BankForks,
     solana_sdk::{
         clock::{Slot, DEFAULT_MS_PER_SLOT},
@@ -391,8 +390,10 @@ impl WindowService {
         dumped_slots_receiver: DumpedSlotsReceiver,
         popular_pruned_forks_sender: PopularPrunedForksSender,
         outstanding_repair_requests: Arc<RwLock<OutstandingShredRepairs>>,
-        thread_builder: &NativeThreadRuntime,
+        thread_manager: &ThreadManager,
     ) -> WindowService {
+        let thread_builder = thread_manager.get_native("solRepair");
+        let rayon_pool = thread_manager.get_rayon("solWinInsert").clone();
         let cluster_info = repair_info.cluster_info.clone();
         let bank_forks = repair_info.bank_forks.clone();
 
@@ -438,6 +439,7 @@ impl WindowService {
             retransmit_sender,
             outstanding_repair_requests,
             accept_repairs_only,
+            rayon_pool,
         );
 
         WindowService {
@@ -488,15 +490,11 @@ impl WindowService {
         retransmit_sender: Sender<Vec<ShredPayload>>,
         outstanding_requests: Arc<RwLock<OutstandingShredRepairs>>,
         accept_repairs_only: bool,
+        thread_pool: RayonRuntime,
     ) -> JoinHandle<()> {
         let handle_error = || {
             inc_new_counter_error!("solana-window-insert-error", 1, 1);
         };
-        let thread_pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(get_thread_count().min(8))
-            .thread_name(|i| format!("solWinInsert{i:02}"))
-            .build()
-            .unwrap();
         let reed_solomon_cache = ReedSolomonCache::default();
         Builder::new()
             .name("solWinInsert".to_string())

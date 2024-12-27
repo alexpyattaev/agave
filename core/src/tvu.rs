@@ -264,7 +264,7 @@ impl Tvu {
                 dumped_slots_receiver,
                 popular_pruned_forks_sender,
                 outstanding_repair_requests,
-                thread_manager.try_get_native("solRepair").unwrap(),
+                thread_manager,
             )
         };
 
