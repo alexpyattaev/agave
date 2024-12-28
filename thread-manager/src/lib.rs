@@ -228,7 +228,7 @@ mod tests {
     #[cfg(not(target_os = "linux"))]
     fn validate_affinity(_expect_cores: &[usize], _error_msg: &str) {}
 
-    /*#[test]
+    /*  #[test]
     fn thread_priority() {
         let priority_high = 10;
         let priority_default = crate::policy::DEFAULT_PRIORITY;
@@ -260,9 +260,9 @@ mod tests {
         };
 
         let manager = ThreadManager::new(conf).unwrap();
-        let high = manager.get_native("high").unwrap();
-        let low = manager.get_native("low").unwrap();
-        let default = manager.get_native("default").unwrap();
+        let high = manager.get_native("high");
+        let low = manager.get_native("low");
+        let default = manager.get_native("default");
 
         high.spawn(move || {
             let prio =
@@ -301,8 +301,8 @@ mod tests {
             .unwrap()
             .join()
             .unwrap();
-    }
-    */
+    }*/
+
     #[test]
     fn process_affinity() {
         let conf = ThreadManagerConfig {

@@ -958,7 +958,6 @@ pub(crate) fn process_blockstore_for_bank_0(
 
     info!("Processing ledger for slot 0...");
     let replay_tx_thread_pool = thread_manager.get_rayon("solReplayTx");
-    //    let replay_tx_thread_pool = create_thread_pool_for_tests(get_max_thread_count());
     process_bank_0(
         &bank_forks
             .read()
@@ -1041,7 +1040,7 @@ pub fn process_blockstore_from_root(
         .meta(start_slot)
         .unwrap_or_else(|_| panic!("Failed to get meta for slot {start_slot}"))
     {
-        let replay_tx_thread_pool = create_thread_pool_for_tests(get_max_thread_count());
+        let replay_tx_thread_pool = create_thread_pool_for_tests(get_max_thread_count()); //TODO: patch this in maybe?
         load_frozen_forks(
             bank_forks,
             &start_slot_meta,

@@ -1,35 +1,49 @@
 # pinned threads that do very important stuff
-[native_configs.solPohTickProd]
+[native_configs.solPohTickProd] # PoH thread
 max_threads = 1
 core_allocation.PinnedCores = { min = 0, max = 1 }
 
-[native_configs.solSigVerTpu]
-max_threads = 1
-core_allocation.PinnedCores = { min = 1, max = 2 }
+
 
 [native_configs.solSigVerTpuVote]
 max_threads = 1
 core_allocation.PinnedCores = { min = 2, max = 3 }
 
-[native_configs.solGossip]
+[native_configs.solRcvrGossip] # Runs gossip receiver thread which seems to eat a lot of CPU all the time
+max_threads = 1
+core_allocation.PinnedCores = { min = 3, max = 4 }
+
+
+[native_configs.solSigVerTpu]
+max_threads = 1
+core_allocation.DedicatedCoreSet = { min = 8, max = 64 }
+#core_allocation.PinnedCores = { min = 1, max = 2 }
+
+
+[native_configs.solClusterInfo]
+max_threads = 3
+core_allocation.DedicatedCoreSet = { min = 8, max = 64 }
+
+
+[native_configs.solGossip] # runs the rest of the gossip protocol, this does not set thread counts at all, do not cut
 max_threads = 16
-core_allocation.DedicatedCoreSet = { min = 16, max = 64 }
+core_allocation.DedicatedCoreSet = { min = 8, max = 64 }
 
 [native_configs.solRepair]
 max_threads = 16
-core_allocation.DedicatedCoreSet = { min = 16, max = 64 }
+core_allocation.DedicatedCoreSet = { min = 8, max = 64 }
 
 [native_configs.FetchStage]
 max_threads = 16
-core_allocation.DedicatedCoreSet = { min = 16, max = 64 }
+core_allocation.DedicatedCoreSet = { min = 8, max = 64 }
 
 [native_configs.solShredFetch]
 max_threads = 16
-core_allocation.DedicatedCoreSet = { min = 16, max = 64 }
+core_allocation.DedicatedCoreSet = { min = 8, max = 64 }
 
 
 [rayon_configs.solReplayTx] #Replay transactions pool
-worker_threads = 8
+worker_threads = 12
 
 [rayon_configs.solReplayFork] # Replay forks pool
 worker_threads = 16
@@ -39,59 +53,85 @@ worker_threads = 1
 stack_size_bytes = 100                                    # bytes because we want this to crash!
 core_allocation.DedicatedCoreSet = { min = 63, max = 64 }
 
-[rayon_configs.solRunGossip] #
+[rayon_configs.solSvrfyShred] # runs turbine protocol signature verification for received shreds
+max_threads = 12
+core_allocation.DedicatedCoreSet = { min = 8, max = 64 }
+
+[rayon_configs.solSigVerify] # Runs signature verification for cluster info
+max_threads=8
+core_allocation.DedicatedCoreSet = { min = 8, max = 64 }
+
+[rayon_configs.solRetransmit] # runs turbine protocol retransmit logic
+max_threads = 4
+core_allocation.DedicatedCoreSet = { min = 8, max = 64 }
+
+[rayon_configs.solRunGossip] 
 worker_threads = 4
+core_allocation.DedicatedCoreSet = { min = 8, max = 64 }
 
 [rayon_configs.solGossipWork]
-worker_threads = 8
+worker_threads = 4
+core_allocation.DedicatedCoreSet = { min = 8, max = 64 }
+
+[rayon_configs.solWinInsert]
+worker_threads = 2
+core_allocation.DedicatedCoreSet = { min = 8, max = 64 }
 
 [rayon_configs.solGossipCons] # Gossip Consume
-worker_threads = 12
+worker_threads = 16
 
 [rayon_configs.solAccounts] # AccountsDb foreground threads
-worker_threads = 4
+worker_threads = 6
 
 stack_size_bytes = 8388608                                # 8 megabytes
-core_allocation.DedicatedCoreSet = { min = 16, max = 64 }
+core_allocation.DedicatedCoreSet = { min = 8, max = 64 }
 
 [rayon_configs.solAccountsLo] # AccountsDb backkground
 worker_threads = 4
 stack_size_bytes = 8388608                                # 8 megabytes
-core_allocation.DedicatedCoreSet = { min = 16, max = 64 }
+core_allocation.DedicatedCoreSet = { min = 8, max = 64 }
 
 [rayon_configs.solAcctHash] # AccountsDb hash pool
-worker_threads = 4
-core_allocation.DedicatedCoreSet = { min = 16, max = 64 }
+worker_threads = 8
+core_allocation.DedicatedCoreSet = { min = 8, max = 64 }
 
+[rayon_configs.solVoteSigVerTpu] # TPU vote sigverify stage
+worker_threads = 4
+core_allocation.DedicatedCoreSet = { min = 8, max = 64 }
+
+[rayon_configs.solTrSigVerTpu] # TPU transaction sigverify stage
+worker_threads = 4
+core_allocation.DedicatedCoreSet = { min = 8, max = 64 }
+    
 
 # Networking runtimes (tokio)
 [tokio_configs.solQuicClientRt]
 worker_threads = 4
-core_allocation.DedicatedCoreSet = { min = 16, max = 64 }
+core_allocation.DedicatedCoreSet = { min = 8, max = 64 }
 
 [tokio_configs.solQuicTVo]
 worker_threads = 4
-core_allocation.DedicatedCoreSet = { min = 16, max = 64 }
+core_allocation.DedicatedCoreSet = { min = 8, max = 64 }
 
 [tokio_configs.solQuicTpu]
 worker_threads = 4
-core_allocation.DedicatedCoreSet = { min = 16, max = 64 }
+core_allocation.DedicatedCoreSet = { min = 8, max = 64 }
 
 [tokio_configs.solQuicTpuFwd]
 worker_threads = 4
-core_allocation.DedicatedCoreSet = { min = 16, max = 64 }
+core_allocation.DedicatedCoreSet = { min = 8, max = 64 }
 
-[tokio_configs.solRepairQuic]
-worker_threads = 8
-core_allocation.DedicatedCoreSet = { min = 16, max = 64 }
+[tokio_configs.solRepairQuic] # this is not used on MNB
+worker_threads = 2
+core_allocation.DedicatedCoreSet = { min = 8, max = 64 }
 
-[tokio_configs.solGossipQuic]
-worker_threads = 8
-core_allocation.DedicatedCoreSet = { min = 16, max = 64 }
+[tokio_configs.solGossipQuic]# this is not used on MNB
+worker_threads = 2
+core_allocation.DedicatedCoreSet = { min = 8, max = 64 }
 
-[tokio_configs.solTurbineQuic]
-worker_threads = 8
-core_allocation.DedicatedCoreSet = { min = 16, max = 64 }
+[tokio_configs.solTurbineQuic]# this is not used on MNB
+worker_threads = 2
+core_allocation.DedicatedCoreSet = { min = 8, max = 64 }
 
 # everything else
-default_core_allocation.DedicatedCoreSet = { min = 5, max = 64 }
+default_core_allocation.DedicatedCoreSet = { min = 8, max = 64 }
