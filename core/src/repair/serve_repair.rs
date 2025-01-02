@@ -982,10 +982,10 @@ impl ServeRepair {
             from_addr,
             protocol,
             stake,
-            whitelisted: _,
+            whitelisted,
         } in requests.into_iter()
         {
-            if !data_budget.check(request.max_response_bytes()) {
+            if (!whitelisted) && !data_budget.check(request.max_response_bytes()) {
                 stats.dropped_requests_outbound_bandwidth += 1;
                 continue;
             }
@@ -1009,7 +1009,7 @@ impl ServeRepair {
             };
             let num_response_packets = rsp.len();
             let num_response_bytes = rsp.iter().map(|p| p.meta().size).sum();
-            if data_budget.take(num_response_bytes)
+            if (data_budget.take(num_response_bytes) || whitelisted)
                 && send_response(
                     rsp,
                     protocol,
