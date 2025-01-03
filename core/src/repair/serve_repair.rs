@@ -643,7 +643,7 @@ impl ServeRepair {
         let my_id = identity_keypair.pubkey();
 
         let max_buffered_packets = if self.repair_whitelist.read().unwrap().len() > 0 {
-            4 * MAX_REQUESTS_PER_ITERATION
+            16 * MAX_REQUESTS_PER_ITERATION
         } else {
             2 * MAX_REQUESTS_PER_ITERATION
         };
@@ -985,6 +985,9 @@ impl ServeRepair {
             whitelisted,
         } in requests.into_iter()
         {
+            /*             if (!whitelisted) {
+                continue;
+            }*/
             if (!whitelisted) && !data_budget.check(request.max_response_bytes()) {
                 stats.dropped_requests_outbound_bandwidth += 1;
                 continue;
