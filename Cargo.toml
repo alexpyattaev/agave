@@ -256,6 +256,7 @@ check-cfg = [
 [workspace.dependencies]
 Inflector = "0.11.4"
 agave-transaction-view = { path = "transaction-view", version = "=2.2.0" }
+malloc_hook = {path="malloc_hook", version="*"}
 aquamarine = "0.3.3"
 aes-gcm-siv = "0.11.1"
 ahash = "0.8.11"

@@ -276,6 +276,7 @@ dependencies = [
  "libc",
  "libloading",
  "log",
+ "malloc_hook",
  "num_cpus",
  "predicates",
  "rand 0.8.5",
@@ -1683,6 +1684,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "crossbeam"
+version = "0.8.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1137cd7e7fc0fb5d3c5a8678be38ec56e819125d8d7907411fe24ccb943faca8"
+dependencies = [
+ "crossbeam-channel",
+ "crossbeam-deque",
+ "crossbeam-epoch",
+ "crossbeam-queue",
+ "crossbeam-utils",
+]
+
+[[package]]
 name = "crossbeam-channel"
 version = "0.5.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1693,25 +1707,30 @@ dependencies = [
 
 [[package]]
 name = "crossbeam-deque"
-version = "0.8.1"
+version = "0.8.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6455c0ca19f0d2fbf751b908d5c55c1f5cbc65e03c4225427254b46890bdde1e"
+checksum = "9dd111b7b7f7d55b72c0a6ae361660ee5853c9af73f70c3c2ef6858b950e2e51"
 dependencies = [
- "cfg-if 1.0.0",
  "crossbeam-epoch",
  "crossbeam-utils",
 ]
 
 [[package]]
 name = "crossbeam-epoch"
-version = "0.9.5"
-source = "git+https://github.com/anza-xyz/crossbeam?rev=fd279d707025f0e60951e429bf778b4813d1b6bf#fd279d707025f0e60951e429bf778b4813d1b6bf"
+version = "0.9.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5b82ac4a3c2ca9c3460964f020e1402edd5753411d7737aa39c3714ad1b5420e"
 dependencies = [
- "cfg-if 1.0.0",
  "crossbeam-utils",
- "lazy_static",
- "memoffset 0.6.4",
- "scopeguard",
+]
+
+[[package]]
+name = "crossbeam-queue"
+version = "0.3.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0f58bbc28f91df819d0aa2a2c00cd19754769c2fad90579b3592b1c9ba7a3115"
+dependencies = [
+ "crossbeam-utils",
 ]
 
 [[package]]
@@ -3671,6 +3690,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "malloc_hook"
+version = "0.1.0"
+dependencies = [
+ "crossbeam",
+ "tikv-jemalloc-sys",
+ "tikv-jemallocator",
+]
+
+[[package]]
 name = "managed"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3707,15 +3735,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "83faa42c0a078c393f6b29d5db232d8be22776a891f8f56e5284faee4a20b327"
 dependencies = [
  "libc",
-]
-
-[[package]]
-name = "memoffset"
-version = "0.6.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "59accc507f1338036a0477ef61afdae33cde60840f4dfe481319ce3ad116ddf9"
-dependencies = [
- "autocfg",
 ]
 
 [[package]]
@@ -3880,7 +3899,7 @@ dependencies = [
  "cfg-if 1.0.0",
  "cfg_aliases",
  "libc",
- "memoffset 0.9.1",
+ "memoffset",
 ]
 
 [[package]]
@@ -5971,7 +5990,7 @@ dependencies = [
  "log",
  "lz4",
  "memmap2",
- "memoffset 0.9.1",
+ "memoffset",
  "modular-bitfield",
  "num_cpus",
  "num_enum",
@@ -6255,7 +6274,7 @@ dependencies = [
  "byteorder",
  "libsecp256k1",
  "log",
- "memoffset 0.9.1",
+ "memoffset",
  "rand 0.8.5",
  "scopeguard",
  "solana-bn254",
@@ -8097,7 +8116,7 @@ dependencies = [
  "itertools 0.12.1",
  "lazy_static",
  "log",
- "memoffset 0.9.1",
+ "memoffset",
  "num-bigint 0.4.6",
  "num-derive",
  "num-traits",
@@ -8686,7 +8705,7 @@ dependencies = [
  "log",
  "lz4",
  "memmap2",
- "memoffset 0.9.1",
+ "memoffset",
  "mockall",
  "modular-bitfield",
  "num-derive",
@@ -9144,7 +9163,7 @@ dependencies = [
 name = "solana-stable-layout"
 version = "2.2.0"
 dependencies = [
- "memoffset 0.9.1",
+ "memoffset",
  "solana-instruction",
  "solana-pubkey",
 ]
@@ -12243,3 +12262,8 @@ dependencies = [
  "cc",
  "pkg-config",
 ]
+
+[[patch.unused]]
+name = "crossbeam-epoch"
+version = "0.9.5"
+source = "git+https://github.com/anza-xyz/crossbeam?rev=fd279d707025f0e60951e429bf778b4813d1b6bf#fd279d707025f0e60951e429bf778b4813d1b6bf"

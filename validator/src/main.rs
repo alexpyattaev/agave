@@ -1,6 +1,8 @@
 #![allow(clippy::arithmetic_side_effects)]
-#[cfg(not(any(target_env = "msvc", target_os = "freebsd")))]
-use jemallocator::Jemalloc;
+//#[cfg(not(any(target_env = "msvc", target_os = "freebsd")))]
+//use jemallocator::Jemalloc;
+
+use malloc_hook::*;
 use {
     agave_validator::{
         admin_rpc_service,
@@ -91,7 +93,8 @@ use {
 
 #[cfg(not(any(target_env = "msvc", target_os = "freebsd")))]
 #[global_allocator]
-static GLOBAL: Jemalloc = Jemalloc;
+static GLOBAL_ALLOC_WRAP: JemWrapAllocator = JemWrapAllocator::new();
+//static GLOBAL: Jemalloc = Jemalloc;
 
 #[derive(Debug, PartialEq, Eq)]
 enum Operation {
@@ -450,7 +453,79 @@ fn configure_banking_trace_dir_byte_limit(
     };
 }
 
+fn watch_allocator() {
+    fn extend_lifetime<'b>(r: &'b str) -> &'static str {
+        // SAFETY: it is safe to extend lifetimes here since we can never write any metrics beyond the point
+        // where allocator is deinitialized. The function is private so can not be called from outside
+        // Metrics can not work with non-static strings due to design limitations.
+        unsafe { std::mem::transmute::<&'b str, &'static str>(r) }
+    }
+    let mut exit = false;
+    while !exit {
+        view_allocations(|stats| {
+            if stats.data.is_empty() {
+                exit = true;
+            }
+            let mut datapoint =
+                solana_metrics::datapoint::DataPoint::new("MemoryBytesAllocatedTotal");
+            for (name, counters) in stats.data.iter() {
+                let s = counters.view();
+                let name = extend_lifetime(name);
+                datapoint.add_field_i64(name, s.bytes_allocated_total as i64);
+            }
+            solana_metrics::submit(datapoint, Level::Info);
+            let mut datapoint = solana_metrics::datapoint::DataPoint::new("MemoryBytesBalance");
+            for (name, counters) in stats.data.iter() {
+                let s = counters.view();
+                let name = extend_lifetime(name);
+                datapoint.add_field_i64(name, s.bytes_balance as i64);
+            }
+            solana_metrics::submit(datapoint, Level::Info);
+        });
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
 pub fn main() {
+    let mut mps = MemPoolStats::default();
+    // yes I know this is brittle, this is supposed to work with thread manager which loads thread names from file
+    for thread in [
+        "solPohTickProd",
+        "solSigVerTpuVote",
+        "solRcvrGossip",
+        "solSigVerTpu",
+        "solClusterInfo",
+        "solGossip",
+        "solRepair",
+        "FetchStage",
+        "solShredFetch",
+        "solReplayTx",
+        "solReplayFork",
+        "solRayonGlob",
+        "solSvrfyShred",
+        "solSigVerify",
+        "solRetransmit",
+        "solRunGossip",
+        "solGossipWork",
+        "solWinInsert",
+        "solGossipCons",
+        "solAccounts",
+        "solAccountsLo",
+        "solAcctHash",
+        "solVoteSigVerTpu",
+        "solTrSigVerTpu",
+        "solQuicClientRt",
+        "solQuicTVo",
+        "solQuicTpu",
+        "solQuicTpuFwd",
+        "solRepairQuic",
+        "solGossipQuic",
+        "solTurbineQuic",
+    ] {
+        mps.add(thread.to_owned());
+    }
+    init_allocator(mps);
+    std::thread::spawn(watch_allocator);
     let default_args = DefaultArgs::new();
     let solana_version = solana_version::version!();
     let cli_app = app(solana_version, &default_args);
@@ -2107,6 +2182,7 @@ pub fn main() {
     }
     info!("Validator initialized");
     validator.join();
+    deinit_allocator();
     info!("Validator exiting..");
 }
 
