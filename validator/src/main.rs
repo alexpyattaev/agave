@@ -470,14 +470,14 @@ fn watch_allocator() {
                 solana_metrics::datapoint::DataPoint::new("MemoryBytesAllocatedTotal");
             for (name, counters) in stats.data.iter() {
                 let s = counters.view();
-                let name = extend_lifetime(name);
+                let name = extend_lifetime(std::str::from_utf8(name).unwrap());
                 datapoint.add_field_i64(name, s.bytes_allocated_total as i64);
             }
             solana_metrics::submit(datapoint, Level::Info);
             let mut datapoint = solana_metrics::datapoint::DataPoint::new("MemoryBytesBalance");
             for (name, counters) in stats.data.iter() {
                 let s = counters.view();
-                let name = extend_lifetime(name);
+                let name = extend_lifetime(std::str::from_utf8(name).unwrap());
                 datapoint.add_field_i64(name, s.bytes_balance as i64);
             }
             solana_metrics::submit(datapoint, Level::Info);
@@ -522,7 +522,7 @@ pub fn main() {
         "solGossipQuic",
         "solTurbineQuic",
     ] {
-        mps.add(thread.to_owned());
+        mps.add(thread);
     }
     init_allocator(mps);
     std::thread::spawn(watch_allocator);
