@@ -138,6 +138,7 @@ impl ThreadManager {
     pub fn try_get_rayon(&self, name: &str) -> Option<&RayonRuntime> {
         self.lookup(name, &self.rayon_runtime_mapping, &self.rayon_runtimes)
     }
+
     pub fn get_rayon(&self, name: &str) -> &RayonRuntime {
         if let Some(runtime) = self.try_get_rayon(name) {
             runtime
@@ -146,10 +147,17 @@ impl ThreadManager {
         }
     }
 
-    pub fn get_tokio(&self, name: &str) -> Option<&TokioRuntime> {
+    pub fn try_get_tokio(&self, name: &str) -> Option<&TokioRuntime> {
         self.lookup(name, &self.tokio_runtime_mapping, &self.tokio_runtimes)
     }
 
+    pub fn get_tokio(&self, name: &str) -> &TokioRuntime {
+        if let Some(runtime) = self.try_get_tokio(name) {
+            runtime
+        } else {
+            panic!("Tokio runtime {name} not configured!");
+        }
+    }
     pub fn set_process_affinity(config: &ThreadManagerConfig) -> anyhow::Result<Vec<usize>> {
         let chosen_cores_mask = config.default_core_allocation.as_core_mask_vector();
 
@@ -320,7 +328,7 @@ mod tests {
         };
 
         let manager = ThreadManager::new(conf).unwrap();
-        let runtime = manager.try_get_native("test").unwrap();
+        let runtime = manager.get_native("test");
 
         let thread1 = runtime
             .spawn(|| {
@@ -360,7 +368,7 @@ mod tests {
         };
 
         let manager = ThreadManager::new(conf).unwrap();
-        let rayon_runtime = manager.try_get_rayon("test").unwrap();
+        let rayon_runtime = manager.get_rayon("test");
 
         let _rr = rayon_runtime.rayon_pool.broadcast(|ctx| {
             println!("Rayon thread {} reporting", ctx.index());
