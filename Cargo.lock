@@ -7584,6 +7584,7 @@ dependencies = [
  "solana-poh",
  "solana-runtime",
  "solana-sdk",
+ "thingbuf",
  "thiserror",
 ]
 
@@ -9930,6 +9931,16 @@ name = "textwrap"
 version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "222a222a5bfe1bba4a77b45ec488a741b3cb8872e5e499451fd7d0129c9c7c3d"
+
+[[package]]
+name = "thingbuf"
+version = "0.1.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "662b54ef6f7b4e71f683dadc787bbb2d8e8ef2f91b682ebed3164a5a7abca905"
+dependencies = [
+ "parking_lot 0.12.3",
+ "pin-project",
+]
 
 [[package]]
 name = "thiserror"

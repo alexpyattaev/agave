@@ -210,6 +210,7 @@ impl<T> RingBuffer<T> {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     #[test]
@@ -394,5 +395,99 @@ mod tests {
 
         // The producers should still be shut off.
         assert_eq!(ring_buffer.try_push(5), Err(5));
+    }
+
+    /// Computes sum of ints in range [0 to n)
+    const fn sum_of_numbers_up_to_n(n: u64) -> u64 {
+        (n * n + n) / 2 - n
+    }
+    const THREADS: u64 = 20;
+    const ITERATIONS: u64 = 1000;
+
+    #[test]
+    fn test_many_many_threads() {
+        let ring_buffer_owned = RingBuffer::with_capacity(42);
+        let ring_buffer = &ring_buffer_owned;
+
+        let mut items_remaining = sum_of_numbers_up_to_n(THREADS * ITERATIONS);
+        let mut max_idle_iterations_safety_limit = items_remaining * 4;
+        std::thread::scope(|scope| {
+            // spawn producers that will busy-loop flood the ringbuffer with stuff
+            for i in 0u64..THREADS {
+                scope.spawn(move || {
+                    for item in 0..ITERATIONS {
+                        let item = item + i * ITERATIONS;
+                        //println!("Pushing {item}");
+                        loop {
+                            match ring_buffer.try_push(item) {
+                                Ok(_) => break,
+                                Err(_) => {}
+                            }
+                        }
+                    }
+                });
+            }
+            //spawn consumer that will eat the values
+            scope.spawn(|| {
+                while items_remaining > 0 {
+                    match ring_buffer.pop() {
+                        Some(v) => {
+                            println!("Pulled {v}");
+                            items_remaining -= v;
+                        }
+                        None => {
+                            max_idle_iterations_safety_limit -= 1;
+                        }
+                    };
+                    assert!(
+                        max_idle_iterations_safety_limit > 0,
+                        "Safety limit should never be reached"
+                    );
+                }
+            });
+        })
+    }
+    #[test]
+    fn test_many_many_thingbuf_threads() {
+        let ring_buffer_owned = thingbuf::ThingBuf::new(42);
+
+        let ring_buffer = &ring_buffer_owned;
+
+        let mut items_remaining = sum_of_numbers_up_to_n(THREADS * ITERATIONS);
+        let mut max_idle_iterations_safety_limit = items_remaining * 128;
+        std::thread::scope(|scope| {
+            // spawn producers that will busy-loop flood the ringbuffer with stuff
+            for i in 0u64..THREADS {
+                scope.spawn(move || {
+                    for item in 0..ITERATIONS {
+                        let item = item + i * ITERATIONS;
+                        //println!("Pushing {item}");
+                        loop {
+                            match ring_buffer.push(item) {
+                                Ok(_) => break,
+                                Err(_) => {}
+                            }
+                        }
+                    }
+                });
+            }
+            //spawn consumer that will eat the values
+            scope.spawn(|| {
+                while items_remaining > 0 {
+                    match ring_buffer.pop() {
+                        Some(v) => {
+                            items_remaining -= v;
+                        }
+                        None => {
+                            max_idle_iterations_safety_limit -= 1;
+                        }
+                    };
+                    assert!(
+                        max_idle_iterations_safety_limit > 0,
+                        "Safety limit should never be reached"
+                    );
+                }
+            });
+        })
     }
 }
