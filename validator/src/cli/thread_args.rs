@@ -1,11 +1,21 @@
 //! Arguments for controlling the number of threads allocated for various tasks
 
 use {
+    agave_thread_manager::ThreadManagerConfig,
+    anyhow::Context,
     clap::{value_t_or_exit, Arg, ArgMatches},
+    log::{error, info},
     solana_accounts_db::{accounts_db, accounts_index},
     solana_clap_utils::{hidden_unless_forced, input_validators::is_within_range},
     solana_rayon_threadlimit::{get_max_thread_count, get_thread_count},
-    std::{num::NonZeroUsize, ops::RangeInclusive},
+    std::{
+        fs::File,
+        io::Read,
+        num::NonZeroUsize,
+        ops::RangeInclusive,
+        path::{Path, PathBuf},
+        process::exit,
+    },
 };
 
 // Need this struct to provide &str whose lifetime matches that of the CLAP Arg's
@@ -22,6 +32,7 @@ pub struct DefaultThreadArgs {
     pub rocksdb_flush_threads: String,
     pub tvu_receive_threads: String,
     pub tvu_sigverify_threads: String,
+    pub thread_manager_config: PathBuf,
 }
 
 impl Default for DefaultThreadArgs {
@@ -42,6 +53,7 @@ impl Default for DefaultThreadArgs {
             rocksdb_flush_threads: RocksdbFlushThreadsArg::bounded_default().to_string(),
             tvu_receive_threads: TvuReceiveThreadsArg::bounded_default().to_string(),
             tvu_sigverify_threads: TvuShredSigverifyThreadsArg::bounded_default().to_string(),
+            thread_manager_config: PathBuf::new(),
         }
     }
 }
@@ -60,6 +72,13 @@ pub fn thread_args<'a>(defaults: &DefaultThreadArgs) -> Vec<Arg<'_, 'a>> {
         new_thread_arg::<RocksdbFlushThreadsArg>(&defaults.rocksdb_flush_threads),
         new_thread_arg::<TvuReceiveThreadsArg>(&defaults.tvu_receive_threads),
         new_thread_arg::<TvuShredSigverifyThreadsArg>(&defaults.tvu_sigverify_threads),
+        Arg::with_name("thread_config")
+            .long("thread_config")
+            .value_name("FILE.toml")
+            .takes_value(true)
+            .required(false)
+            .default_value("")
+            .help("Use <FILE.toml> to customize all thread pool sizes and priorities."),
     ]
 }
 
@@ -87,9 +106,33 @@ pub struct NumThreadConfig {
     pub rocksdb_flush_threads: NonZeroUsize,
     pub tvu_receive_threads: NonZeroUsize,
     pub tvu_sigverify_threads: NonZeroUsize,
+    pub thread_manager_config: ThreadManagerConfig,
+}
+
+fn politely_load_thread_config_file(file_path: &Path) -> anyhow::Result<ThreadManagerConfig> {
+    Ok(if file_path.is_file() {
+        let mut file = File::open(file_path)
+            .with_context(|| format!("provided thread_config {:?} is not readable", &file_path))?;
+        let mut buf = String::with_capacity(1024);
+        file.read_to_string(&mut buf)
+            .context("Config should contain valid UTF8")?;
+        ThreadManagerConfig::from_toml_str(&buf)
+            .context("Thread pool config should be a valid TOML file")?
+    } else {
+        info!("Using default base thread pool configuration");
+        ThreadManagerConfig::default_for_agave()
+    })
 }
 
 pub fn parse_num_threads_args(matches: &ArgMatches) -> NumThreadConfig {
+    let file_path = value_t_or_exit!(matches, "thread_config", PathBuf);
+    let thread_manager_config = match politely_load_thread_config_file(&file_path) {
+        Ok(v) => v,
+        Err(e) => {
+            error!("Could not load thread_config, error {e}");
+            exit(1);
+        }
+    };
     NumThreadConfig {
         accounts_db_clean_threads: value_t_or_exit!(
             matches,
@@ -143,6 +186,7 @@ pub fn parse_num_threads_args(matches: &ArgMatches) -> NumThreadConfig {
             TvuShredSigverifyThreadsArg::NAME,
             NonZeroUsize
         ),
+        thread_manager_config,
     }
 }
 

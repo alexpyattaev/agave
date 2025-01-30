@@ -131,6 +131,8 @@ name = "agave-validator"
 version = "2.2.0"
 dependencies = [
  "agave-geyser-plugin-interface",
+ "agave-thread-manager",
+ "anyhow",
  "chrono",
  "clap",
  "console",

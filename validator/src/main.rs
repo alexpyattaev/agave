@@ -911,6 +911,7 @@ pub fn main() {
         rocksdb_flush_threads,
         tvu_receive_threads,
         tvu_sigverify_threads,
+        thread_manager_config,
     } = cli::thread_args::parse_num_threads_args(&matches);
 
     let identity_keypair = keypair_of(&matches, "identity").unwrap_or_else(|| {
@@ -1601,6 +1602,7 @@ pub fn main() {
             .is_present("delay_leader_block_for_pending_fork"),
         wen_restart_proto_path: value_t!(matches, "wen_restart", PathBuf).ok(),
         wen_restart_coordinator: value_t!(matches, "wen_restart_coordinator", Pubkey).ok(),
+        thread_manager_config,
         ..ValidatorConfig::default()
     };
 

@@ -317,6 +317,8 @@ name = "agave-validator"
 version = "2.2.0"
 dependencies = [
  "agave-geyser-plugin-interface",
+ "agave-thread-manager",
+ "anyhow",
  "assert_cmd",
  "chrono",
  "clap 2.33.3",
