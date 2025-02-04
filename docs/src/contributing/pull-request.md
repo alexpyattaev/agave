@@ -2,13 +2,13 @@
 
 ## Preparation
 
-1. You’ll want a powerful machine for this. Building agave from sources takes a lot of RAM, make sure you have ~30GB to be sure it is enough.
-   1. Rust analyzer is quite capable of running on agave source tree, but expect high memory consumption
+1. You’ll need a powerful machine for this task. Building Agave from source requires a significant amount of RAM—aim for at least 30GB to ensure sufficient memory.
+   1. Rust-analyzer is capable of running on the Agave source tree but expect high memory consumption
 2. Make a fork of `anza-xyz/agave` master branch under your own namespace in github. Let us assume it is called `ubercoder/agave`
-   1. Do not ever commit anything into the master branch of your fork. Keep it synced to upstream, this will make rebase process painless.
-   2. Whenever you want to pull agave code, pull it from your fork not from agave repo directly.
+   1. Do not ever commit anything into the master branch of your fork. Keep your branch synced with the upstream; this will make the rebase process much smoother.
+   2. Whenever you want to pull agave code, pull it from your fork not from the agave repo directly.
 3. Follow a guide to set up a reasonable rust development environment, e.g. [this one](https://github.com/anza-xyz/agave/?tab=readme-ov-file#building)
-   1. Make sure you can at least build the code before proceeding
+   1. Make sure you can build the code before proceeding
 4. Plan the minimal viable set of changes you'd need to achieve your goals. Idea is to keep your PRs as small and simple as feasible.
 
 
@@ -68,7 +68,7 @@
 
 ## Convince a build script that your crate has correct version
 
-   In your Cargo.toml you will normally want to inherit the workspace version, which cargo new will default-init to
+   In your Cargo.toml you normally want to inherit the workspace version, which `cargo new` will default-init to
 
 ```toml
 version.workspace = true
@@ -99,7 +99,7 @@ version = { workspace = true }
 
 ## Squash the unnecessary commits{#pr-squash-commits}
 
-1. You may want to set your EDITOR variable to the editor of choice prior to starting this.
+1. You may want to set your `EDITOR` environment variable to the editor of choice prior to starting this.
 2. `git rebase -i <commit-right-before-your-first-commit>`
 3. You'll then see all of your commits from oldest to newest like this:
 ```
