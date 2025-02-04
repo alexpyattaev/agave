@@ -286,8 +286,7 @@ PRs are typically reviewed and merged in under 7 days. If your PR has been open
 for longer, it's a strong indicator that the reviewers aren't confident the
 change meets the quality standards of the codebase. You might consider closing
 it and coming back with smaller PRs and longer descriptions detailing what
-problem it solves and how it solves it. Old PRs will be marked stale and then
-closed automatically 7 days later.
+problem it solves and how it solves it.
 
 ### How to manage review feedback?
 

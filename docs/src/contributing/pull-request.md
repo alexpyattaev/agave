@@ -14,7 +14,7 @@
 
 ## When not to file a PR
 
-1. Your code/comments may expose/highlight a security threat in the existing deployed instances
+1. Your code/comments may expose/highlight a security threat in the existing deployed instances. In such cases please follow the instructions in [SECURITY.md](https://github.com/anza-xyz/agave/blob/master/SECURITY.md).
 
 
 ## Procedure
