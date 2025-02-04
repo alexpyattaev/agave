@@ -40,6 +40,40 @@ abbreviating words in function names.
 case where that code has not yet been updated to meet the conventions described
 here.
 
+### Test-only code
+
+We all love tests, but in order to write them one often need "helper functions". For example,
+a complex struct may have a constructor function that instantiates it in a configuration that
+is well-suited for tests, but is not otherwise useful in production. Such functions should be
+clearly marked as intended for tests, as their code quality standard can be much lower than the
+production code (e.g. we can afford to freely use dynamic allocations without perf concerns).
+When within a crate, use
+```rust
+#[cfg(test)]
+```
+annotation as appropriate.
+
+If you want to use some functions or structures only for testing but outside of the current module (integration test, other crates etc), use the following procedure:
+
+1. Annotate the code appropriately:
+```rust
+#[cfg(feature = "dev-context-only-utils")]
+pub fn my_function_for_testing_foo() {}
+```
+```rust
+#[cfg(feature = "dev-context-only-utils")]
+use qualifier_attr::qualifiers;
+```
+```rust
+#[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
+struct A {}
+```
+2. Ensure that `dev-context-only-utils` feature is present in the current crate's `Cargo.toml`.
+3. When using the functionality, make sure to enable the feature:
+```toml
+[dev-dependencies]
+my_crate = { workspace=true,  features = ["dev-context-only-utils"] }
+```
 
 ## Terminology
 
