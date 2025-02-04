@@ -1,9 +1,7 @@
 # Agave Style Guidelines
 
-The goal of these guidelines is to improve developer productivity by allowing
-developers to jump into any file in the codebase and not need to adapt to
-inconsistencies in how the code is written. The codebase should appear as if it
-had been authored by a single developer. If you don't agree with a convention,
+These guidelines aim to improve developer productivity by ensuring consistency across the codebase, allowing developers to seamlessly navigate and contribute without adapting to varying coding styles. The codebase should appear as if it
+has been authored by a single developer. If you don't agree with a convention,
 submit a PR patching this document and let's discuss! Once the PR is accepted,
 *all* code should be updated as soon as possible to reflect the new
 conventions. These guidelines also outline the PR process etiquette.
@@ -78,7 +76,7 @@ my_crate = { workspace=true,  features = ["dev-context-only-utils"] }
 ### Public API
 
 When working on any crate, please be considerate of the fact that most agave crates get pushed on crates.io,
-and thus breaking public API on them is not desirable. Thus, unless you absolutely must,
+and thus breaking public API on them is discouraged. Thus, unless you absolutely must,
 you should generally avoid doing so where possible. Please refer to the [semver guide](https://semver.org/).
 
 ### Allocator usage
@@ -213,7 +211,7 @@ more important than competing issues, don't expect the reviewer to read on.
 
 Next, the reviewer will read the proposed changes. At this point, the reviewer
 needs to be convinced the proposed changes are a *good* solution to the problem
-described above.  If the proposed changes, not the code changes, generates
+described above. If the proposed changes, not the code changes, generates
 discussion, consider closing the PR and returning with a design proposal
 instead.
 
