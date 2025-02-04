@@ -82,8 +82,9 @@ you should generally avoid doing so where possible. Please refer to the [semver 
 ### Allocator usage
 
 When possible, avoid dynamic allocations of memory. While not particularly expensive in any one place, agave allocates a lot of memory every second, which creates contention for global allocator locks. Thus, if your code can be expected to run often:
- * avoid `Box`, `.clone()` and `.collect()` where possible
+ * avoid `Box::clone()`, `Vec::clone()` and `.collect()` where possible
  * use `::with_capacity()`, even if you do not know the exact length of the resulting collection, slight overallocation is usually cheaper then reallocating
+ * consider using fixed length stack-allocated objects in favor of dynamic allocation
 
 ## Terminology
 

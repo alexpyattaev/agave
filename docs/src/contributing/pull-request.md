@@ -27,13 +27,13 @@
    1. Sync the `ubercoder/agave` master branch with upstream. You can do this with cli or github. **This should always fast-forward** since you are never committing anything to `ubercoder/agave` master.
    2. Pull the latest version of `ubercoder/agave` master to your local machine if you have updated your fork via github
    3. Checkout the `fix_all_bugs` branch and rebase it onto master's head (`git rebase master`). This rebase will pull in the changes made in the upstream’s master branch into your `fix_all_bugs` branch. Fix conflicts if necessary. Follow applicable rebase guides.
-   4. Now you can force-push the `fix_all_bugs ` branch to rewrite its history on the gitlabserver (necessary due to rebase)
+   4. Now you can force-push the `fix_all_bugs ` branch to rewrite its history on the git server (necessary due to rebase)
 5. Make sure you run this procedure before every commit that you intend to push for review:
    1. Make sure your code builds without warnings - `./cargo build` is a good start
    2. Run tests on all packages you have worked on ``` ./cargo test \--package \<crate\_name\> ```
-      1. Just running `cargo test` in the root directory will run a bunch of tests that will fail on your machine, only run the tests on the crates you touch.
+      1. Just running `./cargo test` in the root directory will run so many tests that it will probably take a while, and some tests might flake (e.g. due to port/address reuse), so only run the tests on the crates you touch (and crates that use your code).
    3. If your crate has examples, they should get built by `cargo test`, but they will not get run. Make sure they work correctly, CI will not hold your hand here.
-   4. ```./scripts/cargo-fmt.sh && ./scripts/cargo-clippy.sh```
+   4. ```./scripts/cargo-fmt.sh && ./scripts/cargo-clippy.sh``` will make sure all your rust code is formatted and linted. Cargo-clippy will also implicitly check that the code compiles.
    5. Make sure your `Cargo.toml` files are *perfect* [by sorting them](#unsorted-deps)
    6. Make sure there are no trailing whitespaces anywhere `git diff origin/master --check --oneline`
       1. If you find any trailing whitespaces that `cargo fmt` will not fix, you can use e.g. `sed  's/[ \t]*$//'` to fix them manually
