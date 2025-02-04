@@ -75,6 +75,18 @@ struct A {}
 my_crate = { workspace=true,  features = ["dev-context-only-utils"] }
 ```
 
+### Public API
+
+When working on any crate, please be considerate of the fact that most agave crates get pushed on crates.io,
+and thus breaking public API on them is not desirable. Thus, unless you absolutely must,
+you should generally avoid doing so where possible. Please refer to the [semver guide](https://semver.org/).
+
+### Allocator usage
+
+When possible, avoid dynamic allocations of memory. While not particularly expensive in any one place, agave allocates a lot of memory every second, which creates contention for global allocator locks. Thus, if your code can be expected to run often:
+ * avoid `Box`, `.clone()` and `.collect()` where possible
+ * use `::with_capacity()`, even if you do not know the exact length of the resulting collection, slight overallocation is usually cheaper then reallocating
+
 ## Terminology
 
 Inventing new terms is allowed, but should only be done when the term is widely
