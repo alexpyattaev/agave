@@ -144,7 +144,7 @@ members = [
     "vortexor",
     "vote",
     "watchtower",
-    "wen-restart",
+    "wen-restart", "wire_format",
     "zk-keygen",
     "zk-sdk",
     "zk-token-sdk",
