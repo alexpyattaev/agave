@@ -25,7 +25,7 @@ use {
 };
 
 #[inline]
-fn get_shred_size(shred: &[u8]) -> Option<usize> {
+pub fn get_shred_size(shred: &[u8]) -> Option<usize> {
     match get_shred_variant(shred).ok()? {
         ShredVariant::MerkleCode { .. } => Some(shred::merkle::ShredCode::SIZE_OF_PAYLOAD),
         ShredVariant::MerkleData { .. } => Some(shred::merkle::ShredData::SIZE_OF_PAYLOAD),
@@ -75,7 +75,7 @@ pub(crate) const fn get_signature_range() -> Range<usize> {
 }
 
 #[inline]
-pub(super) fn get_shred_variant(shred: &[u8]) -> Result<ShredVariant, Error> {
+pub fn get_shred_variant(shred: &[u8]) -> Result<ShredVariant, Error> {
     let Some(&shred_variant) = shred.get(64) else {
         return Err(Error::InvalidPayloadSize(shred.len()));
     };

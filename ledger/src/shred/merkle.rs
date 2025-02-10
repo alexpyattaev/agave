@@ -52,7 +52,7 @@ const_assert_eq!(ShredData::SIZE_OF_PAYLOAD, 1203);
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ShredData {
     common_header: ShredCommonHeader,
-    data_header: DataShredHeader,
+    pub data_header: DataShredHeader,
     payload: Payload,
 }
 

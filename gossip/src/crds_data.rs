@@ -17,6 +17,7 @@ use {
     solana_transaction::Transaction,
     solana_vote::vote_parser,
     std::collections::BTreeSet,
+    strum::EnumCount,
 };
 
 pub(crate) const MAX_WALLCLOCK: u64 = 1_000_000_000_000_000;
@@ -40,7 +41,7 @@ pub(crate) const MAX_EPOCH_SLOTS: EpochSlotsIndex = 255;
 /// * LowestSlot index is deprecated
 #[allow(clippy::large_enum_variant)]
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample, AbiEnumVisitor))]
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, EnumCount)]
 pub enum CrdsData {
     #[allow(private_interfaces)]
     LegacyContactInfo(LegacyContactInfo),
@@ -172,6 +173,26 @@ impl CrdsData {
             CrdsData::ContactInfo(node) => *node.pubkey(),
             CrdsData::RestartLastVotedForkSlots(slots) => slots.from,
             CrdsData::RestartHeaviestFork(fork) => fork.from,
+        }
+    }
+
+    /// Returns the index of the CrdsData in the enum that matches wire format byte
+    pub fn ordinal(&self) -> usize {
+        match self {
+            CrdsData::LegacyContactInfo(_) => 0,
+            CrdsData::Vote(_, _) => 1,
+            CrdsData::LowestSlot(_, _) => 2,
+            CrdsData::LegacySnapshotHashes(_) => 3,
+            CrdsData::AccountsHashes(_) => 4,
+            CrdsData::EpochSlots(_, _) => 5,
+            CrdsData::LegacyVersion(_) => 6,
+            CrdsData::Version(_) => 7,
+            CrdsData::NodeInstance(_) => 8,
+            CrdsData::DuplicateShred(_, _) => 9,
+            CrdsData::SnapshotHashes(_) => 10,
+            CrdsData::ContactInfo(_) => 11,
+            CrdsData::RestartLastVotedForkSlots(_) => 12,
+            CrdsData::RestartHeaviestFork(_) => 13,
         }
     }
 
@@ -405,7 +426,7 @@ impl<'de> Deserialize<'de> for Vote {
 
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub(crate) struct LegacyVersion {
+pub struct LegacyVersion {
     from: Pubkey,
     wallclock: u64,
     version: solana_version::LegacyVersion1,
@@ -421,7 +442,7 @@ impl Sanitize for LegacyVersion {
 
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Version {
+pub struct Version {
     from: Pubkey,
     wallclock: u64,
     version: solana_version::LegacyVersion2,
@@ -437,11 +458,11 @@ impl Sanitize for Version {
 
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
-pub(crate) struct NodeInstance {
-    from: Pubkey,
-    wallclock: u64,
-    timestamp: u64, // Timestamp when the instance was created.
-    token: u64,     // Randomly generated value at node instantiation.
+pub struct NodeInstance {
+    pub from: Pubkey,
+    pub wallclock: u64,
+    pub timestamp: u64, // Timestamp when the instance was created.
+    pub token: u64,     // Randomly generated value at node instantiation.
 }
 
 impl Sanitize for NodeInstance {
@@ -471,6 +492,18 @@ mod test {
         solana_time_utils::timestamp,
         solana_vote_program::{vote_instruction, vote_state},
     };
+
+    #[test]
+    fn test_to_ordinal() {
+        let mut rng = rand::thread_rng();
+        for _ in 0..100 {
+            let value = CrdsData::new_rand(&mut rng, None);
+            let bytes = bincode::serialize(&value).unwrap();
+            assert!(value.ordinal() < CrdsData::COUNT);
+            let discriminant = bytes[0];
+            assert_eq!(discriminant as usize, value.ordinal());
+        }
+    }
 
     #[test]
     fn test_lowest_slot_sanitize() {

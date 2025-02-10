@@ -6999,7 +6999,12 @@ dependencies = [
  "solana-vote",
  "solana-vote-program",
  "static_assertions",
+<<<<<<< HEAD
  "thiserror 2.0.17",
+=======
+ "thiserror 2.0.12",
+ "strum",
+>>>>>>> 776b7f57a3 (initial capture tool version)
 ]
 
 [[package]]

@@ -133,6 +133,9 @@ members = [
     "votor-messages",
     "watchtower",
     "wen-restart",
+    "wire_format",
+    "wire_format/xtask",
+    "wire_format/wf_common",
     "xdp",
     "zk-token-sdk",
 ]

@@ -221,7 +221,7 @@ pub enum ShredType {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Deserialize, Serialize)]
 #[serde(into = "u8", try_from = "u8")]
-enum ShredVariant {
+pub enum ShredVariant {
     // proof_size is the number of Merkle proof entries, and is encoded in the
     // lowest 4 bits of the binary representation. The first 4 bits identify
     // the shred variant:
@@ -246,18 +246,18 @@ struct ShredCommonHeader {
 
 /// The data shred header has parent offset and flags
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
-struct DataShredHeader {
+pub struct DataShredHeader {
     parent_offset: u16,
-    flags: ShredFlags,
+    pub flags: ShredFlags,
     size: u16, // common shred header + data shred header + data
 }
 
 /// The coding shred header has FEC information
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
-struct CodingShredHeader {
-    num_data_shreds: u16,
-    num_coding_shreds: u16,
-    position: u16, // [0..num_coding_shreds)
+pub struct CodingShredHeader {
+    pub num_data_shreds: u16,
+    pub num_coding_shreds: u16,
+    pub position: u16, // [0..num_coding_shreds)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -702,9 +702,9 @@ where
 {
     debug_assert!(root < max_slot);
     let Some(shred) = layout::get_shred(packet) else {
-            stats.index_overrun += 1;
-            return true;
-        };
+        stats.index_overrun += 1;
+        return true;
+    };
     match layout::get_version(shred) {
         None => {
             stats.index_overrun += 1;
