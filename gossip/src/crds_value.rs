@@ -143,7 +143,7 @@ impl CrdsValue {
     }
 
     #[inline]
-    pub(crate) fn data(&self) -> &CrdsData {
+    pub fn data(&self) -> &CrdsData {
         &self.data
     }
 
