@@ -6445,6 +6445,7 @@ dependencies = [
  "solana-vote-program",
  "static_assertions",
  "thiserror 2.0.12",
+ "strum",
 ]
 
 [[package]]
