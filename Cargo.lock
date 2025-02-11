@@ -3376,6 +3376,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a17b27f28a7466846baca75f0a5244e546e44178eb7f1c07a3820f413e91c6b0"
 
 [[package]]
+name = "hxdmp"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a17b27f28a7466846baca75f0a5244e546e44178eb7f1c07a3820f413e91c6b0"
+
+[[package]]
 name = "hyper"
 version = "0.14.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -13911,6 +13917,7 @@ dependencies = [
  "anyhow",
  "bincode",
  "clap 4.5.28",
+ "hxdmp",
  "log",
  "pcap-file",
  "pkts",

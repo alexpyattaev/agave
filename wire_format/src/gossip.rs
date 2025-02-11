@@ -1,24 +1,26 @@
 use {
     crate::{pcap::WritePackets, Stats},
     anyhow::Context,
-    pcap_file::pcapng::PcapNgWriter,
+    log::{debug, error},
+    pcap_file::pcapng::{PcapNgReader, PcapNgWriter},
     serde::Serialize,
     solana_gossip::{crds_data::CrdsData, crds_value::CrdsValue, protocol::Protocol},
     solana_sanitize::Sanitize,
     std::{
         ffi::CStr,
         fs::File,
+        io::Write,
         net::{Ipv4Addr, SocketAddrV4},
         path::PathBuf,
     },
     strum::EnumCount,
 };
 
-pub fn parse_gossip(bytes: &[u8]) -> bincode::Result<Protocol> {
+fn parse_gossip(bytes: &[u8]) -> bincode::Result<Protocol> {
     solana_perf::packet::deserialize_from_with_limit(bytes)
 }
 
-pub fn _serialize<T: Serialize>(pkt: T) -> Vec<u8> {
+fn _serialize<T: Serialize>(pkt: T) -> Vec<u8> {
     bincode::serialize(&pkt).unwrap()
 }
 
@@ -71,7 +73,7 @@ impl CrdsCaptures {
 impl WritePackets for CrdsCaptures {
     fn write_packets<W: std::io::Write>(&self, writer: &mut PcapNgWriter<W>) -> anyhow::Result<()> {
         for p in self.packets.iter() {
-            crate::pcap::write_packet(&p, writer)?
+            crate::pcap::write_packet(p, writer)?
         }
         Ok(())
     }
@@ -95,7 +97,7 @@ impl DumbStorage {
 impl WritePackets for DumbStorage {
     fn write_packets<W: std::io::Write>(&self, writer: &mut PcapNgWriter<W>) -> anyhow::Result<()> {
         for p in self.0.iter() {
-            crate::pcap::write_packet(&p, writer)?
+            crate::pcap::write_packet(p, writer)?
         }
         Ok(())
     }
@@ -170,18 +172,11 @@ pub fn capture_gossip(
     pcap_filename: PathBuf,
     size_hint: usize,
 ) -> anyhow::Result<Stats> {
-    // TODO: switch to AF-packet eventually
-    //let iface = rscap::Interface::new(ifname).expect("Interface bond0 should exist");
     let socket = rscap::linux::l4::L4Socket::new(rscap::linux::l4::L4Protocol::Udp)
         .context("L4 socket creation")?;
     socket
         .bind(&SocketAddrV4::new(bind_ip, port))
         .context("bind should not fail")?;
-    /*let socket = rscap::Sniffer::new_with_size(iface, 524288 * 4).expect("Sniffer should get made");
-    let i: rscap::filter::BpfInstruction;
-    let filter = vec![];
-    let filter = rscap::filter::PacketFilter::from_vec(filter);
-    socket.activate(filter);*/
     let mut buf = vec![0; 2048];
     let mut stats = Stats::default();
     let mut inventory = GossipInventory::default();
@@ -208,4 +203,68 @@ pub fn capture_gossip(
         .dump_to_files(pcap_filename)
         .context("Saving files failed")?;
     Ok(stats)
+}
+
+pub fn validate_gossip(filename: PathBuf) -> anyhow::Result<Stats> {
+    let mut stats = Stats::default();
+    let file_in = File::open(&filename).with_context(|| format!("opening file {filename:?}"))?;
+    let mut reader = PcapNgReader::new(file_in).context("pcap reader creation")?;
+    loop {
+        let Some(block) = reader.next_block() else {
+            break;
+        };
+        let block = block?;
+        let data = match block {
+            pcap_file::pcapng::Block::Packet(ref block) => {
+                &block.data[0..block.original_len as usize]
+            }
+            pcap_file::pcapng::Block::SimplePacket(ref block) => {
+                &block.data[0..block.original_len as usize]
+            }
+            pcap_file::pcapng::Block::EnhancedPacket(ref block) => {
+                &block.data[0..block.original_len as usize]
+            }
+            _ => {
+                debug!("Skipping unknown block in pcap file");
+                continue;
+            }
+        };
+        let pkt_payload = &data[0..];
+        stats.captured += 1;
+        match parse_gossip(pkt_payload) {
+            Ok(pkt) => {
+                stats.valid += 1;
+                if pkt.sanitize().is_err() {
+                    error!("Sanitize failed for packet {}!", stats.captured);
+                    error!("Original packet bytes:");
+                    hexdump(pkt_payload)?;
+                }
+                let reconstructed_bytes = _serialize(pkt);
+                if reconstructed_bytes != pkt_payload {
+                    error!("Reserialization failed for packet {}!", stats.captured);
+                    error!("Original packet bytes:");
+                    hexdump(pkt_payload)?;
+                    error!("Reserialized bytes:");
+                    hexdump(&reconstructed_bytes)?;
+                } else {
+                    stats.retained += 1;
+                }
+            }
+            Err(e) => {
+                error!(
+                    "Found packet {} that failed to parse with error {e}",
+                    stats.captured
+                );
+                error!("Problematic packet bytes:");
+                hexdump(pkt_payload)?;
+            }
+        }
+    }
+    Ok(stats)
+}
+
+fn hexdump(bytes: &[u8]) -> anyhow::Result<()> {
+    hxdmp::hexdump(bytes, &mut std::io::stderr())?;
+    std::io::stderr().write_all(b"\n")?;
+    Ok(())
 }
