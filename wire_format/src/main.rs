@@ -3,15 +3,22 @@ use {
     crate::gossip::*,
     anyhow::Context,
     clap::{Parser, Subcommand, ValueEnum},
+    gossip_probes::find_turbine_port,
+    log::{error, info},
     signal_hook::{consts::SIGINT, iterator::Signals},
     std::{
-        error::Error, ffi::CString, net::Ipv4Addr, path::PathBuf, sync::atomic::AtomicBool, thread,
+        error::Error,
+        ffi::CString,
+        net::{IpAddr, Ipv4Addr, SocketAddr},
+        path::PathBuf,
+        sync::atomic::AtomicBool,
+        thread,
         time::Duration,
     },
-    turbine::find_turbine_port,
 };
 
 mod gossip;
+mod gossip_probes;
 mod pcap;
 mod turbine;
 
@@ -35,12 +42,12 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     Capture {
-        #[arg(short, long)]
+        #[arg(short, long, default_value = "bond0")]
         interface: String,
         #[arg(short, long)]
         ip_addr: Ipv4Addr,
         #[arg(short, long, default_value_t = 8001)]
-        port: u16,
+        gossip_port: u16,
         #[arg(short, long)]
         /// Directory with pcap files to write. Existing ontents will be destroyed!
         output: PathBuf,
@@ -49,7 +56,7 @@ enum Commands {
         size_hint: usize,
     },
     Parse {
-        #[arg(short, long)]
+        #[arg()]
         input: PathBuf,
     },
 }
@@ -79,7 +86,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         Commands::Capture {
             interface,
             ip_addr,
-            port,
+            gossip_port: port,
             output,
             size_hint,
         } => {
@@ -92,7 +99,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                         .context("Capture failed")?
                 }
                 WireProtocol::Turbine => {
-                    let port = find_turbine_port("9KTG5wAR4KYFdwVDbpHAqAzjn5K5wNGvajG8Y1ki6zpt")?;
+                    let gossip_entrypoint = SocketAddr::new(IpAddr::V4(ip_addr), port);
+                    let port = find_turbine_port(gossip_entrypoint)?;
                     println!("Got port {port}");
                     //capture_turbine()
                     Stats::default()
@@ -108,7 +116,26 @@ fn main() -> Result<(), Box<dyn Error>> {
                 (stats.valid as f64 / time.as_secs_f64()) as u64
             );
         }
-        Commands::Parse { input } => todo!("Parsing mode is coming up"),
+        Commands::Parse { input } => match cli.protocol {
+            WireProtocol::Gossip => {
+                let stats = validate_gossip(input)?;
+                if stats.captured == stats.retained {
+                    info!(
+                        "All clear, no errors, validated {} packets!",
+                        stats.retained
+                    );
+                    std::process::exit(0);
+                } else {
+                    error!(
+                        "Validation failed for {} packets of {} in the dataset",
+                        stats.captured - stats.retained,
+                        stats.captured
+                    );
+                    std::process::exit(1);
+                }
+            }
+            WireProtocol::Turbine => todo!(),
+        },
     }
     //let s = serde_json::to_string_pretty(&p).unwrap();
     //println!("hi {s}");
