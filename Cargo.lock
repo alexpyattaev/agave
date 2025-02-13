@@ -13926,6 +13926,7 @@ dependencies = [
  "serde",
  "signal-hook",
  "solana-gossip",
+ "solana-ledger",
  "solana-logger",
  "solana-net-utils",
  "solana-perf",

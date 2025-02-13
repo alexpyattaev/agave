@@ -21,6 +21,7 @@ rscap = "0.2.2"
 serde = { workspace = true, features = ["derive"] }
 signal-hook.workspace = true
 solana-gossip.workspace = true
+solana-ledger.workspace = true
 solana-logger.workspace = true
 solana-net-utils.workspace = true
 solana-perf.workspace = true

@@ -3,7 +3,7 @@ use {
     crate::gossip::*,
     anyhow::Context,
     clap::{Parser, Subcommand, ValueEnum},
-    gossip_probes::find_turbine_port,
+    cluster_probes::find_turbine_port,
     log::{error, info},
     signal_hook::{consts::SIGINT, iterator::Signals},
     std::{
@@ -15,11 +15,12 @@ use {
         thread,
         time::Duration,
     },
+    turbine::capture_turbine,
 };
 
+mod cluster_probes;
 mod gossip;
-mod gossip_probes;
-mod pcap;
+mod storage;
 mod turbine;
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
@@ -102,8 +103,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                     let gossip_entrypoint = SocketAddr::new(IpAddr::V4(ip_addr), port);
                     let port = find_turbine_port(gossip_entrypoint)?;
                     println!("Got port {port}");
-                    //capture_turbine()
-                    Stats::default()
+                    capture_turbine(&interface, ip_addr, port, output, size_hint)
+                        .context("capture failed")?
                 }
             };
 
