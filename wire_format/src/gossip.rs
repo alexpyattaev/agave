@@ -1,5 +1,8 @@
 use {
-    crate::{pcap::WritePackets, Stats},
+    crate::{
+        storage::{DumbStorage, WritePackets},
+        Stats,
+    },
     anyhow::Context,
     log::{debug, error},
     pcap_file::pcapng::{PcapNgReader, PcapNgWriter},
@@ -73,31 +76,7 @@ impl CrdsCaptures {
 impl WritePackets for CrdsCaptures {
     fn write_packets<W: std::io::Write>(&self, writer: &mut PcapNgWriter<W>) -> anyhow::Result<()> {
         for p in self.packets.iter() {
-            crate::pcap::write_packet(p, writer)?
-        }
-        Ok(())
-    }
-}
-
-#[derive(Default)]
-struct DumbStorage(Vec<Box<[u8]>>);
-
-impl DumbStorage {
-    fn try_retain(&mut self, bytes: &[u8], size: usize) -> bool {
-        if self.0.len() < size {
-            let bytes = bytes.to_owned().into_boxed_slice();
-            self.0.push(bytes);
-
-            true
-        } else {
-            false
-        }
-    }
-}
-impl WritePackets for DumbStorage {
-    fn write_packets<W: std::io::Write>(&self, writer: &mut PcapNgWriter<W>) -> anyhow::Result<()> {
-        for p in self.0.iter() {
-            crate::pcap::write_packet(p, writer)?
+            crate::storage::write_packet(p, writer)?
         }
         Ok(())
     }
