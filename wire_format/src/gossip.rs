@@ -365,6 +365,7 @@ pub fn monitor_gossip(
     port: u16,
     pcap_filename: PathBuf,
     size_hint: usize,
+    threshold_rate: usize,
 ) -> anyhow::Result<Stats> {
     /*let socket = rscap::linux::l3::L3Socket::new().context("L3 socket creation")?;
     let iface = rscap::Interface::new("bond0")?;
@@ -401,15 +402,18 @@ pub fn monitor_gossip(
         }
         if last_report.elapsed() > Duration::from_millis(500) {
             last_report = Instant::now();
-            let rate = monitor.push.rate();
-            println!("Current gossip rate is {:?}", rate);
-            if rate > 10000.0 {
-                println!("Peak starting!");
+            let rate = monitor.push_node_info.rate();
 
-                capturing = true;
+            if (rate > threshold_rate as f32) {
+                if !capturing {
+                    println!("Peak starting!");
+                    capturing = true;
+                }
+                println!("Current gossip nodeinfo rate is {:?}, capturing", rate);
             } else {
+                println!("Current gossip nodeinfo rate is {:?}", rate);
                 if capturing {
-                    println!("Caught peak!");
+                    println!("Caught peak, exiting");
                     break;
                 }
             }
