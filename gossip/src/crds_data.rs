@@ -458,7 +458,7 @@ impl Sanitize for Version {
 
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
-pub(crate) struct NodeInstance {
+pub struct NodeInstance {
     from: Pubkey,
     wallclock: u64,
     timestamp: u64, // Timestamp when the instance was created.
