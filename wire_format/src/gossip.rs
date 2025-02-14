@@ -284,8 +284,8 @@ impl Monitor {
             return 0.0;
         }
         let dt = newest.timestamp - oldest.timestamp;
-        let dt_secs = dt.as_secs_f32();
         let num = self.packets.len() as f32;
+        let dt_secs = dt.as_secs_f32();
         num / dt_secs
     }
 }
@@ -297,7 +297,9 @@ pub struct GossipMonitor {
     //prune: VecDeque<Box<[u8]>>,
     //pull_request: DumbStorage,
     //pull_response: CrdsCaptures,
+    all: Monitor,
     push: Monitor,
+    push_node_info: Monitor,
 }
 impl WritePackets for Monitor {
     fn write_packets<W: std::io::Write>(
@@ -314,8 +316,17 @@ impl WritePackets for Monitor {
 impl GossipMonitor {
     fn try_retain(&mut self, pkt: &Protocol, bytes: &[u8], size: usize) -> bool {
         match pkt {
-            Protocol::PushMessage(_pubkey, _crds_values) => self.push.try_retain(bytes, size),
-            _ => false,
+            Protocol::PushMessage(_pubkey, crds_values) => {
+                if crds_values.iter().any(|e| match e.data() {
+                    CrdsData::NodeInstance(_) => true,
+                    _ => false,
+                }) {
+                    self.push_node_info.try_retain(bytes, size)
+                } else {
+                    self.push.try_retain(bytes, size)
+                }
+            }
+            _ => self.all.try_retain(bytes, size),
         }
     }
 
