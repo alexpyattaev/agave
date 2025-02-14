@@ -364,11 +364,11 @@ impl GossipMonitor {
             };
         }
         write_thing!(push);
+        write_thing!(push_node_info);
+        write_thing!(all);
         Ok(())
     }
 }
-
-use rscap::linux::addr::L2Protocol;
 
 pub fn monitor_gossip(
     bind_ip: Ipv4Addr,
@@ -377,12 +377,6 @@ pub fn monitor_gossip(
     size_hint: usize,
     threshold_rate: usize,
 ) -> anyhow::Result<Stats> {
-    /*let socket = rscap::linux::l3::L3Socket::new().context("L3 socket creation")?;
-    let iface = rscap::Interface::new("bond0")?;
-    socket
-        .bind(iface, L2Protocol::Ip)
-        .context("bind should not fail")?;
-    return Ok(Stats::default());*/
     let socket = rscap::linux::l4::L4Socket::new(rscap::linux::l4::L4Protocol::Udp)
         .context("L4 socket creation")?;
     socket
@@ -407,7 +401,7 @@ pub fn monitor_gossip(
             continue;
         }
         stats.valid += 1;
-        if monitor.try_retain(&pkt, slice, size_hint) {
+        if monitor.try_retain(&pkt, &buf, size_hint) {
             stats.retained += 1;
         }
         if last_report.elapsed() > Duration::from_millis(500) {
