@@ -17,7 +17,10 @@ pub(crate) fn write_packet<W: std::io::Write>(
 }
 
 pub trait WritePackets {
-    fn write_packets<W: std::io::Write>(&self, writer: &mut PcapNgWriter<W>) -> anyhow::Result<()>;
+    fn write_packets<W: std::io::Write>(
+        &mut self,
+        writer: &mut PcapNgWriter<W>,
+    ) -> anyhow::Result<()>;
 }
 
 #[derive(Default)]
@@ -36,7 +39,10 @@ impl DumbStorage {
     }
 }
 impl WritePackets for DumbStorage {
-    fn write_packets<W: std::io::Write>(&self, writer: &mut PcapNgWriter<W>) -> anyhow::Result<()> {
+    fn write_packets<W: std::io::Write>(
+        &mut self,
+        writer: &mut PcapNgWriter<W>,
+    ) -> anyhow::Result<()> {
         for p in self.0.iter() {
             write_packet(p, writer)?
         }
