@@ -459,10 +459,10 @@ impl Sanitize for Version {
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct NodeInstance {
-    from: Pubkey,
-    wallclock: u64,
-    timestamp: u64, // Timestamp when the instance was created.
-    token: u64,     // Randomly generated value at node instantiation.
+    pub from: Pubkey,
+    pub wallclock: u64,
+    pub timestamp: u64, // Timestamp when the instance was created.
+    pub token: u64,     // Randomly generated value at node instantiation.
 }
 
 impl NodeInstance {

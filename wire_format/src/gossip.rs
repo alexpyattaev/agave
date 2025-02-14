@@ -11,14 +11,17 @@ use {
     },
     serde::Serialize,
     solana_gossip::{crds_data::CrdsData, crds_value::CrdsValue, protocol::Protocol},
+    solana_pubkey::Pubkey,
     solana_sanitize::Sanitize,
     std::{
         borrow::Cow,
+        collections::HashMap,
         ffi::CStr,
         fs::File,
         io::Write,
         net::{Ipv4Addr, SocketAddrV4},
         path::PathBuf,
+        str::FromStr,
         time::{Duration, Instant},
     },
     strum::EnumCount,
@@ -192,10 +195,64 @@ pub fn capture_gossip(
     Ok(stats)
 }
 
+#[derive(Default, Debug)]
+struct Counter {
+    origins: HashMap<Pubkey, u64>,
+    senders: HashMap<Pubkey, u64>,
+    crds_types: CrdsCounts,
+}
+const CRDS_NAMES: [&str; 14] = [
+    "LegacyContactInfo",
+    "Vote",
+    "LowestSlot",
+    "LegacySnapshotHashes",
+    "AccountsHashes",
+    "EpochSlots",
+    "LegacyVersion",
+    "Version",
+    "NodeInstance",
+    "DuplicateShred",
+    "SnapshotHashes",
+    "ContactInfo",
+    "RestartLastVotedForkSlots",
+    "RestartHeaviestFork",
+];
+impl Counter {
+    fn count_gossip(&mut self, pkt: &Protocol) {
+        match pkt {
+            Protocol::PushMessage(pubkey, crds_values) => {
+                /*if (*pubkey
+                    != Pubkey::from_str("2EAmentSLNvroEijzUG3UCAXmmxcsaCD6CuKXEsUGa6P").unwrap())
+                {
+                    return;
+                }*/
+                if crds_values.iter().any(|e| {
+                    self.crds_types[e.data().ordinal()] += 1;
+                    match e.data() {
+                        CrdsData::NodeInstance(nodeinst) => {
+                            let e = self.origins.entry(nodeinst.from).or_default();
+
+                            *e += 1;
+                            true
+                        }
+                        _ => false,
+                    }
+                }) {
+                    let e = self.senders.entry(*pubkey).or_default();
+                    *e += 1;
+                    //dbg!(&pkt);
+                } else {
+                }
+            }
+            _ => {}
+        }
+    }
+}
 pub fn validate_gossip(filename: PathBuf) -> anyhow::Result<Stats> {
     let mut stats = Stats::default();
     let file_in = File::open(&filename).with_context(|| format!("opening file {filename:?}"))?;
     let mut reader = PcapNgReader::new(file_in).context("pcap reader creation")?;
+    let mut counter = Counter::default();
     loop {
         let Some(block) = reader.next_block() else {
             break;
@@ -216,7 +273,12 @@ pub fn validate_gossip(filename: PathBuf) -> anyhow::Result<Stats> {
                 continue;
             }
         };
-        let pkt_payload = &data[0..];
+        // Check if IP header is present
+        let pkt_payload = if data[0] == 69 {
+            &data[20 + 8..]
+        } else {
+            &data[0..]
+        };
         stats.captured += 1;
         match parse_gossip(pkt_payload) {
             Ok(pkt) => {
@@ -226,16 +288,19 @@ pub fn validate_gossip(filename: PathBuf) -> anyhow::Result<Stats> {
                     error!("Original packet bytes:");
                     hexdump(pkt_payload)?;
                 }
-                let reconstructed_bytes = _serialize(pkt);
+                counter.count_gossip(&pkt);
+                //dbg!(&pkt);
+                /*let reconstructed_bytes = _serialize(pkt);
                 if reconstructed_bytes != pkt_payload {
                     error!("Reserialization failed for packet {}!", stats.captured);
                     error!("Original packet bytes:");
                     hexdump(pkt_payload)?;
                     error!("Reserialized bytes:");
                     hexdump(&reconstructed_bytes)?;
+                    break;
                 } else {
                     stats.retained += 1;
-                }
+                }*/
             }
             Err(e) => {
                 error!(
@@ -247,6 +312,11 @@ pub fn validate_gossip(filename: PathBuf) -> anyhow::Result<Stats> {
             }
         }
     }
+    dbg!(counter.senders.len());
+    for (t, cnt) in CRDS_NAMES.iter().zip(counter.crds_types.iter()) {
+        println!("{t}: {cnt}");
+    }
+    dbg!(counter.origins.len());
     Ok(stats)
 }
 
@@ -390,8 +460,9 @@ pub fn monitor_gossip(
     let mut capturing = false;
     while !crate::EXIT.load(std::sync::atomic::Ordering::Relaxed) {
         let len = socket.recv(&mut buf).context("socket RX")?;
+        let valid_buf = &buf[0..len];
         stats.captured += 1;
-        let slice = &buf[20 + 8..len];
+        let slice = &valid_buf[20 + 8..];
 
         //let layers = parse_layers!(slice, Ip, (Udp, Raw));
         let Ok(pkt) = parse_gossip(slice) else {
@@ -401,14 +472,14 @@ pub fn monitor_gossip(
             continue;
         }
         stats.valid += 1;
-        if monitor.try_retain(&pkt, &buf, size_hint) {
+        if monitor.try_retain(&pkt, &valid_buf, size_hint) {
             stats.retained += 1;
         }
         if last_report.elapsed() > Duration::from_millis(500) {
             last_report = Instant::now();
             let rate = monitor.push_node_info.rate().unwrap_or(0.0);
 
-            if (rate > threshold_rate as f32) {
+            if rate > threshold_rate as f32 {
                 if !capturing {
                     println!("Peak starting!");
                     capturing = true;
