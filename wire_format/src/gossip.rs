@@ -5,7 +5,10 @@ use {
     },
     anyhow::Context,
     log::{debug, error},
-    pcap_file::pcapng::{PcapNgBlock, PcapNgReader, PcapNgWriter},
+    pcap_file::pcapng::{
+        blocks::interface_description::InterfaceDescriptionBlock, PcapNgBlock, PcapNgReader,
+        PcapNgWriter,
+    },
     serde::Serialize,
     solana_gossip::{crds_data::CrdsData, crds_value::CrdsValue, protocol::Protocol},
     solana_sanitize::Sanitize,
@@ -339,6 +342,13 @@ impl GossipMonitor {
         let file_out =
             File::create(&filename).with_context(|| format!("opening file {filename:?}"))?;
         let mut writer = PcapNgWriter::new(file_out).context("pcap writer creation")?;
+
+        let interface = InterfaceDescriptionBlock {
+            linktype: pcap_file::DataLink::IPV4,
+            snaplen: 2048,
+            options: vec![],
+        };
+        writer.write_pcapng_block(interface)?;
         store
             .write_packets(&mut writer)
             .context("storing packets into pcap file")
