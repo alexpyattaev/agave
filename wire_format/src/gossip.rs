@@ -277,16 +277,16 @@ impl Monitor {
         true
     }
 
-    fn rate(&self) -> f32 {
-        let oldest = self.packets.front().unwrap();
-        let newest = self.packets.back().unwrap();
+    fn rate(&self) -> Option<f32> {
+        let oldest = self.packets.front()?;
+        let newest = self.packets.back()?;
         if oldest == newest {
-            return 0.0;
+            return None;
         }
         let dt = newest.timestamp - oldest.timestamp;
         let num = self.packets.len() as f32;
         let dt_secs = dt.as_secs_f32();
-        num / dt_secs
+        Some(num / dt_secs)
     }
 }
 
@@ -402,7 +402,7 @@ pub fn monitor_gossip(
         }
         if last_report.elapsed() > Duration::from_millis(500) {
             last_report = Instant::now();
-            let rate = monitor.push_node_info.rate();
+            let rate = monitor.push_node_info.rate().unwrap_or(0.0);
 
             if (rate > threshold_rate as f32) {
                 if !capturing {
