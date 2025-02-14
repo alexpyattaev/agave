@@ -42,6 +42,18 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    Monitor {
+        #[arg(short, long)]
+        ip_addr: Ipv4Addr,
+        #[arg(short, long, default_value_t = 8001)]
+        gossip_port: u16,
+        /// Directory with pcap files to write. Existing ontents will be destroyed!
+        #[arg(short, long, default_value = "monitor_captures")]
+        output: PathBuf,
+        /// Rough number of pacekts to capture (exact number will depend on the protocol)
+        #[arg(short, long, default_value_t = 10000)]
+        size_hint: usize,
+    },
     Capture {
         #[arg(short, long, default_value = "bond0")]
         interface: String,
@@ -84,6 +96,25 @@ fn main() -> Result<(), Box<dyn Error>> {
     let cli = Cli::parse();
 
     match cli.command {
+        Commands::Monitor {
+            ip_addr,
+            gossip_port,
+            output,
+            size_hint,
+        } => {
+            let _ = std::fs::create_dir(&output);
+            let t = std::time::Instant::now();
+            let stats = monitor_gossip(ip_addr, gossip_port, output, size_hint)
+                .context("Monitor failed")?;
+            let time = t.elapsed();
+            println!(
+                "Captured {} packets ({} valid) over {:?}, {} pps",
+                stats.captured,
+                stats.valid,
+                time,
+                (stats.valid as f64 / time.as_secs_f64()) as u64
+            );
+        }
         Commands::Capture {
             interface,
             ip_addr,

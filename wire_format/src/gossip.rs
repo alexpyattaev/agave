@@ -5,16 +5,18 @@ use {
     },
     anyhow::Context,
     log::{debug, error},
-    pcap_file::pcapng::{PcapNgReader, PcapNgWriter},
+    pcap_file::pcapng::{PcapNgBlock, PcapNgReader, PcapNgWriter},
     serde::Serialize,
     solana_gossip::{crds_data::CrdsData, crds_value::CrdsValue, protocol::Protocol},
     solana_sanitize::Sanitize,
     std::{
+        borrow::Cow,
         ffi::CStr,
         fs::File,
         io::Write,
         net::{Ipv4Addr, SocketAddrV4},
         path::PathBuf,
+        time::{Duration, Instant},
     },
     strum::EnumCount,
 };
@@ -74,7 +76,10 @@ impl CrdsCaptures {
     }
 }
 impl WritePackets for CrdsCaptures {
-    fn write_packets<W: std::io::Write>(&self, writer: &mut PcapNgWriter<W>) -> anyhow::Result<()> {
+    fn write_packets<W: std::io::Write>(
+        &mut self,
+        writer: &mut PcapNgWriter<W>,
+    ) -> anyhow::Result<()> {
         for p in self.packets.iter() {
             crate::storage::write_packet(p, writer)?
         }
@@ -112,7 +117,7 @@ impl GossipInventory {
     }
 
     fn write_file(
-        store: &impl WritePackets,
+        store: &mut impl WritePackets,
         mut filename: PathBuf,
         suffix: &str,
     ) -> anyhow::Result<()> {
@@ -124,11 +129,11 @@ impl GossipInventory {
             .write_packets(&mut writer)
             .context("storing packets into pcap file")
     }
-    fn dump_to_files(&self, filename: PathBuf) -> anyhow::Result<()> {
+    fn dump_to_files(&mut self, filename: PathBuf) -> anyhow::Result<()> {
         macro_rules! write_thing {
             ($name:ident) => {
                 Self::write_file(
-                    &self.$name,
+                    &mut self.$name,
                     filename.clone(),
                     concat!(stringify!($name), ".pcap"),
                 )?;
@@ -246,4 +251,163 @@ fn hexdump(bytes: &[u8]) -> anyhow::Result<()> {
     hxdmp::hexdump(bytes, &mut std::io::stderr())?;
     std::io::stderr().write_all(b"\n")?;
     Ok(())
+}
+
+use pcap_file::pcapng::blocks::enhanced_packet::EnhancedPacketBlock;
+use std::collections::VecDeque;
+
+#[derive(Default)]
+pub struct Monitor {
+    packets: VecDeque<EnhancedPacketBlock<'static>>,
+}
+impl Monitor {
+    fn try_retain(&mut self, bytes: &[u8], size: usize) -> bool {
+        self.packets.push_back(EnhancedPacketBlock {
+            original_len: bytes.len() as u32,
+            data: Cow::from(bytes.to_owned()),
+            interface_id: 0,
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap(),
+            options: vec![],
+        });
+        if self.packets.len() > size {
+            self.packets.pop_front();
+        }
+        true
+    }
+
+    fn rate(&self) -> f32 {
+        let oldest = self.packets.front().unwrap();
+        let newest = self.packets.back().unwrap();
+        if oldest == newest {
+            return 0.0;
+        }
+        let dt = newest.timestamp - oldest.timestamp;
+        let dt_secs = dt.as_secs_f32();
+        let num = self.packets.len() as f32;
+        num / dt_secs
+    }
+}
+
+#[derive(Default)]
+pub struct GossipMonitor {
+    //ping: VecDeque<Box<[u8]>>,
+    //pong: VecDeque<Box<[u8]>>,
+    //prune: VecDeque<Box<[u8]>>,
+    //pull_request: DumbStorage,
+    //pull_response: CrdsCaptures,
+    push: Monitor,
+}
+impl WritePackets for Monitor {
+    fn write_packets<W: std::io::Write>(
+        &mut self,
+        writer: &mut PcapNgWriter<W>,
+    ) -> anyhow::Result<()> {
+        for packet in self.packets.drain(..) {
+            writer.write_block(&packet.into_block())?;
+        }
+        Ok(())
+    }
+}
+
+impl GossipMonitor {
+    fn try_retain(&mut self, pkt: &Protocol, bytes: &[u8], size: usize) -> bool {
+        match pkt {
+            Protocol::PushMessage(_pubkey, _crds_values) => self.push.try_retain(bytes, size),
+            _ => false,
+        }
+    }
+
+    fn write_file(
+        store: &mut impl WritePackets,
+        mut filename: PathBuf,
+        suffix: &str,
+    ) -> anyhow::Result<()> {
+        filename.push(suffix);
+        let file_out =
+            File::create(&filename).with_context(|| format!("opening file {filename:?}"))?;
+        let mut writer = PcapNgWriter::new(file_out).context("pcap writer creation")?;
+        store
+            .write_packets(&mut writer)
+            .context("storing packets into pcap file")
+    }
+    fn dump_to_files(&mut self, filename: PathBuf) -> anyhow::Result<()> {
+        macro_rules! write_thing {
+            ($name:ident) => {
+                Self::write_file(
+                    &mut self.$name,
+                    filename.clone(),
+                    concat!(stringify!($name), ".pcap"),
+                )?;
+            };
+        }
+        write_thing!(push);
+        Ok(())
+    }
+}
+
+use rscap::linux::addr::L2Protocol;
+
+pub fn monitor_gossip(
+    bind_ip: Ipv4Addr,
+    port: u16,
+    pcap_filename: PathBuf,
+    size_hint: usize,
+) -> anyhow::Result<Stats> {
+    /*let socket = rscap::linux::l3::L3Socket::new().context("L3 socket creation")?;
+    let iface = rscap::Interface::new("bond0")?;
+    socket
+        .bind(iface, L2Protocol::Ip)
+        .context("bind should not fail")?;
+    return Ok(Stats::default());*/
+    let socket = rscap::linux::l4::L4Socket::new(rscap::linux::l4::L4Protocol::Udp)
+        .context("L4 socket creation")?;
+    socket
+        .bind(&SocketAddrV4::new(bind_ip, port))
+        .context("bind should not fail")?;
+    let mut buf = vec![0; 2048];
+    let mut stats = Stats::default();
+    let mut monitor = GossipMonitor::default();
+
+    let mut last_report = Instant::now();
+    let mut capturing = false;
+    while !crate::EXIT.load(std::sync::atomic::Ordering::Relaxed) {
+        let len = socket.recv(&mut buf).context("socket RX")?;
+        stats.captured += 1;
+        let slice = &buf[20 + 8..len];
+
+        //let layers = parse_layers!(slice, Ip, (Udp, Raw));
+        let Ok(pkt) = parse_gossip(slice) else {
+            continue;
+        };
+        if pkt.sanitize().is_err() {
+            continue;
+        }
+        stats.valid += 1;
+        if monitor.try_retain(&pkt, slice, size_hint) {
+            stats.retained += 1;
+        }
+        if last_report.elapsed() > Duration::from_millis(500) {
+            last_report = Instant::now();
+            let rate = monitor.push.rate();
+            println!("Current gossip rate is {:?}", rate);
+            if rate > 10000.0 {
+                println!("Peak starting!");
+
+                capturing = true;
+            } else {
+                if capturing {
+                    println!("Caught peak!");
+                    break;
+                }
+            }
+        }
+    }
+    // Ack the command to exit the capture
+    crate::EXIT.store(false, std::sync::atomic::Ordering::Relaxed);
+    monitor
+        .dump_to_files(pcap_filename)
+        .context("Saving files failed")?;
+    Ok(stats)
 }
