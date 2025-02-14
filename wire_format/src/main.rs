@@ -53,6 +53,8 @@ enum Commands {
         /// Rough number of pacekts to capture (exact number will depend on the protocol)
         #[arg(short, long, default_value_t = 10000)]
         size_hint: usize,
+        #[arg(short, long, default_value_t = 10000)]
+        threshold_rate: usize,
     },
     Capture {
         #[arg(short, long, default_value = "bond0")]
@@ -101,10 +103,11 @@ fn main() -> Result<(), Box<dyn Error>> {
             gossip_port,
             output,
             size_hint,
+            threshold_rate,
         } => {
             let _ = std::fs::create_dir(&output);
             let t = std::time::Instant::now();
-            let stats = monitor_gossip(ip_addr, gossip_port, output, size_hint)
+            let stats = monitor_gossip(ip_addr, gossip_port, output, size_hint, threshold_rate)
                 .context("Monitor failed")?;
             let time = t.elapsed();
             println!(
