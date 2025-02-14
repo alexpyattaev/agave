@@ -9,7 +9,7 @@ use log::info;
 use solana_ledger::shred::Shred;
 use solana_ledger::shred::ShredVariant;
 
-use crate::{cluster_probes::get_leader_schedule, storage::DumbStorage, Stats};
+use crate::{storage::DumbStorage, Stats};
 
 #[derive(Default)]
 struct TurbineInventory {
@@ -19,24 +19,24 @@ struct TurbineInventory {
     merkle_data: DumbStorage,
 }
 impl TurbineInventory {
-    fn try_retain(&mut self, shred: &Shred, bytes: &[u8], size_hint: usize) -> bool {
+    fn try_retain(&mut self, _shred: &Shred, bytes: &[u8], size_hint: usize) -> bool {
         let variant = solana_ledger::shred::layout::get_shred_variant(bytes).unwrap();
         match variant {
             ShredVariant::LegacyCode => self.legacy_code.try_retain(bytes, size_hint),
             ShredVariant::LegacyData => self.legacy_data.try_retain(bytes, size_hint),
             ShredVariant::MerkleCode {
-                proof_size,
-                chained,
-                resigned,
-            } => todo!(),
+                proof_size: _,
+                chained: _,
+                resigned: _,
+            } => self.merkle_code.try_retain(bytes, size_hint),
             ShredVariant::MerkleData {
-                proof_size,
-                chained,
-                resigned,
-            } => todo!(),
+                proof_size: _,
+                chained: _,
+                resigned: _,
+            } => self.merkle_data.try_retain(bytes, size_hint),
         }
-        return false;
     }
+
     fn dump_to_files(&self, filename: PathBuf) -> anyhow::Result<()> {
         /*macro_rules! write_thing {
             ($name:ident) => {
