@@ -17,7 +17,7 @@ log.workspace = true
 pcap-file = "2.0.0"
 pkts = "0.2.1"
 rayon.workspace = true
-rscap = "0.3.0"
+rscap = "0.3.1"
 serde = { workspace = true, features = ["derive"] }
 signal-hook.workspace = true
 solana-gossip.workspace = true

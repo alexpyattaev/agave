@@ -5830,9 +5830,9 @@ dependencies = [
 
 [[package]]
 name = "rscap"
-version = "0.3.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4828a3e19b99661d211a369398d7133e8c865c9790862d956ecc21fa5e20f593"
+checksum = "a14be74c573a9860943a23c03c64366d8eec75fbe1eca8f0bbd6dc853c69e5e4"
 dependencies = [
  "bitflags 2.8.0",
  "libc",
