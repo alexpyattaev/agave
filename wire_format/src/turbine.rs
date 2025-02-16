@@ -4,12 +4,16 @@ use std::{
     path::PathBuf,
 };
 
-use anyhow::{bail, Context};
+use crate::{
+    storage::{DumbStorage, WritePackets},
+    Stats,
+};
+use anyhow::Context;
 use log::info;
+use pcap_file::pcapng::{blocks::interface_description::InterfaceDescriptionBlock, PcapNgWriter};
 use solana_ledger::shred::Shred;
 use solana_ledger::shred::ShredVariant;
-
-use crate::{storage::DumbStorage, Stats};
+use std::fs::File;
 
 #[derive(Default)]
 struct TurbineInventory {
@@ -37,23 +41,41 @@ impl TurbineInventory {
         }
     }
 
-    fn dump_to_files(&self, filename: PathBuf) -> anyhow::Result<()> {
-        /*macro_rules! write_thing {
+    fn dump_to_files(&mut self, filename: PathBuf) -> anyhow::Result<()> {
+        macro_rules! write_thing {
             ($name:ident) => {
                 Self::write_file(
-                    &self.$name,
+                    &mut self.$name,
                     filename.clone(),
                     concat!(stringify!($name), ".pcap"),
                 )?;
             };
         }
-        write_thing!(ping);
-        write_thing!(pong);
-        write_thing!(prune);
-        write_thing!(pull_request);
-        write_thing!(pull_response);
-        write_thing!(push);*/
+        write_thing!(legacy_code);
+        write_thing!(legacy_code);
+        write_thing!(merkle_code);
+        write_thing!(merkle_data);
         Ok(())
+    }
+    fn write_file(
+        store: &mut impl WritePackets,
+        mut filename: PathBuf,
+        suffix: &str,
+    ) -> anyhow::Result<()> {
+        filename.push(suffix);
+        let file_out =
+            File::create(&filename).with_context(|| format!("opening file {filename:?}"))?;
+        let mut writer = PcapNgWriter::new(file_out).context("pcap writer creation")?;
+
+        let interface = InterfaceDescriptionBlock {
+            linktype: pcap_file::DataLink::IPV4,
+            snaplen: 2048,
+            options: vec![],
+        };
+        writer.write_pcapng_block(interface)?;
+        store
+            .write_packets(&mut writer)
+            .context("storing packets into pcap file")
     }
 }
 
