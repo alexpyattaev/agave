@@ -21,7 +21,6 @@ use {
         io::Write,
         net::{Ipv4Addr, SocketAddrV4},
         path::PathBuf,
-        str::FromStr,
         time::{Duration, Instant},
     },
     strum::EnumCount,
