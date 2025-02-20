@@ -372,6 +372,8 @@ pub struct GossipMonitor {
     all: Monitor,
     push: Monitor,
     push_node_info: Monitor,
+    compressed: usize,
+    uncompressed: usize,
 }
 impl WritePackets for Monitor {
     fn write_packets<W: std::io::Write>(
@@ -397,6 +399,28 @@ impl GossipMonitor {
                 } else {
                     self.push.try_retain(bytes, size)
                 }
+            }
+            Protocol::PullResponse(a, crds_values) => {
+                for cv in crds_values {
+                    match cv.data() {
+                        CrdsData::EpochSlots(esi, es) => {
+                            for cs in es.slots.iter() {
+                                match cs {
+                                    solana_gossip::epoch_slots::CompressedSlots::Flate2(flate2) => {
+                                        self.compressed += 1;
+                                    }
+                                    solana_gossip::epoch_slots::CompressedSlots::Uncompressed(
+                                        uncompressed,
+                                    ) => {
+                                        self.uncompressed += 1;
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                true
             }
             _ => self.all.try_retain(bytes, size),
         }
@@ -476,8 +500,12 @@ pub fn monitor_gossip(
         }
         if last_report.elapsed() > Duration::from_millis(500) {
             last_report = Instant::now();
-            let rate = monitor.push_node_info.rate().unwrap_or(0.0);
-
+            println!(
+                "Compressed: {}, uncompressed: {}",
+                monitor.compressed, monitor.uncompressed
+            );
+            //let rate = monitor.push_node_info.rate().unwrap_or(0.0);
+            let rate = 0.0;
             if rate > threshold_rate as f32 {
                 if !capturing {
                     println!("Peak starting!");
