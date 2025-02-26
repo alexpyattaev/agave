@@ -1,5 +1,8 @@
 use std::borrow::Cow;
+use std::collections::VecDeque;
+use std::io::Write;
 
+use pcap_file::pcapng::blocks::enhanced_packet::EnhancedPacketBlock;
 use pcap_file::pcapng::blocks::simple_packet::SimplePacketBlock;
 use pcap_file::pcapng::{PcapNgBlock, PcapNgWriter};
 
@@ -47,5 +50,45 @@ impl WritePackets for DumbStorage {
             write_packet(p, writer)?
         }
         Ok(())
+    }
+}
+
+pub fn hexdump(bytes: &[u8]) -> anyhow::Result<()> {
+    hxdmp::hexdump(bytes, &mut std::io::stderr())?;
+    std::io::stderr().write_all(b"\n")?;
+    Ok(())
+}
+
+#[derive(Default)]
+pub struct Monitor {
+    pub packets: VecDeque<EnhancedPacketBlock<'static>>,
+}
+impl Monitor {
+    pub fn try_retain(&mut self, bytes: &[u8], size: usize) -> bool {
+        self.packets.push_back(EnhancedPacketBlock {
+            original_len: bytes.len() as u32,
+            data: Cow::from(bytes.to_owned()),
+            interface_id: 0,
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap(),
+            options: vec![],
+        });
+        if self.packets.len() > size {
+            self.packets.pop_front();
+        }
+        true
+    }
+
+    pub fn rate(&self) -> Option<f32> {
+        let oldest = self.packets.front()?;
+        let newest = self.packets.back()?;
+        if oldest == newest {
+            return None;
+        }
+        let dt = newest.timestamp - oldest.timestamp;
+        let num = self.packets.len() as f32;
+        let dt_secs = dt.as_secs_f32();
+        Some(num / dt_secs)
     }
 }
