@@ -15,7 +15,7 @@ use {
         thread,
         time::Duration,
     },
-    turbine::capture_turbine,
+    turbine::{capture_turbine, validate_turbine},
 };
 
 mod cluster_probes;
@@ -169,7 +169,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                     std::process::exit(1);
                 }
             }
-            WireProtocol::Turbine => todo!(),
+            WireProtocol::Turbine => {
+                let stats = validate_turbine(input)?;
+                dbg!(stats);
+            }
         },
     }
     //let s = serde_json::to_string_pretty(&p).unwrap();

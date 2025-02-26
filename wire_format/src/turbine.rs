@@ -9,10 +9,14 @@ use crate::{
     Stats,
 };
 use anyhow::Context;
+use hxdmp::hexdump;
 use log::info;
+use pcap_file::pcapng::PcapNgReader;
 use pcap_file::pcapng::{blocks::interface_description::InterfaceDescriptionBlock, PcapNgWriter};
 use solana_ledger::shred::Shred;
 use solana_ledger::shred::ShredVariant;
+use solana_pubkey::Pubkey;
+use std::collections::HashMap;
 use std::fs::File;
 
 #[derive(Default)]
@@ -121,5 +125,86 @@ pub fn capture_turbine(
     inventory
         .dump_to_files(pcap_filename)
         .context("Saving files failed")?;
+    Ok(stats)
+}
+
+#[derive(Default, Debug)]
+struct Counter {
+    origins: HashMap<Pubkey, u64>,
+    senders: HashMap<Pubkey, u64>,
+    coding_shreds: usize,
+    data_shreds: usize,
+}
+pub fn validate_turbine(filename: PathBuf) -> anyhow::Result<Stats> {
+    let mut stats = Stats::default();
+    let file_in = File::open(&filename).with_context(|| format!("opening file {filename:?}"))?;
+    let mut reader = PcapNgReader::new(file_in).context("pcap reader creation")?;
+    let mut counter = Counter::default();
+    loop {
+        let Some(block) = reader.next_block() else {
+            break;
+        };
+        let block = block?;
+        let data = match block {
+            pcap_file::pcapng::Block::Packet(ref block) => {
+                &block.data[0..block.original_len as usize]
+            }
+            pcap_file::pcapng::Block::SimplePacket(ref block) => {
+                &block.data[0..block.original_len as usize]
+            }
+            pcap_file::pcapng::Block::EnhancedPacket(ref block) => {
+                &block.data[0..block.original_len as usize]
+            }
+            _ => {
+                debug!("Skipping unknown block in pcap file");
+                continue;
+            }
+        };
+        // Check if IP header is present
+        let pkt_payload = if data[0] == 69 {
+            &data[20 + 8..]
+        } else {
+            &data[0..]
+        };
+        stats.captured += 1;
+        match parse_turbine(pkt_payload) {
+            Ok(pkt) => {
+                stats.valid += 1;
+                println!(
+                    "id={id} type={typ} Code? {is_code} FEC idx{fec}",
+                    is_code = pkt.is_code(),
+                    fec = pkt.fec_set_index(),
+                    id = pkt.id()
+                    typ=pkt.shred_type()
+                );
+                if pkt.is_data() {
+                    counter.data_shreds += 1;
+                } else {
+                    counter.coding_shreds += 1;
+                }
+                //dbg!(&pkt);
+                /*let reconstructed_bytes = _serialize(pkt);
+                if reconstructed_bytes != pkt_payload {
+                    error!("Reserialization failed for packet {}!", stats.captured);
+                    error!("Original packet bytes:");
+                    hexdump(pkt_payload)?;
+                    error!("Reserialized bytes:");
+                    hexdump(&reconstructed_bytes)?;
+                    break;
+                } else {
+                    stats.retained += 1;
+                }*/
+            }
+            Err(e) => {
+                error!(
+                    "Found packet {} that failed to parse with error {e}",
+                    stats.captured
+                );
+                error!("Problematic packet bytes:");
+                hexdump(pkt_payload)?;
+            }
+        }
+    }
+    dbg!(counter);
     Ok(stats)
 }
