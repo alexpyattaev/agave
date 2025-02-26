@@ -15,7 +15,7 @@ use {
         thread,
         time::Duration,
     },
-    turbine::{capture_turbine, validate_turbine},
+    turbine::{capture_turbine, monitor_turbine, validate_turbine},
 };
 
 mod cluster_probes;
@@ -107,8 +107,19 @@ fn main() -> Result<(), Box<dyn Error>> {
         } => {
             let _ = std::fs::create_dir(&output);
             let t = std::time::Instant::now();
-            let stats = monitor_gossip(ip_addr, gossip_port, output, size_hint, threshold_rate)
-                .context("Monitor failed")?;
+            let stats = match cli.protocol {
+                WireProtocol::Gossip => {
+                    monitor_gossip(ip_addr, gossip_port, output, size_hint, threshold_rate)
+                        .context("Monitor failed")?
+                }
+                WireProtocol::Turbine => {
+                    let gossip_entrypoint = SocketAddr::new(IpAddr::V4(ip_addr), gossip_port);
+                    let port = find_turbine_port(gossip_entrypoint).context("Turbine IP")?;
+                    println!("Got port {port}");
+                    monitor_turbine(ip_addr, port).context("Monitor failed")?
+                }
+            };
+
             let time = t.elapsed();
             println!(
                 "Captured {} packets ({} valid) over {:?}, {} pps",

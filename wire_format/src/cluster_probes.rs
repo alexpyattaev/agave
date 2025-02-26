@@ -14,9 +14,10 @@ use solana_gossip::gossip_service::discover;
 
 /// Finds the turbine port on a given gossip endpoint
 pub(crate) fn find_turbine_port(gossip_peer_address: SocketAddr) -> anyhow::Result<u16> {
-    let spy_gossip_addr = get_gossip_address(&gossip_peer_address)?;
+    let spy_gossip_addr =
+        get_gossip_address(&gossip_peer_address).context("get new gossip address")?;
 
-    let shred_version = get_shred_version(&gossip_peer_address)?;
+    let shred_version = get_shred_version(&gossip_peer_address).context("get shred version")?;
 
     let discover_timeout = Duration::from_secs(60);
     info!("Looking for TVU address via gossip, this can take a minute");
@@ -75,7 +76,7 @@ fn get_shred_version(entrypoint: &SocketAddr) -> anyhow::Result<u16> {
     }
 }
 
-pub(crate) fn get_leader_schedule() -> anyhow::Result<HashMap<u64, Pubkey>> {
+pub(crate) fn _get_leader_schedule() -> anyhow::Result<HashMap<u64, Pubkey>> {
     info!("Fetching leader schedule");
     let child = std::process::Command::new("solana")
         .args(["-um", "leader-schedule"])
@@ -103,6 +104,7 @@ pub(crate) fn get_leader_schedule() -> anyhow::Result<HashMap<u64, Pubkey>> {
     }
     Ok(schedule)
 }
+
 /*
 pub fn process_leader_schedule(
     rpc_client: &RpcClient,

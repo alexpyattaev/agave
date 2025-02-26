@@ -1,6 +1,6 @@
 use {
     crate::{
-        storage::{DumbStorage, WritePackets},
+        storage::{hexdump, DumbStorage, Monitor, WritePackets},
         Stats,
     },
     anyhow::Context,
@@ -14,11 +14,9 @@ use {
     solana_pubkey::Pubkey,
     solana_sanitize::Sanitize,
     std::{
-        borrow::Cow,
         collections::HashMap,
         ffi::CStr,
         fs::File,
-        io::Write,
         net::{Ipv4Addr, SocketAddrV4},
         path::PathBuf,
         time::{Duration, Instant},
@@ -319,49 +317,6 @@ pub fn validate_gossip(filename: PathBuf) -> anyhow::Result<Stats> {
     Ok(stats)
 }
 
-fn hexdump(bytes: &[u8]) -> anyhow::Result<()> {
-    hxdmp::hexdump(bytes, &mut std::io::stderr())?;
-    std::io::stderr().write_all(b"\n")?;
-    Ok(())
-}
-
-use pcap_file::pcapng::blocks::enhanced_packet::EnhancedPacketBlock;
-use std::collections::VecDeque;
-
-#[derive(Default)]
-pub struct Monitor {
-    packets: VecDeque<EnhancedPacketBlock<'static>>,
-}
-impl Monitor {
-    fn try_retain(&mut self, bytes: &[u8], size: usize) -> bool {
-        self.packets.push_back(EnhancedPacketBlock {
-            original_len: bytes.len() as u32,
-            data: Cow::from(bytes.to_owned()),
-            interface_id: 0,
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap(),
-            options: vec![],
-        });
-        if self.packets.len() > size {
-            self.packets.pop_front();
-        }
-        true
-    }
-
-    fn rate(&self) -> Option<f32> {
-        let oldest = self.packets.front()?;
-        let newest = self.packets.back()?;
-        if oldest == newest {
-            return None;
-        }
-        let dt = newest.timestamp - oldest.timestamp;
-        let num = self.packets.len() as f32;
-        let dt_secs = dt.as_secs_f32();
-        Some(num / dt_secs)
-    }
-}
-
 #[derive(Default)]
 pub struct GossipMonitor {
     //ping: VecDeque<Box<[u8]>>,
@@ -400,17 +355,19 @@ impl GossipMonitor {
                     self.push.try_retain(bytes, size)
                 }
             }
-            Protocol::PullResponse(a, crds_values) => {
+            Protocol::PullResponse(_a, crds_values) => {
                 for cv in crds_values {
                     match cv.data() {
-                        CrdsData::EpochSlots(esi, es) => {
+                        CrdsData::EpochSlots(_esi, es) => {
                             for cs in es.slots.iter() {
                                 match cs {
-                                    solana_gossip::epoch_slots::CompressedSlots::Flate2(flate2) => {
+                                    solana_gossip::epoch_slots::CompressedSlots::Flate2(
+                                        _flate2,
+                                    ) => {
                                         self.compressed += 1;
                                     }
                                     solana_gossip::epoch_slots::CompressedSlots::Uncompressed(
-                                        uncompressed,
+                                        _uncompressed,
                                     ) => {
                                         self.uncompressed += 1;
                                     }
@@ -504,8 +461,7 @@ pub fn monitor_gossip(
                 "Compressed: {}, uncompressed: {}",
                 monitor.compressed, monitor.uncompressed
             );
-            //let rate = monitor.push_node_info.rate().unwrap_or(0.0);
-            let rate = 0.0;
+            let rate = monitor.push_node_info.rate().unwrap_or(0.0);
             if rate > threshold_rate as f32 {
                 if !capturing {
                     println!("Peak starting!");
