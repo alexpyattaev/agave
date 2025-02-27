@@ -324,6 +324,8 @@ pub struct GossipMonitor {
     //prune: VecDeque<Box<[u8]>>,
     //pull_request: DumbStorage,
     //pull_response: CrdsCaptures,
+    invalid_senders_by_ip: HashMap<Ipv4Addr, usize>,
+    invalid_senders_by_key: HashMap<Pubkey, usize>,
     all: Monitor,
     push: Monitor,
     push_node_info: Monitor,
@@ -341,6 +343,7 @@ impl WritePackets for Monitor {
         Ok(())
     }
 }
+const MAX_HASH_MAP_SIZE: usize = 1024;
 
 impl GossipMonitor {
     fn try_retain(&mut self, pkt: &Protocol, bytes: &[u8], size: usize) -> bool {
@@ -443,12 +446,21 @@ pub fn monitor_gossip(
         let valid_buf = &buf[0..len];
         stats.captured += 1;
         let slice = &valid_buf[20 + 8..];
+        let mut ip = [0u8; 4];
+        ip.as_mut().copy_from_slice(&buf[12..12 + 4]);
+        let ip: u32 = u32::from_be_bytes(ip);
+        let ip = Ipv4Addr::from_bits(ip);
 
         //let layers = parse_layers!(slice, Ip, (Udp, Raw));
         let Ok(pkt) = parse_gossip(slice) else {
+            let entry = monitor.invalid_senders_by_ip.entry(ip).or_default();
+            *entry += 1;
+
             continue;
         };
         if pkt.sanitize().is_err() {
+            let entry = monitor.invalid_senders_by_ip.entry(ip).or_default();
+            *entry += 1;
             continue;
         }
         stats.valid += 1;
