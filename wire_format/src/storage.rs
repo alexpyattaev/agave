@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::io::Write;
+use std::net::Ipv4Addr;
 
 use pcap_file::pcapng::blocks::enhanced_packet::EnhancedPacketBlock;
 use pcap_file::pcapng::blocks::simple_packet::SimplePacketBlock;
@@ -91,4 +92,17 @@ impl Monitor {
         let dt_secs = dt.as_secs_f32();
         Some(num / dt_secs)
     }
+}
+
+pub fn fetch_dest(buf: &[u8]) -> (Ipv4Addr, u16) {
+    let mut ip = [0u8; 4];
+    ip.as_mut().copy_from_slice(&buf[8..8 + 4]);
+    let ip: u32 = u32::from_be_bytes(ip);
+    let ip = Ipv4Addr::from_bits(ip);
+
+    let mut dst_port = [0u8; 2];
+    dst_port.as_mut().copy_from_slice(&buf[20 + 2..20 + 4]);
+    let dst_port = u16::from_be_bytes(dst_port);
+
+    (ip, dst_port)
 }

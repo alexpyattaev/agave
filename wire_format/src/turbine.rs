@@ -6,7 +6,7 @@ use std::{
 };
 
 use crate::{
-    storage::{hexdump, DumbStorage, Monitor, WritePackets},
+    storage::{fetch_dest, hexdump, DumbStorage, Monitor, WritePackets},
     Stats,
 };
 use anyhow::Context;
@@ -122,15 +122,22 @@ pub fn capture_turbine(
     let mut inventory = TurbineInventory::default();
     while !crate::EXIT.load(std::sync::atomic::Ordering::Relaxed) {
         let len = socket.recv(&mut buf).context("socket RX")?;
+        let buf = &buf[..len];
+
+        let (dst_ip, dst_port) = fetch_dest(&buf);
+        // skip packets that socket filter let through
+        if dst_ip != bind_ip || dst_port != port {
+            continue;
+        }
         stats.captured += 1;
-        let slice = &buf[20 + 8..len];
+        let data_slice = &buf[20 + 8..];
 
         //let layers = parse_layers!(slice, Ip, (Udp, Raw));
-        let Ok(pkt) = parse_turbine(slice) else {
+        let Ok(pkt) = parse_turbine(data_slice) else {
             continue;
         };
         stats.valid += 1;
-        if inventory.try_retain(&pkt, slice, size_hint) {
+        if inventory.try_retain(&pkt, data_slice, size_hint) {
             stats.retained += 1;
         }
     }
@@ -234,11 +241,16 @@ pub fn monitor_turbine(bind_ip: Ipv4Addr, port: u16) -> anyhow::Result<Stats> {
     let counter = Counter::default();
     while !crate::EXIT.load(std::sync::atomic::Ordering::Relaxed) {
         let len = socket.recv(&mut buf).context("socket RX")?;
-        let valid_buf = &buf[0..len];
+        let buf = &buf[0..len];
+        let (dst_ip, dst_port) = fetch_dest(&buf);
+        // skip packets that socket filter let through
+        if dst_ip != bind_ip || dst_port != port {
+            continue;
+        }
         stats.captured += 1;
-        let slice = &valid_buf[20 + 8..];
+        let data_slice = &buf[20 + 8..];
 
-        let pkt = match parse_turbine(slice) {
+        let pkt = match parse_turbine(data_slice) {
             Ok(pkt) => pkt,
             Err(_) => {
                 continue;
@@ -247,7 +259,7 @@ pub fn monitor_turbine(bind_ip: Ipv4Addr, port: u16) -> anyhow::Result<Stats> {
         if pkt.sanitize().is_err() {
             continue;
         }
-        rate.try_retain(slice, slice.len());
+        rate.try_retain(data_slice, data_slice.len());
         stats.valid += 1;
         if last_report.elapsed() > Duration::from_millis(1000) {
             last_report = Instant::now();
