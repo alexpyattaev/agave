@@ -326,6 +326,7 @@ pub struct GossipMonitor {
     //pull_response: CrdsCaptures,
     invalid_senders_by_ip: HashMap<Ipv4Addr, usize>,
     invalid_senders_by_key: HashMap<Pubkey, usize>,
+    invalid: Monitor,
     all: Monitor,
     push: Monitor,
     push_node_info: Monitor,
@@ -455,12 +456,13 @@ pub fn monitor_gossip(
         let Ok(pkt) = parse_gossip(slice) else {
             let entry = monitor.invalid_senders_by_ip.entry(ip).or_default();
             *entry += 1;
-
+            monitor.invalid.try_retain(&valid_buf, size_hint);
             continue;
         };
         if pkt.sanitize().is_err() {
             let entry = monitor.invalid_senders_by_ip.entry(ip).or_default();
             *entry += 1;
+            monitor.invalid.try_retain(&valid_buf, size_hint);
             continue;
         }
         stats.valid += 1;
