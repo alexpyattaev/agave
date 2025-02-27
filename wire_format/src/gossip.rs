@@ -446,6 +446,12 @@ pub fn monitor_gossip(
     while !crate::EXIT.load(std::sync::atomic::Ordering::Relaxed) {
         let len = socket.recv(&mut buf).context("socket RX")?;
         let valid_buf = &buf[0..len];
+        let mut dst_port = [0u8; 2];
+        dst_port.as_mut().copy_from_slice(&buf[20 + 2..20 + 4]);
+        let dst_port = u16::from_be_bytes(dst_port);
+        if dst_port != port {
+            continue;
+        }
         stats.captured += 1;
         let slice = &valid_buf[20 + 8..];
         let mut ip = [0u8; 4];

@@ -109,6 +109,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             let t = std::time::Instant::now();
             let stats = match cli.protocol {
                 WireProtocol::Gossip => {
+                    dbg!(gossip_port);
                     monitor_gossip(ip_addr, gossip_port, output, size_hint, threshold_rate)
                         .context("Monitor failed")?
                 }
