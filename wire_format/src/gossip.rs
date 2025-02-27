@@ -1,6 +1,6 @@
 use {
     crate::{
-        storage::{hexdump, DumbStorage, Monitor, WritePackets},
+        storage::{fetch_dest, hexdump, DumbStorage, Monitor, WritePackets},
         Stats,
     },
     anyhow::Context,
@@ -169,18 +169,24 @@ pub fn capture_gossip(
     let mut inventory = GossipInventory::default();
     while !crate::EXIT.load(std::sync::atomic::Ordering::Relaxed) {
         let len = socket.recv(&mut buf).context("socket RX")?;
+        let buf = &buf[..len];
+        let (dst_ip, dst_port) = fetch_dest(&buf);
+        // skip packets that socket filter let through
+        if dst_ip != bind_ip || dst_port != port {
+            continue;
+        }
         stats.captured += 1;
-        let slice = &buf[20 + 8..len];
+        let data_slice = &buf[20 + 8..len];
 
         //let layers = parse_layers!(slice, Ip, (Udp, Raw));
-        let Ok(pkt) = parse_gossip(slice) else {
+        let Ok(pkt) = parse_gossip(data_slice) else {
             continue;
         };
         if pkt.sanitize().is_err() {
             continue;
         }
         stats.valid += 1;
-        if inventory.try_retain(&pkt, slice, size_hint) {
+        if inventory.try_retain(&pkt, data_slice, size_hint) {
             stats.retained += 1;
         }
     }
@@ -324,8 +330,6 @@ pub struct GossipMonitor {
     //prune: VecDeque<Box<[u8]>>,
     //pull_request: DumbStorage,
     //pull_response: CrdsCaptures,
-    invalid_senders_by_ip: HashMap<Ipv4Addr, usize>,
-    invalid_senders_by_key: HashMap<Pubkey, usize>,
     invalid: Monitor,
     all: Monitor,
     push: Monitor,
@@ -344,7 +348,6 @@ impl WritePackets for Monitor {
         Ok(())
     }
 }
-const MAX_HASH_MAP_SIZE: usize = 1024;
 
 impl GossipMonitor {
     fn try_retain(&mut self, pkt: &Protocol, bytes: &[u8], size: usize) -> bool {
@@ -440,27 +443,19 @@ pub fn monitor_gossip(
     let mut buf = vec![0; 2048];
     let mut stats = Stats::default();
     let mut monitor = GossipMonitor::default();
-
     let mut last_report = Instant::now();
     let mut capturing = false;
     while !crate::EXIT.load(std::sync::atomic::Ordering::Relaxed) {
         let len = socket.recv(&mut buf).context("socket RX")?;
         let valid_buf = &buf[0..len];
-        let mut dst_port = [0u8; 2];
-        dst_port.as_mut().copy_from_slice(&buf[20 + 2..20 + 4]);
-        let dst_port = u16::from_be_bytes(dst_port);
-        if dst_port != port {
+        let (dst_ip, dst_port) = fetch_dest(&valid_buf);
+        // skip packets that socket filter let through
+        if dst_ip != bind_ip || dst_port != port {
             continue;
         }
         stats.captured += 1;
-        let slice = &valid_buf[20 + 8..];
-        let mut ip = [0u8; 4];
-        ip.as_mut().copy_from_slice(&buf[12..12 + 4]);
-        let ip: u32 = u32::from_be_bytes(ip);
-        let ip = Ipv4Addr::from_bits(ip);
-
         //let layers = parse_layers!(slice, Ip, (Udp, Raw));
-        let Ok(pkt) = parse_gossip(slice) else {
+        let Ok(pkt) = parse_gossip(&valid_buf[20 + 8..]) else {
             //let entry = monitor.invalid_senders_by_ip.entry(ip).or_default();
             //*entry += 1;
             monitor.invalid.try_retain(&valid_buf, size_hint);
@@ -503,6 +498,5 @@ pub fn monitor_gossip(
     monitor
         .dump_to_files(pcap_filename)
         .context("Saving files failed")?;
-    dbg!(monitor.invalid_senders_by_ip);
     Ok(stats)
 }
