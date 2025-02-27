@@ -494,5 +494,6 @@ pub fn monitor_gossip(
     monitor
         .dump_to_files(pcap_filename)
         .context("Saving files failed")?;
+    dbg!(monitor.invalid_senders_by_ip);
     Ok(stats)
 }
