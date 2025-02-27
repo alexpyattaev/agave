@@ -10,49 +10,46 @@ use crate::{
     Stats,
 };
 use anyhow::Context;
+use bincode::Options;
 use log::{debug, error, info};
 use pcap_file::pcapng::PcapNgReader;
 use pcap_file::pcapng::{blocks::interface_description::InterfaceDescriptionBlock, PcapNgWriter};
-use solana_ledger::shred::Shred;
-use solana_ledger::shred::ShredVariant;
 use std::fs::File;
 
 #[derive(Default)]
-struct TurbineInventory {
-    legacy_code: DumbStorage,
-    legacy_data: DumbStorage,
-    merkle_code: DumbStorage,
-    merkle_code_resigned: DumbStorage,
-    merkle_data: DumbStorage,
-    merkle_data_resigned: DumbStorage,
+struct RepairInventory {
+    window_index: DumbStorage,
+    highest_window_index: DumbStorage,
+    orphan: DumbStorage,
+    ancestor: DumbStorage,
+    pong: DumbStorage,
 }
 
-impl TurbineInventory {
-    fn try_retain(&mut self, _shred: &Shred, bytes: &[u8], size_hint: usize) -> bool {
-        let variant = solana_ledger::shred::layout::get_shred_variant(bytes).unwrap();
-        match variant {
-            ShredVariant::LegacyCode => self.legacy_code.try_retain(bytes, size_hint),
-            ShredVariant::LegacyData => self.legacy_data.try_retain(bytes, size_hint),
-            ShredVariant::MerkleCode {
-                proof_size: _,
-                chained: _,
-                resigned: true,
-            } => self.merkle_code_resigned.try_retain(bytes, size_hint),
-            ShredVariant::MerkleCode {
-                proof_size: _,
-                chained: _,
-                resigned: false,
-            } => self.merkle_code.try_retain(bytes, size_hint),
-            ShredVariant::MerkleData {
-                proof_size: _,
-                chained: _,
-                resigned: true,
-            } => self.merkle_data_resigned.try_retain(bytes, size_hint),
-            ShredVariant::MerkleData {
-                proof_size: _,
-                chained: _,
-                resigned: false,
-            } => self.merkle_data.try_retain(bytes, size_hint),
+impl RepairInventory {
+    fn try_retain(&mut self, pkt: &RepairProtocol, bytes: &[u8], size: usize) -> bool {
+        match pkt {
+            RepairProtocol::LegacyWindowIndex => todo!(),
+            RepairProtocol::LegacyHighestWindowIndex => todo!(),
+            RepairProtocol::LegacyOrphan => todo!(),
+            RepairProtocol::LegacyWindowIndexWithNonce => todo!(),
+            RepairProtocol::LegacyHighestWindowIndexWithNonce => todo!(),
+            RepairProtocol::LegacyOrphanWithNonce => todo!(),
+            RepairProtocol::LegacyAncestorHashes => todo!(),
+            RepairProtocol::Pong(_pong) => self.pong.try_retain(bytes, size),
+            RepairProtocol::WindowIndex {
+                header,
+                slot,
+                shred_index,
+            } => self.window_index.try_retain(bytes, size),
+            RepairProtocol::HighestWindowIndex {
+                header,
+                slot,
+                shred_index,
+            } => self.highest_window_index.try_retain(bytes, size),
+            RepairProtocol::Orphan { header, slot } => self.orphan.try_retain(bytes, size),
+            RepairProtocol::AncestorHashes { header, slot } => {
+                self.ancestor.try_retain(bytes, size)
+            }
         }
     }
 
@@ -66,12 +63,11 @@ impl TurbineInventory {
                 )?;
             };
         }
-        write_thing!(legacy_code);
-        write_thing!(legacy_code);
-        write_thing!(merkle_code);
-        write_thing!(merkle_code_resigned);
-        write_thing!(merkle_data);
-        write_thing!(merkle_data_resigned);
+        write_thing!(window_index);
+        write_thing!(highest_window_index);
+        write_thing!(orphan);
+        write_thing!(ancestor);
+        write_thing!(pong);
         Ok(())
     }
 
@@ -97,13 +93,17 @@ impl TurbineInventory {
     }
 }
 
-fn parse_turbine(bytes: &[u8]) -> anyhow::Result<Shred> {
-    //Todo: maybe sigverify this?
-    Ok(Shred::new_from_serialized_shred(bytes.to_owned())
-        .map_err(|e| anyhow::anyhow!(e.to_string()))?)
+use solana_core::repair::serve_repair::RepairProtocol;
+fn parse_repair(bytes: &[u8]) -> anyhow::Result<RepairProtocol> {
+    let pkt: RepairProtocol = bincode::options()
+        .with_limit(bytes.len() as u64)
+        .with_fixint_encoding()
+        .reject_trailing_bytes()
+        .deserialize(bytes)?;
+    Ok(pkt)
 }
 
-pub fn capture_turbine(
+pub fn capture_repair(
     _ifname: &CStr,
     bind_ip: Ipv4Addr,
     port: u16,
@@ -119,24 +119,22 @@ pub fn capture_turbine(
         .context("bind should not fail")?;
     let mut buf = vec![0; 2048];
     let mut stats = Stats::default();
-    let mut inventory = TurbineInventory::default();
+    let mut inventory = RepairInventory::default();
     info!("Capturing turbine packets");
-    let mut ignored = 0;
     while !crate::EXIT.load(std::sync::atomic::Ordering::Relaxed) {
         let len = socket.recv(&mut buf).context("socket RX")?;
         let buf = &buf[..len];
 
         let (dst_ip, dst_port) = fetch_dest(&buf);
         // skip packets that socket filter let through
-        if (dst_ip != bind_ip) || (dst_port != port) {
-            ignored += 1;
+        if dst_ip != bind_ip || dst_port != port {
             continue;
         }
         stats.captured += 1;
         let data_slice = &buf[20 + 8..];
 
         //let layers = parse_layers!(slice, Ip, (Udp, Raw));
-        let Ok(pkt) = parse_turbine(data_slice) else {
+        let Ok(pkt) = parse_repair(data_slice) else {
             continue;
         };
         stats.valid += 1;
@@ -150,19 +148,20 @@ pub fn capture_turbine(
     inventory
         .dump_to_files(pcap_filename)
         .context("Saving files failed")?;
-    dbg!(ignored);
     Ok(stats)
 }
 
 #[derive(Default, Debug)]
 struct Counter {
-    coding_shreds: usize,
-    data_shreds: usize,
-    merkle_shreds: usize,
-    legacy_shreds: usize,
+    legacy: usize,
+    window_index: usize,
+    highest_window_index: usize,
+    orphan: usize,
+    ancestor: usize,
+    pong: usize,
 }
 
-pub fn validate_turbine(filename: PathBuf) -> anyhow::Result<Stats> {
+pub fn validate_repair(filename: PathBuf) -> anyhow::Result<Stats> {
     let mut stats = Stats::default();
     let file_in = File::open(&filename).with_context(|| format!("opening file {filename:?}"))?;
     let mut reader = PcapNgReader::new(file_in).context("pcap reader creation")?;
@@ -195,26 +194,9 @@ pub fn validate_turbine(filename: PathBuf) -> anyhow::Result<Stats> {
         };
 
         stats.captured += 1;
-        match parse_turbine(pkt_payload) {
+        match parse_repair(pkt_payload) {
             Ok(pkt) => {
                 stats.valid += 1;
-                if pkt.merkle_root().is_ok() {
-                    counter.merkle_shreds += 1;
-                } else {
-                    counter.legacy_shreds += 1;
-                }
-                println!(
-                    "id={id:?} type={typ:?} Code? {is_code} FEC idx{fec}",
-                    is_code = pkt.is_code(),
-                    fec = pkt.fec_set_index(),
-                    id = pkt.id(),
-                    typ = pkt.shred_type()
-                );
-                if pkt.is_data() {
-                    counter.data_shreds += 1;
-                } else {
-                    counter.coding_shreds += 1;
-                }
                 stats.retained += 1;
             }
             Err(e) => {
@@ -231,7 +213,7 @@ pub fn validate_turbine(filename: PathBuf) -> anyhow::Result<Stats> {
     Ok(stats)
 }
 
-pub fn monitor_turbine(bind_ip: Ipv4Addr, port: u16) -> anyhow::Result<Stats> {
+pub fn monitor_repair(bind_ip: Ipv4Addr, port: u16) -> anyhow::Result<Stats> {
     let socket = rscap::linux::l4::L4Socket::new(rscap::linux::l4::L4Protocol::Udp)
         .context("L4 socket creation")?;
     socket
@@ -242,7 +224,7 @@ pub fn monitor_turbine(bind_ip: Ipv4Addr, port: u16) -> anyhow::Result<Stats> {
 
     let mut rate = Monitor::default();
     let mut last_report = Instant::now();
-    let counter = Counter::default();
+    let mut counter = Counter::default();
     while !crate::EXIT.load(std::sync::atomic::Ordering::Relaxed) {
         let len = socket.recv(&mut buf).context("socket RX")?;
         let buf = &buf[0..len];
@@ -254,24 +236,44 @@ pub fn monitor_turbine(bind_ip: Ipv4Addr, port: u16) -> anyhow::Result<Stats> {
         stats.captured += 1;
         let data_slice = &buf[20 + 8..];
 
-        let pkt = match parse_turbine(data_slice) {
+        let pkt = match parse_repair(data_slice) {
             Ok(pkt) => pkt,
             Err(_) => {
                 continue;
             }
         };
-        if pkt.sanitize().is_err() {
-            continue;
-        }
         rate.try_retain(data_slice, data_slice.len());
+        match pkt {
+            RepairProtocol::LegacyWindowIndex => counter.legacy += 1,
+            RepairProtocol::LegacyHighestWindowIndex => counter.legacy += 1,
+            RepairProtocol::LegacyOrphan => counter.legacy += 1,
+            RepairProtocol::LegacyWindowIndexWithNonce => counter.legacy += 1,
+            RepairProtocol::LegacyHighestWindowIndexWithNonce => counter.legacy += 1,
+            RepairProtocol::LegacyOrphanWithNonce => counter.legacy += 1,
+            RepairProtocol::LegacyAncestorHashes => counter.legacy += 1,
+            RepairProtocol::Pong(pong) => counter.pong += 1,
+            RepairProtocol::WindowIndex {
+                header,
+                slot,
+                shred_index,
+            } => counter.window_index += 1,
+            RepairProtocol::HighestWindowIndex {
+                header,
+                slot,
+                shred_index,
+            } => counter.highest_window_index += 1,
+            RepairProtocol::Orphan { header, slot } => counter.orphan += 1,
+            RepairProtocol::AncestorHashes { header, slot } => counter.ancestor += 1,
+        }
         stats.valid += 1;
         if last_report.elapsed() > Duration::from_millis(1000) {
             last_report = Instant::now();
             println!("{}: {:?}", last_report.elapsed().as_secs(), counter);
             let rate = rate.rate().unwrap_or(0.0);
-            println!("Turbine data rate is {:?} pps", rate);
+            println!("Repair data rate is {:?} pps", rate);
         }
     }
+    dbg!(counter);
     // Ack the command to exit the capture
     crate::EXIT.store(false, std::sync::atomic::Ordering::Relaxed);
     Ok(stats)

@@ -1405,9 +1405,7 @@ pub(crate) fn get_repair_protocol(_: ClusterType) -> Protocol {
     Protocol::UDP
 }
 
-pub(crate) fn deserialize_request<T>(
-    request: &RemoteRequest,
-) -> std::result::Result<T, bincode::Error>
+pub fn deserialize_request<T>(request: &RemoteRequest) -> std::result::Result<T, bincode::Error>
 where
     T: serde::de::DeserializeOwned,
 {
