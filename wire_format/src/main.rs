@@ -5,6 +5,7 @@ use {
     clap::{Parser, Subcommand, ValueEnum},
     cluster_probes::find_turbine_port,
     log::{error, info},
+    repair::monitor_repair,
     signal_hook::{consts::SIGINT, iterator::Signals},
     std::{
         error::Error,
@@ -20,6 +21,7 @@ use {
 
 mod cluster_probes;
 mod gossip;
+mod repair;
 mod storage;
 mod turbine;
 
@@ -27,6 +29,7 @@ mod turbine;
 enum WireProtocol {
     Gossip,
     Turbine,
+    Repair,
 }
 
 #[derive(Parser)]
@@ -119,6 +122,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     println!("Got port {port}");
                     monitor_turbine(ip_addr, port).context("Monitor failed")?
                 }
+                WireProtocol::Repair => monitor_repair(ip_addr, 8008).context("Monitor failed")?,
             };
 
             let time = t.elapsed();
@@ -152,6 +156,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                     capture_turbine(&interface, ip_addr, port, output, size_hint)
                         .context("capture failed")?
                 }
+                _ => {
+                    todo!()
+                }
             };
 
             let time = t.elapsed();
@@ -184,6 +191,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             WireProtocol::Turbine => {
                 let stats = validate_turbine(input)?;
                 dbg!(stats);
+            }
+            WireProtocol::Repair => {
+                todo!()
             }
         },
     }

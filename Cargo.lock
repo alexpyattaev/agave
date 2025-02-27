@@ -13110,6 +13110,7 @@ dependencies = [
  "rscap",
  "serde",
  "signal-hook",
+ "solana-core",
  "solana-gossip",
  "solana-ledger",
  "solana-logger",
