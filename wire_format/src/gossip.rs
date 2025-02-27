@@ -419,6 +419,7 @@ impl GossipMonitor {
         }
         write_thing!(push);
         write_thing!(push_node_info);
+        write_thing!(invalid);
         write_thing!(all);
         Ok(())
     }
@@ -454,14 +455,14 @@ pub fn monitor_gossip(
 
         //let layers = parse_layers!(slice, Ip, (Udp, Raw));
         let Ok(pkt) = parse_gossip(slice) else {
-            let entry = monitor.invalid_senders_by_ip.entry(ip).or_default();
-            *entry += 1;
+            //let entry = monitor.invalid_senders_by_ip.entry(ip).or_default();
+            //*entry += 1;
             monitor.invalid.try_retain(&valid_buf, size_hint);
             continue;
         };
         if pkt.sanitize().is_err() {
-            let entry = monitor.invalid_senders_by_ip.entry(ip).or_default();
-            *entry += 1;
+            //let entry = monitor.invalid_senders_by_ip.entry(ip).or_default();
+            //*entry += 1;
             monitor.invalid.try_retain(&valid_buf, size_hint);
             continue;
         }
