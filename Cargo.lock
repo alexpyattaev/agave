@@ -13918,6 +13918,7 @@ dependencies = [
  "bincode",
  "clap 4.5.28",
  "hxdmp",
+ "indicatif",
  "log",
  "pcap-file",
  "pkts",
