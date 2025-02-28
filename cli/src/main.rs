@@ -141,34 +141,6 @@ fn parse_settings(matches: &ArgMatches<'_>) -> Result<bool, Box<dyn error::Error
     Ok(parse_args)
 }
 
-mod lol{
-    fn send_transactions_in_batch(
-        &self,
-        wire_transactions: Vec<Vec<u8>>,
-        stats: &SendTransactionServiceStats,
-    ) {
-        info!("BATCH SIZE 1, {}", wire_transactions.len());
-        let mut measure = Measure::start("send-us");
-        self.runtime_handle.spawn({
-            let sender = self.sender.clone();
-            let x = async move {
-                info!("BATCH SIZE, {}", wire_transactions.len());
-                let txs = TransactionBatch::new(wire_transactions);
-                if let Err(e) = sender.try_send(txs.clone()) {
-                    info!("Failed to send because channel is full {e:?}");
-                    let res = sender.send(txs).await;
-                    if res.is_err() {
-                        warn!("Failed to send transaction to channel: it is closed.");
-                    }
-                }
-                //let res = sender.send(TransactionBatch::new(wire_transactions)).await;
-                //if res.is_err() {
-                //    warn!("Failed to send transaction to channel: it is closed.");
-                //}
-            };
-            x
-        });
-}
 pub fn parse_args<'a>(
     matches: &ArgMatches<'_>,
     wallet_manager: &mut Option<Rc<RemoteWalletManager>>,
