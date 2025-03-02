@@ -44,7 +44,7 @@ use {
         },
         weighted_shuffle::WeightedShuffle,
     },
-    crossbeam_channel::{Receiver, RecvTimeoutError, Sender},
+    crossbeam_channel::{Receiver, Sender},
     itertools::{Either, Itertools},
     rand::{seq::SliceRandom, CryptoRng, Rng},
     rayon::{prelude::*, ThreadPool, ThreadPoolBuilder},
@@ -2086,7 +2086,6 @@ impl ClusterInfo {
         receiver: &PacketBatchReceiver,
         sender: &Sender<Vec<(/*from:*/ SocketAddr, Protocol)>>,
     ) -> Result<(), GossipError> {
-        const RECV_TIMEOUT: Duration = Duration::from_secs(1);
         fn count_dropped_packets(packets: &PacketBatch, dropped_packets_counts: &mut [u64; 7]) {
             for packet in packets {
                 let k = packet
@@ -2102,7 +2101,7 @@ impl ClusterInfo {
         let mut num_packets = 0;
         let mut packets = VecDeque::with_capacity(2);
         for packet_batch in receiver
-            .recv_timeout(RECV_TIMEOUT)
+            .recv()
             .map(std::iter::once)?
             .chain(receiver.try_iter())
         {
@@ -2182,12 +2181,11 @@ impl ClusterInfo {
         should_check_duplicate_instance: bool,
     ) -> Result<(), GossipError> {
         let _st = ScopedTimer::from(&self.stats.gossip_listen_loop_time);
-        const RECV_TIMEOUT: Duration = Duration::from_secs(1);
         const SUBMIT_GOSSIP_STATS_INTERVAL: Duration = Duration::from_secs(2);
         let mut num_packets = 0;
         let mut packets = VecDeque::with_capacity(2);
         for pkts in receiver
-            .recv_timeout(RECV_TIMEOUT)
+            .recv()
             .map(std::iter::once)?
             .chain(receiver.try_iter())
         {
@@ -2251,8 +2249,9 @@ impl ClusterInfo {
                     &receiver,
                     &sender,
                 ) {
-                    Err(GossipError::RecvTimeoutError(RecvTimeoutError::Disconnected)) => break,
-                    Err(GossipError::RecvTimeoutError(RecvTimeoutError::Timeout)) => (),
+                    // A recv operation can only fail if the sending end of a
+                    // channel is disconnected.
+                    Err(GossipError::RecvError(_)) => break,
                     // A send operation can only fail if the receiving end of a
                     // channel is disconnected.
                     Err(GossipError::SendError) => break,
@@ -2295,15 +2294,7 @@ impl ClusterInfo {
                         should_check_duplicate_instance,
                     ) {
                         match err {
-                            GossipError::RecvTimeoutError(RecvTimeoutError::Disconnected) => break,
-                            GossipError::RecvTimeoutError(RecvTimeoutError::Timeout) => {
-                                let table_size = self.gossip.crds.read().unwrap().len();
-                                debug!(
-                                    "{}: run_listen timeout, table size: {}",
-                                    self.id(),
-                                    table_size,
-                                );
-                            }
+                            GossipError::RecvError(_) => break,
                             GossipError::DuplicateNodeInstance => {
                                 error!(
                                     "duplicate running instances of the same validator node: {}",
