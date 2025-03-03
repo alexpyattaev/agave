@@ -268,7 +268,7 @@ pub fn monitor_turbine(bind_ip: Ipv4Addr, port: u16) -> anyhow::Result<Stats> {
         if last_report.elapsed() > Duration::from_millis(1000) {
             last_report = Instant::now();
             println!("{}: {:?}", last_report.elapsed().as_secs(), counter);
-            let rate = rate.rate().unwrap_or(0.0);
+            let rate = rate.rate_pps().unwrap_or(0.0);
             println!("Turbine data rate is {:?} pps", rate);
         }
     }

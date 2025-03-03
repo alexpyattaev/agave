@@ -4,6 +4,7 @@ use {
         Stats,
     },
     anyhow::Context,
+    indicatif::{MultiProgress, ProgressBar, ProgressStyle},
     log::{debug, error},
     pcap_file::pcapng::{
         blocks::interface_description::InterfaceDescriptionBlock, PcapNgBlock, PcapNgReader,
@@ -325,17 +326,20 @@ pub fn validate_gossip(filename: PathBuf) -> anyhow::Result<Stats> {
 
 #[derive(Default)]
 pub struct GossipMonitor {
-    //ping: VecDeque<Box<[u8]>>,
-    //pong: VecDeque<Box<[u8]>>,
-    //prune: VecDeque<Box<[u8]>>,
-    //pull_request: DumbStorage,
-    //pull_response: CrdsCaptures,
+    // All invalid packets
     invalid: Monitor,
-    all: Monitor,
+    // All valid packets
+    valid: Monitor,
+    // All push packets
     push: Monitor,
-    push_node_info: Monitor,
-    compressed: usize,
-    uncompressed: usize,
+    // All prune packets
+    prune: Monitor,
+    // CRDS stats
+    //  ContactInfo and LegacyContactInfo packets (i.e. the whole point of gossip)
+    crds_contact_info: Monitor,
+    crds_epoch_slots: Monitor,
+    crds_node_instance: Monitor,
+    crds_vote: Monitor,
 }
 impl WritePackets for Monitor {
     fn write_packets<W: std::io::Write>(
@@ -353,40 +357,37 @@ impl GossipMonitor {
     fn try_retain(&mut self, pkt: &Protocol, bytes: &[u8], size: usize) -> bool {
         match pkt {
             Protocol::PushMessage(_pubkey, crds_values) => {
-                if crds_values.iter().any(|e| match e.data() {
-                    CrdsData::NodeInstance(_) => true,
-                    _ => false,
-                }) {
-                    self.push_node_info.try_retain(bytes, size)
-                } else {
-                    self.push.try_retain(bytes, size)
+                for cv in crds_values {
+                    self.try_retain_crds(cv);
                 }
+                self.push.try_retain(bytes, size)
             }
             Protocol::PullResponse(_a, crds_values) => {
                 for cv in crds_values {
-                    match cv.data() {
-                        CrdsData::EpochSlots(_esi, es) => {
-                            for cs in es.slots.iter() {
-                                match cs {
-                                    solana_gossip::epoch_slots::CompressedSlots::Flate2(
-                                        _flate2,
-                                    ) => {
-                                        self.compressed += 1;
-                                    }
-                                    solana_gossip::epoch_slots::CompressedSlots::Uncompressed(
-                                        _uncompressed,
-                                    ) => {
-                                        self.uncompressed += 1;
-                                    }
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
+                    self.try_retain_crds(cv);
                 }
                 true
             }
-            _ => self.all.try_retain(bytes, size),
+            _ => self.valid.try_retain(bytes, size),
+        }
+    }
+
+    fn try_retain_crds(&mut self, cv: &CrdsValue) {
+        let ser = bincode::serialize(cv.data()).unwrap();
+        match cv.data() {
+            CrdsData::EpochSlots(_esi, _es) => {
+                self.crds_epoch_slots.try_retain(&ser, ser.len());
+            }
+            CrdsData::Vote(_, _) => {
+                self.crds_vote.try_retain(&ser, ser.len());
+            }
+            CrdsData::ContactInfo(_) | CrdsData::LegacyContactInfo(_) => {
+                self.crds_contact_info.try_retain(&ser, ser.len());
+            }
+            CrdsData::NodeInstance(_) => {
+                self.crds_node_instance.try_retain(&ser, ser.len());
+            }
+            _ => {}
         }
     }
 
@@ -421,9 +422,9 @@ impl GossipMonitor {
             };
         }
         write_thing!(push);
-        write_thing!(push_node_info);
+        write_thing!(prune);
         write_thing!(invalid);
-        write_thing!(all);
+        write_thing!(valid);
         Ok(())
     }
 }
@@ -440,7 +441,29 @@ pub fn monitor_gossip(
     socket
         .bind(&SocketAddrV4::new(bind_ip, port))
         .context("bind should not fail")?;
-    let mut buf = vec![0; 2048];
+
+    let m = MultiProgress::new();
+    let sty = ProgressStyle::with_template(
+        "[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg}",
+    )
+    .unwrap()
+    .progress_chars("##-");
+
+    let n = 1000;
+    let new_pb = |msg| {
+        let rate = m.add(ProgressBar::new(n));
+        rate.set_style(sty.clone());
+        rate.set_message(msg);
+        rate
+    };
+    let rate_gossip = new_pb("total gossip");
+    let rate_junk = new_pb("total junk");
+    let rate_contact_info = new_pb("contact info");
+    let rate_votes = new_pb("votes");
+    let rate_epoch_slots = new_pb("epoch slots");
+
+    //Allocate buffer big enough for any valid datagram
+    let mut buf = vec![0; 64 * 1024];
     let mut stats = Stats::default();
     let mut monitor = GossipMonitor::default();
     let mut last_report = Instant::now();
@@ -449,8 +472,8 @@ pub fn monitor_gossip(
         let len = socket.recv(&mut buf).context("socket RX")?;
         let valid_buf = &buf[0..len];
         let (dst_ip, dst_port) = fetch_dest(&valid_buf);
-        // skip packets that socket filter let through
-        if dst_ip != bind_ip || dst_port != port {
+        // skip packets that socket filter let through but we do not want
+        if (dst_ip != bind_ip) || (dst_port != port) {
             continue;
         }
         stats.captured += 1;
@@ -471,13 +494,18 @@ pub fn monitor_gossip(
         if monitor.try_retain(&pkt, &valid_buf, size_hint) {
             stats.retained += 1;
         }
+        fn set_pos(pb: &ProgressBar, rate_bps: Option<f32>) {
+            pb.set_position((rate_bps.unwrap_or_default() / 1e6) as u64);
+        }
         if last_report.elapsed() > Duration::from_millis(500) {
             last_report = Instant::now();
-            println!(
-                "Compressed: {}, uncompressed: {}",
-                monitor.compressed, monitor.uncompressed
-            );
-            let rate = monitor.push_node_info.rate().unwrap_or(0.0);
+            set_pos(&rate_junk, monitor.invalid.rate_bps());
+            set_pos(&rate_gossip, monitor.valid.rate_bps());
+            set_pos(&rate_votes, monitor.crds_vote.rate_bps());
+            set_pos(&rate_contact_info, monitor.crds_contact_info.rate_bps());
+            set_pos(&rate_epoch_slots, monitor.crds_epoch_slots.rate_bps());
+
+            /*let rate = monitor.crds_node_instance.rate_pps().unwrap_or(0.0);
             if rate > threshold_rate as f32 {
                 if !capturing {
                     println!("Peak starting!");
@@ -490,7 +518,7 @@ pub fn monitor_gossip(
                     println!("Caught peak, exiting");
                     break;
                 }
-            }
+            }*/
         }
     }
     // Ack the command to exit the capture
