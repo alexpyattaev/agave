@@ -63,6 +63,7 @@ pub fn hexdump(bytes: &[u8]) -> anyhow::Result<()> {
 #[derive(Default)]
 pub struct Monitor {
     pub packets: VecDeque<EnhancedPacketBlock<'static>>,
+    pub bytes_stored: usize,
 }
 impl Monitor {
     pub fn try_retain(&mut self, bytes: &[u8], size: usize) -> bool {
@@ -75,13 +76,25 @@ impl Monitor {
                 .unwrap(),
             options: vec![],
         });
+        self.bytes_stored += bytes.len();
         if self.packets.len() > size {
-            self.packets.pop_front();
+            let p = self.packets.pop_front().unwrap();
+            self.bytes_stored -= p.original_len as usize;
         }
         true
     }
 
-    pub fn rate(&self) -> Option<f32> {
+    pub fn rate_bps(&self) -> Option<f32> {
+        let oldest = self.packets.front()?;
+        let newest = self.packets.back()?;
+        if oldest == newest {
+            return None;
+        }
+        let dt = newest.timestamp - oldest.timestamp;
+        let dt_secs = dt.as_secs_f32();
+        Some((self.bytes_stored * 8) as f32 / dt_secs)
+    }
+    pub fn rate_pps(&self) -> Option<f32> {
         let oldest = self.packets.front()?;
         let newest = self.packets.back()?;
         if oldest == newest {
@@ -96,7 +109,7 @@ impl Monitor {
 
 pub fn fetch_dest(buf: &[u8]) -> (Ipv4Addr, u16) {
     let mut ip = [0u8; 4];
-    ip.as_mut().copy_from_slice(&buf[8..8 + 4]);
+    ip.as_mut().copy_from_slice(&buf[16..16 + 4]);
     let ip: u32 = u32::from_be_bytes(ip);
     let ip = Ipv4Addr::from_bits(ip);
 
