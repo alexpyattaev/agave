@@ -334,6 +334,10 @@ pub struct GossipMonitor {
     push: Monitor,
     // All prune packets
     prune: Monitor,
+    // Ping and Pong
+    pingpong: Monitor,
+    // Whatever is not covered above
+    others: Monitor,
     // CRDS stats
     //  ContactInfo and LegacyContactInfo packets (i.e. the whole point of gossip)
     crds_contact_info: Monitor,
@@ -360,16 +364,24 @@ impl GossipMonitor {
                 for cv in crds_values {
                     self.try_retain_crds(cv);
                 }
-                self.push.try_retain(bytes, size)
+                self.push.try_retain(bytes, size);
             }
             Protocol::PullResponse(_a, crds_values) => {
                 for cv in crds_values {
                     self.try_retain_crds(cv);
                 }
-                true
             }
-            _ => self.valid.try_retain(bytes, size),
+            Protocol::PruneMessage(_, _) => {
+                self.prune.try_retain(bytes, size);
+            }
+            Protocol::PingMessage(_) | Protocol::PongMessage(_) => {
+                self.pingpong.try_retain(bytes, size);
+            }
+            _ => {
+                self.others.try_retain(bytes, size);
+            }
         }
+        self.valid.try_retain(bytes, size)
     }
 
     fn try_retain_crds(&mut self, cv: &CrdsValue) {
@@ -444,7 +456,7 @@ pub fn monitor_gossip(
 
     let m = MultiProgress::new();
     let sty = ProgressStyle::with_template(
-        "[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg}",
+        "[{elapsed_precise}] {bar:80.cyan/blue} {pos:>7}/{len:7} {msg}",
     )
     .unwrap()
     .progress_chars("##-");
@@ -456,11 +468,14 @@ pub fn monitor_gossip(
         rate.set_message(msg);
         rate
     };
-    let rate_gossip = new_pb("total gossip");
-    let rate_junk = new_pb("total junk");
-    let rate_contact_info = new_pb("contact info");
-    let rate_votes = new_pb("votes");
-    let rate_epoch_slots = new_pb("epoch slots");
+    let rate_gossip = new_pb("All glacier");
+    let rate_junk = new_pb("Junk");
+    let rate_prune = new_pb("Prune");
+    let rate_ping = new_pb("Ping & Pong");
+    let rate_contact_info = new_pb("CRDS: ContactInfo");
+    let rate_votes = new_pb("CRDS: Vote");
+    let rate_epoch_slots = new_pb("CRDS: EpochSlots");
+    let rate_node_instance = new_pb("CRDS: NodeInstance");
 
     //Allocate buffer big enough for any valid datagram
     let mut buf = vec![0; 64 * 1024];
@@ -502,8 +517,11 @@ pub fn monitor_gossip(
             set_pos(&rate_junk, monitor.invalid.rate_bps());
             set_pos(&rate_gossip, monitor.valid.rate_bps());
             set_pos(&rate_votes, monitor.crds_vote.rate_bps());
+            set_pos(&rate_prune, monitor.prune.rate_bps());
             set_pos(&rate_contact_info, monitor.crds_contact_info.rate_bps());
             set_pos(&rate_epoch_slots, monitor.crds_epoch_slots.rate_bps());
+            set_pos(&rate_node_instance, monitor.crds_node_instance.rate_bps());
+            set_pos(&rate_ping, monitor.pingpong.rate_bps());
 
             /*let rate = monitor.crds_node_instance.rate_pps().unwrap_or(0.0);
             if rate > threshold_rate as f32 {
