@@ -26,10 +26,12 @@ use {
     static_assertions::const_assert_eq,
     std::{
         collections::HashMap,
+        fs::File,
+        io::Write,
         num::NonZeroUsize,
         sync::{
             atomic::{AtomicUsize, Ordering},
-            Arc, RwLock,
+            Arc, Mutex, RwLock,
         },
         thread::{Builder, JoinHandle},
         time::{Duration, Instant},
@@ -76,6 +78,8 @@ pub fn spawn_shred_sigverify(
         CLUSTER_NODES_CACHE_NUM_EPOCH_CAP,
         CLUSTER_NODES_CACHE_TTL,
     );
+    let logfile = Mutex::new(std::fs::File::create("turbine_log.txt").unwrap());
+
     let thread_pool = ThreadPoolBuilder::new()
         .num_threads(num_sigverify_threads.get())
         .thread_name(|i| format!("solSvrfyShred{i:02}"))
@@ -105,6 +109,7 @@ pub fn spawn_shred_sigverify(
                 &cluster_nodes_cache,
                 &cache,
                 &mut stats,
+                &logfile,
             ) {
                 Ok(()) => (),
                 Err(Error::RecvTimeout) => (),
@@ -135,6 +140,7 @@ fn run_shred_sigverify<const K: usize>(
     cluster_nodes_cache: &ClusterNodesCache<RetransmitStage>,
     cache: &RwLock<LruCache>,
     stats: &mut ShredSigVerifyStats,
+    logfile: &Mutex<File>,
 ) -> Result<(), Error> {
     const RECV_TIMEOUT: Duration = Duration::from_secs(1);
     let packets = shred_fetch_receiver.recv_timeout(RECV_TIMEOUT)?;
@@ -263,6 +269,24 @@ fn run_shred_sigverify<const K: usize>(
                 Either::Left(shred::Payload::from(Arc::new(shred)))
             }
         });
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_micros();
+    {
+        let mut logfile = logfile.lock().unwrap();
+        for s in shreds.iter() {
+            let slot = shred::layout::get_slot(s).unwrap_or_default();
+            let index = shred::layout::get_index(s).unwrap_or_default();
+            write!(logfile, "SHRED_RX:{slot}:{index}:{timestamp}\n").unwrap();
+        }
+        for s in repairs.iter() {
+            let slot = shred::layout::get_slot(s).unwrap_or_default();
+            let index = shred::layout::get_index(s).unwrap_or_default();
+
+            write!(logfile, "REPAIR_RX:{slot}:{index}:{timestamp}\n").unwrap();
+        }
+    }
     // Repaired shreds are not retransmitted.
     stats.num_retransmit_shreds += shreds.len();
     retransmit_sender.send(shreds.clone())?;
