@@ -78,7 +78,7 @@ pub fn spawn_shred_sigverify(
         CLUSTER_NODES_CACHE_NUM_EPOCH_CAP,
         CLUSTER_NODES_CACHE_TTL,
     );
-    let logfile = Mutex::new(std::fs::File::create("turbine_log.txt").unwrap());
+    let logfile = Mutex::new(std::fs::File::create("/home/sol/turbine_log.txt").unwrap());
 
     let thread_pool = ThreadPoolBuilder::new()
         .num_threads(num_sigverify_threads.get())
