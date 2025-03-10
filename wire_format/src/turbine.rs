@@ -66,7 +66,7 @@ impl TurbineInventory {
                 )?;
             };
         }
-        write_thing!(legacy_code);
+        write_thing!(legacy_data);
         write_thing!(legacy_code);
         write_thing!(merkle_code);
         write_thing!(merkle_code_resigned);
@@ -99,8 +99,12 @@ impl TurbineInventory {
 
 fn parse_turbine(bytes: &[u8]) -> anyhow::Result<Shred> {
     //Todo: maybe sigverify this?
-    Ok(Shred::new_from_serialized_shred(bytes.to_owned())
-        .map_err(|e| anyhow::anyhow!(e.to_string()))?)
+    let shred = Shred::new_from_serialized_shred(bytes.to_owned())
+        .map_err(|_e| anyhow::anyhow!("Can not deserialize"))?;
+    shred
+        .sanitize()
+        .map_err(|_e| anyhow::anyhow!("Failed sanitize"))?;
+    Ok(shred)
 }
 
 pub fn capture_turbine(
@@ -122,6 +126,7 @@ pub fn capture_turbine(
     let mut inventory = TurbineInventory::default();
     info!("Capturing turbine packets");
     let mut ignored = 0;
+    let mut last_report = Instant::now();
     while !crate::EXIT.load(std::sync::atomic::Ordering::Relaxed) {
         let len = socket.recv(&mut buf).context("socket RX")?;
         let buf = &buf[..len];
@@ -142,6 +147,10 @@ pub fn capture_turbine(
         stats.valid += 1;
         if inventory.try_retain(&pkt, data_slice, size_hint) {
             stats.retained += 1;
+        }
+        if last_report.elapsed() > Duration::from_millis(500) {
+            last_report = Instant::now();
+            println!("Retained {} packets so far...", stats.retained);
         }
     }
 
