@@ -120,7 +120,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     let gossip_entrypoint = SocketAddr::new(IpAddr::V4(ip_addr), gossip_port);
                     let port = find_turbine_port(gossip_entrypoint).context("Turbine IP")?;
                     println!("Got port {port}");
-                    monitor_turbine(ip_addr, port).context("Monitor failed")?
+                    monitor_turbine(ip_addr, port, output).context("Monitor failed")?
                 }
                 WireProtocol::Repair => monitor_repair(ip_addr, 8008).context("Monitor failed")?,
             };

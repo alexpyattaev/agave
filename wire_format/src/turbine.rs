@@ -1,5 +1,6 @@
 use std::{
     ffi::CStr,
+    io::{BufWriter, Write},
     net::{Ipv4Addr, SocketAddrV4},
     path::PathBuf,
     time::{Duration, Instant},
@@ -260,7 +261,9 @@ pub fn validate_turbine(filename: PathBuf) -> anyhow::Result<Stats> {
     Ok(stats)
 }
 
-pub fn monitor_turbine(bind_ip: Ipv4Addr, port: u16) -> anyhow::Result<Stats> {
+pub fn monitor_turbine(bind_ip: Ipv4Addr, port: u16, output: PathBuf) -> anyhow::Result<Stats> {
+    let mut logfile = BufWriter::new(std::fs::File::create(output)?);
+
     let socket = rscap::linux::l4::L4Socket::new(rscap::linux::l4::L4Protocol::Udp)
         .context("L4 socket creation")?;
     socket
@@ -291,6 +294,20 @@ pub fn monitor_turbine(bind_ip: Ipv4Addr, port: u16) -> anyhow::Result<Stats> {
         };
         if pkt.sanitize().is_err() {
             continue;
+        }
+
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros();
+        {
+            write!(
+                logfile,
+                "SHRED_RX:{}:{}:{}:{timestamp}\n",
+                pkt.slot(),
+                pkt.index(),
+                pkt.fec_set_index(),
+            )?;
         }
         if pkt.merkle_root().is_ok() {
             counter.merkle_shreds += 1;
@@ -326,5 +343,6 @@ pub fn monitor_turbine(bind_ip: Ipv4Addr, port: u16) -> anyhow::Result<Stats> {
     }
     // Ack the command to exit the capture
     crate::EXIT.store(false, std::sync::atomic::Ordering::Relaxed);
+    logfile.flush()?;
     Ok(stats)
 }
