@@ -106,7 +106,7 @@ fn parse_turbine(bytes: &[u8]) -> anyhow::Result<Shred> {
     Ok(shred)
 }
 
-fn _serialize(pkt: Shred) -> Vec<u8> {
+fn serialize(pkt: &Shred) -> Vec<u8> {
     pkt.payload().to_vec()
 }
 
@@ -140,6 +140,10 @@ pub fn capture_turbine(
             ignored += 1;
             continue;
         }
+        let mut src_ip = [0u8; 4];
+        src_ip.as_mut().copy_from_slice(&buf[12..12 + 4]);
+        let src_ip: u32 = u32::from_be_bytes(src_ip);
+        let src_ip = Ipv4Addr::from_bits(src_ip);
         stats.captured += 1;
         let data_slice = &buf[20 + 8..];
 
@@ -147,8 +151,19 @@ pub fn capture_turbine(
         let Ok(pkt) = parse_turbine(data_slice) else {
             continue;
         };
+        //hack to get valid length of packet
+        let ser = serialize(&pkt);
+        if ser.len() != data_slice.len() {
+            println!(
+                "{:?} {} {}!={}",
+                src_ip,
+                pkt.slot(),
+                ser.len(),
+                data_slice.len()
+            );
+        }
         stats.valid += 1;
-        if inventory.try_retain(&pkt, data_slice, size_hint) {
+        if inventory.try_retain(&pkt, &data_slice[0..ser.len()], size_hint) {
             stats.retained += 1;
         }
         if last_report.elapsed() > Duration::from_millis(500) {
