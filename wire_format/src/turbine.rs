@@ -187,6 +187,8 @@ struct Counter {
     data_shreds: usize,
     merkle_shreds: usize,
     legacy_shreds: usize,
+    zero_bytes: usize,
+    total_bytes: usize,
 }
 
 pub fn validate_turbine(filename: PathBuf) -> anyhow::Result<Stats> {
@@ -269,7 +271,7 @@ pub fn monitor_turbine(bind_ip: Ipv4Addr, port: u16) -> anyhow::Result<Stats> {
 
     let mut rate = Monitor::default();
     let mut last_report = Instant::now();
-    let counter = Counter::default();
+    let mut counter = Counter::default();
     while !crate::EXIT.load(std::sync::atomic::Ordering::Relaxed) {
         let len = socket.recv(&mut buf).context("socket RX")?;
         let buf = &buf[0..len];
@@ -290,6 +292,18 @@ pub fn monitor_turbine(bind_ip: Ipv4Addr, port: u16) -> anyhow::Result<Stats> {
         if pkt.sanitize().is_err() {
             continue;
         }
+        if pkt.merkle_root().is_ok() {
+            counter.merkle_shreds += 1;
+        } else {
+            counter.legacy_shreds += 1;
+        }
+        if pkt.is_code() {
+            counter.coding_shreds += 1;
+        } else {
+            counter.data_shreds += 1;
+        }
+        counter.zero_bytes += data_slice.iter().filter(|&e| *e == 0).count();
+        counter.total_bytes += data_slice.len();
         rate.try_retain(data_slice, data_slice.len());
         stats.valid += 1;
         if last_report.elapsed() > Duration::from_millis(1000) {
@@ -297,6 +311,17 @@ pub fn monitor_turbine(bind_ip: Ipv4Addr, port: u16) -> anyhow::Result<Stats> {
             println!("{}: {:?}", last_report.elapsed().as_secs(), counter);
             let rate = rate.rate_pps().unwrap_or(0.0);
             println!("Turbine data rate is {:?} pps", rate);
+            println!(
+                "Turbine zeros rate is {}/{}",
+                counter.zero_bytes, counter.total_bytes
+            );
+            println!(
+                "Merkle:{} Legacy: {} Coding: {} Data: {}",
+                counter.merkle_shreds,
+                counter.legacy_shreds,
+                counter.coding_shreds,
+                counter.data_shreds
+            );
         }
     }
     // Ack the command to exit the capture
