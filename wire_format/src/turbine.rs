@@ -261,8 +261,10 @@ pub fn validate_turbine(filename: PathBuf) -> anyhow::Result<Stats> {
     Ok(stats)
 }
 
-pub fn monitor_turbine(bind_ip: Ipv4Addr, port: u16, output: PathBuf) -> anyhow::Result<Stats> {
-    let mut logfile = BufWriter::new(std::fs::File::create(output)?);
+pub fn monitor_turbine(bind_ip: Ipv4Addr, port: u16, mut output: PathBuf) -> anyhow::Result<Stats> {
+    output.push("time_log.csv");
+    let mut logfile = BufWriter::new(std::fs::File::create(&output)?);
+    info!("Logging arrival pattern into {output:?}");
 
     let socket = rscap::linux::l4::L4Socket::new(rscap::linux::l4::L4Protocol::Udp)
         .context("L4 socket creation")?;
@@ -303,10 +305,10 @@ pub fn monitor_turbine(bind_ip: Ipv4Addr, port: u16, output: PathBuf) -> anyhow:
         {
             write!(
                 logfile,
-                "SHRED_RX:{}:{}:{}:{timestamp}\n",
-                pkt.slot(),
-                pkt.index(),
-                pkt.fec_set_index(),
+                "SHRED_RX:{slot}:{idx}:{fecidx}:{timestamp}\n",
+                slot = pkt.slot(),
+                idx = pkt.index(),
+                fecidx = pkt.fec_set_index(),
             )?;
         }
         if pkt.merkle_root().is_ok() {
