@@ -361,17 +361,20 @@ impl GossipMonitor {
     fn try_retain(&mut self, pkt: &Protocol, bytes: &[u8], size: usize) -> bool {
         match pkt {
             Protocol::PushMessage(_pubkey, crds_values) => {
+                dbg!(_pubkey);
                 for cv in crds_values {
                     self.try_retain_crds(cv);
                 }
                 self.push.try_retain(bytes, size);
             }
-            Protocol::PullResponse(_a, crds_values) => {
+            Protocol::PullResponse(_pubkey, crds_values) => {
+                dbg!(_pubkey);
                 for cv in crds_values {
                     self.try_retain_crds(cv);
                 }
             }
-            Protocol::PruneMessage(_, _) => {
+            Protocol::PruneMessage(_pubkey, _) => {
+                dbg!(_pubkey);
                 self.prune.try_retain(bytes, size);
             }
             Protocol::PingMessage(_) | Protocol::PongMessage(_) => {
@@ -386,6 +389,12 @@ impl GossipMonitor {
 
     fn try_retain_crds(&mut self, cv: &CrdsValue) {
         let ser = bincode::serialize(cv.data()).unwrap();
+        if cv.label().pubkey()
+            != Pubkey::from_str_const("DmCowGH9DUHYCetfGaWzPzYCi455yDxewcycdyWuPLjx")
+        {
+            return;
+        }
+        dbg!(cv.label());
         match cv.data() {
             CrdsData::EpochSlots(_esi, _es) => {
                 self.crds_epoch_slots.try_retain(&ser, ser.len());
@@ -447,6 +456,8 @@ pub fn monitor_gossip(
     pcap_filename: PathBuf,
     size_hint: usize,
     threshold_rate: usize,
+    incoming: bool,
+    outgoing: bool,
 ) -> anyhow::Result<Stats> {
     let socket = rscap::linux::l4::L4Socket::new(rscap::linux::l4::L4Protocol::Udp)
         .context("L4 socket creation")?;
@@ -462,7 +473,7 @@ pub fn monitor_gossip(
     .progress_chars("##-");
 
     let n = 1000;
-    let new_pb = |msg| {
+    /*let new_pb = |msg| {
         let rate = m.add(ProgressBar::new(n));
         rate.set_style(sty.clone());
         rate.set_message(msg);
@@ -475,7 +486,7 @@ pub fn monitor_gossip(
     let rate_contact_info = new_pb("CRDS: ContactInfo");
     let rate_votes = new_pb("CRDS: Vote");
     let rate_epoch_slots = new_pb("CRDS: EpochSlots");
-    let rate_node_instance = new_pb("CRDS: NodeInstance");
+    let rate_node_instance = new_pb("CRDS: NodeInstance");*/
 
     //Allocate buffer big enough for any valid datagram
     let mut buf = vec![0; 64 * 1024];
@@ -486,9 +497,28 @@ pub fn monitor_gossip(
     while !crate::EXIT.load(std::sync::atomic::Ordering::Relaxed) {
         let len = socket.recv(&mut buf).context("socket RX")?;
         let valid_buf = &buf[0..len];
-        let (dst_ip, dst_port) = fetch_dest(&valid_buf);
-        // skip packets that socket filter let through but we do not want
-        if (dst_ip != bind_ip) || (dst_port != port) {
+        let mut admit = false;
+        if outgoing {
+            let mut src_ip = [0u8; 4];
+            src_ip.as_mut().copy_from_slice(&buf[12..12 + 4]);
+            let src_ip: u32 = u32::from_be_bytes(src_ip);
+            let src_ip = Ipv4Addr::from_bits(src_ip);
+            let mut src_port = [0u8; 2];
+            src_port.as_mut().copy_from_slice(&buf[20..20 + 2]);
+
+            let src_port = u16::from_be_bytes(src_port);
+            if src_ip == bind_ip || src_port == port {
+                admit = true;
+            }
+        }
+        if incoming {
+            let (dst_ip, dst_port) = fetch_dest(&valid_buf);
+            // skip packets that socket filter let through but we do not want
+            if (dst_ip != bind_ip) || (dst_port != port) {
+                admit = true;
+            }
+        }
+        if !admit {
             continue;
         }
         stats.captured += 1;
@@ -514,14 +544,14 @@ pub fn monitor_gossip(
         }
         if last_report.elapsed() > Duration::from_millis(500) {
             last_report = Instant::now();
-            set_pos(&rate_junk, monitor.invalid.rate_bps());
+            /*set_pos(&rate_junk, monitor.invalid.rate_bps());
             set_pos(&rate_gossip, monitor.valid.rate_bps());
             set_pos(&rate_votes, monitor.crds_vote.rate_bps());
             set_pos(&rate_prune, monitor.prune.rate_bps());
             set_pos(&rate_contact_info, monitor.crds_contact_info.rate_bps());
             set_pos(&rate_epoch_slots, monitor.crds_epoch_slots.rate_bps());
             set_pos(&rate_node_instance, monitor.crds_node_instance.rate_bps());
-            set_pos(&rate_ping, monitor.pingpong.rate_bps());
+            set_pos(&rate_ping, monitor.pingpong.rate_bps());*/
 
             /*let rate = monitor.crds_node_instance.rate_pps().unwrap_or(0.0);
             if rate > threshold_rate as f32 {
