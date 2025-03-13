@@ -1091,11 +1091,8 @@ impl ServeRepair {
             Some(entry) if entry.asof.elapsed() < REPAIR_PEERS_CACHE_TTL => entry,
             _ => {
                 peers_cache.pop(&slot);
-                let mut log = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(format!("/home/sol/repair{slot}.log"))
-                    .unwrap();
+                let mut log =
+                    std::fs::File::create(format!("/home/sol/repair{}.log", slot % 20)).unwrap();
                 let repair_peers = self.repair_peers(repair_validators, slot);
                 writeln!(log, "Peers = {:?}", &repair_peers).unwrap();
                 let weights = cluster_slots.compute_weights(slot, &repair_peers);
