@@ -41,6 +41,10 @@ struct Cli {
     protocol: WireProtocol,
     #[command(subcommand)]
     command: Commands,
+    #[arg(short, long)]
+    incoming: bool,
+    #[arg(short, long)]
+    outgoing: bool,
 }
 
 #[derive(Subcommand)]
@@ -113,8 +117,16 @@ fn main() -> Result<(), Box<dyn Error>> {
             let stats = match cli.protocol {
                 WireProtocol::Gossip => {
                     dbg!(gossip_port);
-                    monitor_gossip(ip_addr, gossip_port, output, size_hint, threshold_rate)
-                        .context("Monitor failed")?
+                    monitor_gossip(
+                        ip_addr,
+                        gossip_port,
+                        output,
+                        size_hint,
+                        threshold_rate,
+                        cli.incoming,
+                        cli.outgoing,
+                    )
+                    .context("Monitor failed")?
                 }
                 WireProtocol::Turbine => {
                     let gossip_entrypoint = SocketAddr::new(IpAddr::V4(ip_addr), gossip_port);
