@@ -51,7 +51,7 @@
 
 #[cfg(test)]
 pub(crate) use self::shred_code::MAX_CODE_SHREDS_PER_SLOT;
-pub(crate) use self::{merkle::SIZE_OF_MERKLE_ROOT, payload::serde_bytes_payload};
+pub(crate) use self::{merkle_tree::SIZE_OF_MERKLE_ROOT, payload::serde_bytes_payload};
 pub use {
     self::{
         payload::Payload,
@@ -84,7 +84,9 @@ use {
 mod common;
 mod legacy;
 mod merkle;
+pub mod merkle_tree;
 mod payload;
+pub mod shred_builder;
 pub mod shred_code;
 mod shred_data;
 mod stats;
@@ -823,7 +825,7 @@ pub(crate) fn make_merkle_shreds_from_entries(
     let now = Instant::now();
     let entries = bincode::serialize(entries)?;
     stats.serialize_elapsed += now.elapsed().as_micros() as u64;
-    let shreds = merkle::make_shreds_from_data(
+    let shreds = shred_builder::make_shreds_from_data(
         thread_pool,
         keypair,
         chained_merkle_root,
@@ -1041,7 +1043,7 @@ mod tests {
         let parent_slot = slot.checked_sub(u64::from(parent_offset)).unwrap();
         let mut data = vec![0u8; data_size];
         rng.fill(&mut data[..]);
-        merkle::make_shreds_from_data(
+        shred_builder::make_shreds_from_data(
             &thread_pool,
             &Keypair::new(),
             chained_merkle_root,

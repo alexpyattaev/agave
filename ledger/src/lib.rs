@@ -33,7 +33,6 @@ mod staking_utils;
 pub mod token_balances;
 mod transaction_address_lookup_table_scanner;
 pub mod use_snapshot_archives_at_startup;
-
 #[macro_use]
 extern crate eager;
 
