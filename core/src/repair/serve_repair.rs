@@ -346,6 +346,7 @@ pub struct ServeRepair {
 pub(crate) struct RepairPeers {
     asof: Instant,
     peers: Vec<Node>,
+    weights: Vec<u64>,
     weighted_index: WeightedIndex<u64>,
 }
 
@@ -360,6 +361,7 @@ impl RepairPeers {
         if peers.len() != weights.len() {
             return Err(Error::from(WeightedError::InvalidWeight));
         }
+        let owned_weights = weights.to_owned();
         let (peers, weights): (Vec<_>, Vec<u64>) = peers
             .iter()
             .zip(weights)
@@ -378,6 +380,7 @@ impl RepairPeers {
         let weighted_index = WeightedIndex::new(weights)?;
         Ok(Self {
             asof,
+            weights: owned_weights,
             peers,
             weighted_index,
         })
@@ -385,6 +388,10 @@ impl RepairPeers {
 
     fn sample<R: Rng>(&self, rng: &mut R) -> &Node {
         let index = self.weighted_index.sample(rng);
+        error!(
+            "Sampled peer {} with weight {}",
+            &self.peers[index].pubkey, &self.weights[index]
+        );
         &self.peers[index]
     }
 }
