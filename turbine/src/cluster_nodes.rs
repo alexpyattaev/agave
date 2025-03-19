@@ -473,9 +473,7 @@ fn get_retransmit_peers<T>(
 ) -> Option<(/*this node's index:*/ usize, impl Iterator<Item = T>)> {
     let mut nodes = nodes.into_iter();
     // This node's index should be somewhere within shuffled indices.
-    let Some(index) = nodes.by_ref().position(pred) else {
-        return None;
-    };
+    let index = nodes.by_ref().position(pred)?;
     // Node's index within its neighborhood.
     let offset = index.saturating_sub(1) % fanout;
     // First node in the neighborhood.
