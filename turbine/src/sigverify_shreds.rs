@@ -81,7 +81,7 @@ pub fn spawn_shred_sigverify(
     let logfile = Mutex::new({
         let file = std::fs::File::create("/home/sol/turbine_log.txt").unwrap();
         let bufwriter = BufWriter::new(file);
-        bufwriter
+        (bufwriter, 0usize)
     });
 
     let thread_pool = ThreadPoolBuilder::new()
@@ -144,7 +144,7 @@ fn run_shred_sigverify<const K: usize>(
     cluster_nodes_cache: &ClusterNodesCache<RetransmitStage>,
     cache: &RwLock<LruCache>,
     stats: &mut ShredSigVerifyStats,
-    logfile: &Mutex<BufWriter<File>>,
+    logfile: &Mutex<(BufWriter<File>, usize)>,
 ) -> Result<(), Error> {
     const RECV_TIMEOUT: Duration = Duration::from_secs(1);
     let packets = shred_fetch_receiver.recv_timeout(RECV_TIMEOUT)?;
@@ -282,19 +282,35 @@ fn run_shred_sigverify<const K: usize>(
         Some(u32::from_le_bytes(bytes))
     }
     {
+        let window = 1000*1000;
+        let interval = 30;
+        
         let mut logfile = logfile.lock().unwrap();
         for s in shreds.iter() {
             let slot = shred::layout::get_slot(s).unwrap_or_default();
             let index = shred::layout::get_index(s).unwrap_or_default();
             let fsi = get_fec_index(s).unwrap_or_default();
-            write!(logfile, "SHRED_RX:{slot}:{index}:{fsi}:{timestamp}\n").unwrap();
+            logfile.1 += 1;
+            if (logfile.1 / window ) % interval == 0 {
+            write!(logfile.0, "SHRED_RX:{slot}:{index}:{fsi}:{timestamp}\n").unwrap();
+            }
         }
         for s in repairs.iter() {
             let slot = shred::layout::get_slot(s).unwrap_or_default();
             let index = shred::layout::get_index(s).unwrap_or_default();
             let fsi = get_fec_index(s).unwrap_or_default();
 
-            write!(logfile, "REPAIR_RX:{slot}:{index}:{fsi}:{timestamp}\n").unwrap();
+            if (logfile.1 / window ) % interval == 0 {
+            write!(logfile.0, "REPAIR_RX:{slot}:{index}:{fsi}:{timestamp}\n").unwrap();
+            }
+            logfile.1 += 1;
+        }
+        if logfile.1 % (window * interval) == 0 {
+//            write!(logfile.0, "SEGMENT_START\n").unwrap();
+            logfile.0.flush();
+            let file = std::fs::File::create("/home/sol/turbine_log.txt").unwrap();
+            let bufwriter = BufWriter::new(file);
+            logfile.0 = bufwriter;
         }
     }
     // Repaired shreds are not retransmitted.
