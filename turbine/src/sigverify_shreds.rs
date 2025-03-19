@@ -27,7 +27,7 @@ use {
     std::{
         collections::HashMap,
         fs::File,
-        io::Write,
+        io::{BufWriter, Write},
         num::NonZeroUsize,
         sync::{
             atomic::{AtomicUsize, Ordering},
@@ -78,7 +78,11 @@ pub fn spawn_shred_sigverify(
         CLUSTER_NODES_CACHE_NUM_EPOCH_CAP,
         CLUSTER_NODES_CACHE_TTL,
     );
-    let logfile = Mutex::new(std::fs::File::create("/home/sol/turbine_log.txt").unwrap());
+    let logfile = Mutex::new({
+        let file = std::fs::File::create("/home/sol/turbine_log.txt").unwrap();
+        let bufwriter = BufWriter::new(file);
+        bufwriter
+    });
 
     let thread_pool = ThreadPoolBuilder::new()
         .num_threads(num_sigverify_threads.get())
@@ -140,7 +144,7 @@ fn run_shred_sigverify<const K: usize>(
     cluster_nodes_cache: &ClusterNodesCache<RetransmitStage>,
     cache: &RwLock<LruCache>,
     stats: &mut ShredSigVerifyStats,
-    logfile: &Mutex<File>,
+    logfile: &Mutex<BufWriter<File>>,
 ) -> Result<(), Error> {
     const RECV_TIMEOUT: Duration = Duration::from_secs(1);
     let packets = shred_fetch_receiver.recv_timeout(RECV_TIMEOUT)?;
@@ -273,18 +277,24 @@ fn run_shred_sigverify<const K: usize>(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_micros();
+    fn get_fec_index(shred: &[u8]) -> Option<u32> {
+        let bytes = <[u8; 4]>::try_from(shred.get(79..79 + 4)?).unwrap();
+        Some(u32::from_le_bytes(bytes))
+    }
     {
         let mut logfile = logfile.lock().unwrap();
         for s in shreds.iter() {
             let slot = shred::layout::get_slot(s).unwrap_or_default();
             let index = shred::layout::get_index(s).unwrap_or_default();
-            write!(logfile, "SHRED_RX:{slot}:{index}:{timestamp}\n").unwrap();
+            let fsi = get_fec_index(s).unwrap_or_default();
+            write!(logfile, "SHRED_RX:{slot}:{index}:{fsi}:{timestamp}\n").unwrap();
         }
         for s in repairs.iter() {
             let slot = shred::layout::get_slot(s).unwrap_or_default();
             let index = shred::layout::get_index(s).unwrap_or_default();
+            let fsi = get_fec_index(s).unwrap_or_default();
 
-            write!(logfile, "REPAIR_RX:{slot}:{index}:{timestamp}\n").unwrap();
+            write!(logfile, "REPAIR_RX:{slot}:{index}:{fsi}:{timestamp}\n").unwrap();
         }
     }
     // Repaired shreds are not retransmitted.
