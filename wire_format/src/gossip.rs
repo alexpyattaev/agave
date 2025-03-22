@@ -1,15 +1,18 @@
+#![allow(dead_code)]
 use {
     crate::{
         storage::{fetch_dest, hexdump, DumbStorage, Monitor, WritePackets},
         Stats,
     },
     anyhow::Context,
+    aya::maps::{MapData, RingBuf},
     indicatif::{MultiProgress, ProgressBar, ProgressStyle},
     log::{debug, error},
     pcap_file::pcapng::{
         blocks::interface_description::InterfaceDescriptionBlock, PcapNgBlock, PcapNgReader,
         PcapNgWriter,
     },
+    pcap_file_tokio::pcap::{PcapPacket, PcapWriter},
     serde::Serialize,
     solana_gossip::{crds_data::CrdsData, crds_value::CrdsValue, protocol::Protocol},
     solana_pubkey::Pubkey,
@@ -17,12 +20,12 @@ use {
     std::{
         collections::HashMap,
         ffi::CStr,
-        fs::File,
-        net::{Ipv4Addr, SocketAddrV4},
+        net::{Ipv4Addr, SocketAddr, SocketAddrV4},
         path::PathBuf,
-        time::{Duration, Instant},
+        time::{Duration, Instant, SystemTime, UNIX_EPOCH},
     },
     strum::EnumCount,
+    tokio::io::{unix::AsyncFd, BufWriter},
 };
 
 fn parse_gossip(bytes: &[u8]) -> bincode::Result<Protocol> {
@@ -126,8 +129,8 @@ impl GossipInventory {
         suffix: &str,
     ) -> anyhow::Result<()> {
         filename.push(suffix);
-        let file_out =
-            File::create(&filename).with_context(|| format!("opening file {filename:?}"))?;
+        let file_out = std::fs::File::create(&filename)
+            .with_context(|| format!("opening file {filename:?}"))?;
         let mut writer = PcapNgWriter::new(file_out).context("pcap writer creation")?;
         store
             .write_packets(&mut writer)
@@ -254,7 +257,8 @@ impl Counter {
 }
 pub fn validate_gossip(filename: PathBuf) -> anyhow::Result<Stats> {
     let mut stats = Stats::default();
-    let file_in = File::open(&filename).with_context(|| format!("opening file {filename:?}"))?;
+    let file_in =
+        std::fs::File::open(&filename).with_context(|| format!("opening file {filename:?}"))?;
     let mut reader = PcapNgReader::new(file_in).context("pcap reader creation")?;
     let mut counter = Counter::default();
     loop {
@@ -418,8 +422,8 @@ impl GossipMonitor {
         suffix: &str,
     ) -> anyhow::Result<()> {
         filename.push(suffix);
-        let file_out =
-            File::create(&filename).with_context(|| format!("opening file {filename:?}"))?;
+        let file_out = std::fs::File::create(&filename)
+            .with_context(|| format!("opening file {filename:?}"))?;
         let mut writer = PcapNgWriter::new(file_out).context("pcap writer creation")?;
 
         let interface = InterfaceDescriptionBlock {
@@ -450,21 +454,42 @@ impl GossipMonitor {
     }
 }
 
-pub fn monitor_gossip(
-    bind_ip: Ipv4Addr,
-    port: u16,
-    pcap_filename: PathBuf,
-    size_hint: usize,
-    threshold_rate: usize,
-    incoming: bool,
-    outgoing: bool,
-) -> anyhow::Result<Stats> {
-    let socket = rscap::linux::l4::L4Socket::new(rscap::linux::l4::L4Protocol::Udp)
-        .context("L4 socket creation")?;
-    socket
-        .bind(&SocketAddrV4::new(bind_ip, port))
-        .context("bind should not fail")?;
+pub async fn gossip_capture(
+    async_fd: &mut AsyncFd<RingBuf<MapData>>,
+    filename: PathBuf,
+) -> anyhow::Result<()> {
+    let file_out = tokio::fs::File::create(filename)
+        .await
+        .expect("Error creating file out");
 
+    // BufWriter to avoid a syscall per write. BufWriter will manage that for us and reduce the amound of syscalls.
+    let stream = BufWriter::with_capacity(1024 * 256, file_out);
+    let mut pcap_writer = PcapWriter::new(stream).await.expect("Error writing file");
+    loop {
+        // wait till it is ready to read and read
+        let mut guard = async_fd.readable_mut().await.unwrap();
+        let rb = guard.get_inner_mut();
+
+        while let Some(read) = rb.next() {
+            let ptr = read.as_ptr();
+
+            // retrieve packet len first then packet data
+            let size = unsafe { std::ptr::read_unaligned::<u16>(ptr as *const u16) };
+            let data = unsafe { std::slice::from_raw_parts(ptr.byte_add(2), size.into()) };
+
+            let ts = SystemTime::now().duration_since(UNIX_EPOCH)?;
+
+            let packet = PcapPacket::new(ts, size as u32, data);
+            pcap_writer.write_packet(&packet).await?;
+        }
+
+        guard.clear_ready();
+    }
+}
+pub async fn gossip_log_metadata(
+    async_fd: &mut AsyncFd<RingBuf<MapData>>,
+    size_hint: usize,
+) -> anyhow::Result<()> {
     let m = MultiProgress::new();
     let sty = ProgressStyle::with_template(
         "[{elapsed_precise}] {bar:80.cyan/blue} {pos:>7}/{len:7} {msg}",
@@ -473,7 +498,7 @@ pub fn monitor_gossip(
     .progress_chars("##-");
 
     let n = 1000;
-    /*let new_pb = |msg| {
+    let new_pb = |msg| {
         let rate = m.add(ProgressBar::new(n));
         rate.set_style(sty.clone());
         rate.set_message(msg);
@@ -486,93 +511,51 @@ pub fn monitor_gossip(
     let rate_contact_info = new_pb("CRDS: ContactInfo");
     let rate_votes = new_pb("CRDS: Vote");
     let rate_epoch_slots = new_pb("CRDS: EpochSlots");
-    let rate_node_instance = new_pb("CRDS: NodeInstance");*/
+    let rate_node_instance = new_pb("CRDS: NodeInstance");
 
     //Allocate buffer big enough for any valid datagram
-    let mut buf = vec![0; 64 * 1024];
-    let mut stats = Stats::default();
     let mut monitor = GossipMonitor::default();
     let mut last_report = Instant::now();
-    let mut capturing = false;
     while !crate::EXIT.load(std::sync::atomic::Ordering::Relaxed) {
-        let len = socket.recv(&mut buf).context("socket RX")?;
-        let valid_buf = &buf[0..len];
-        let mut admit = false;
-        if outgoing {
-            let mut src_ip = [0u8; 4];
-            src_ip.as_mut().copy_from_slice(&buf[12..12 + 4]);
-            let src_ip: u32 = u32::from_be_bytes(src_ip);
-            let src_ip = Ipv4Addr::from_bits(src_ip);
-            let mut src_port = [0u8; 2];
-            src_port.as_mut().copy_from_slice(&buf[20..20 + 2]);
+        // wait till it is ready to read and read
+        let mut guard = async_fd.readable_mut().await.unwrap();
+        let rb = guard.get_inner_mut();
 
-            let src_port = u16::from_be_bytes(src_port);
-            if src_ip == bind_ip || src_port == port {
-                admit = true;
+        while let Some(read) = rb.next() {
+            let ptr = read.as_ptr();
+
+            // retrieve packet len first then packet data
+            let size = unsafe { std::ptr::read_unaligned::<u16>(ptr as *const u16) };
+            let data = unsafe { std::slice::from_raw_parts(ptr.byte_add(2), size.into()) };
+
+            let Ok(pkt) = parse_gossip(&data[20 + 8..]) else {
+                monitor.invalid.try_retain(&data, size_hint);
+                continue;
+            };
+            if pkt.sanitize().is_err() {
+                monitor.invalid.try_retain(&data, size_hint);
+                continue;
+            }
+            //let ts = SystemTime::now().duration_since(UNIX_EPOCH)?;
+            monitor.try_retain(&pkt, &data, size_hint);
+
+            fn set_pos(pb: &ProgressBar, rate_bps: Option<f32>) {
+                pb.set_position((rate_bps.unwrap_or_default() / 1e6) as u64);
+            }
+            if last_report.elapsed() > Duration::from_millis(500) {
+                last_report = Instant::now();
+                set_pos(&rate_junk, monitor.invalid.rate_bps());
+                set_pos(&rate_gossip, monitor.valid.rate_bps());
+                set_pos(&rate_votes, monitor.crds_vote.rate_bps());
+                set_pos(&rate_prune, monitor.prune.rate_bps());
+                set_pos(&rate_contact_info, monitor.crds_contact_info.rate_bps());
+                set_pos(&rate_epoch_slots, monitor.crds_epoch_slots.rate_bps());
+                set_pos(&rate_node_instance, monitor.crds_node_instance.rate_bps());
+                set_pos(&rate_ping, monitor.pingpong.rate_bps());
             }
         }
-        if incoming {
-            let (dst_ip, dst_port) = fetch_dest(&valid_buf);
-            // skip packets that socket filter let through but we do not want
-            if (dst_ip != bind_ip) || (dst_port != port) {
-                admit = true;
-            }
-        }
-        if !admit {
-            continue;
-        }
-        stats.captured += 1;
-        //let layers = parse_layers!(slice, Ip, (Udp, Raw));
-        let Ok(pkt) = parse_gossip(&valid_buf[20 + 8..]) else {
-            //let entry = monitor.invalid_senders_by_ip.entry(ip).or_default();
-            //*entry += 1;
-            monitor.invalid.try_retain(&valid_buf, size_hint);
-            continue;
-        };
-        if pkt.sanitize().is_err() {
-            //let entry = monitor.invalid_senders_by_ip.entry(ip).or_default();
-            //*entry += 1;
-            monitor.invalid.try_retain(&valid_buf, size_hint);
-            continue;
-        }
-        stats.valid += 1;
-        if monitor.try_retain(&pkt, &valid_buf, size_hint) {
-            stats.retained += 1;
-        }
-        fn set_pos(pb: &ProgressBar, rate_bps: Option<f32>) {
-            pb.set_position((rate_bps.unwrap_or_default() / 1e6) as u64);
-        }
-        if last_report.elapsed() > Duration::from_millis(500) {
-            last_report = Instant::now();
-            /*set_pos(&rate_junk, monitor.invalid.rate_bps());
-            set_pos(&rate_gossip, monitor.valid.rate_bps());
-            set_pos(&rate_votes, monitor.crds_vote.rate_bps());
-            set_pos(&rate_prune, monitor.prune.rate_bps());
-            set_pos(&rate_contact_info, monitor.crds_contact_info.rate_bps());
-            set_pos(&rate_epoch_slots, monitor.crds_epoch_slots.rate_bps());
-            set_pos(&rate_node_instance, monitor.crds_node_instance.rate_bps());
-            set_pos(&rate_ping, monitor.pingpong.rate_bps());*/
-
-            /*let rate = monitor.crds_node_instance.rate_pps().unwrap_or(0.0);
-            if rate > threshold_rate as f32 {
-                if !capturing {
-                    println!("Peak starting!");
-                    capturing = true;
-                }
-                println!("Current gossip nodeinfo rate is {:?}, capturing", rate);
-            } else {
-                println!("Current gossip nodeinfo rate is {:?}", rate);
-                if capturing {
-                    println!("Caught peak, exiting");
-                    break;
-                }
-            }*/
-        }
+        guard.clear_ready();
     }
-    // Ack the command to exit the capture
     crate::EXIT.store(false, std::sync::atomic::Ordering::Relaxed);
-    monitor
-        .dump_to_files(pcap_filename)
-        .context("Saving files failed")?;
-    Ok(stats)
+    Ok(())
 }

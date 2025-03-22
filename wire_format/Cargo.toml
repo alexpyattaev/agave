@@ -19,12 +19,11 @@ pkts = "0.2.1"
 rayon.workspace = true
 rscap = "0.3.1"
 serde = { workspace = true, features = ["derive"] }
-signal-hook.workspace = true
 solana-gossip.workspace = true
 solana-core.workspace = true
 solana-ledger.workspace = true
 solana-logger.workspace = true
-solana-net-utils.workspace = true
+solana-net-utils = { workspace = true, features = ["dev-context-only-utils"] }
 solana-perf.workspace = true
 solana-pubkey.workspace = true
 solana-sanitize.workspace = true
@@ -32,5 +31,15 @@ solana-streamer.workspace = true
 indicatif.workspace = true
 strum = { workspace = true, features = ["derive"] }
 
+aya = "0.13"
+aya-log = "0.2"
+wf-common = { path = "wf_common", features = ["user"] }
+libc = "0.2"
+tokio = { workspace=true, features = ["macros", "rt", "rt-multi-thread", "net", "signal", "fs", "sync"] }
+pcap-file-tokio = "0.1.0"
+network-interface = "2.0.0"
+rustyline = "15.0.0"
+derive_more.workspace = true
+#iocraft = "0.7.1"
 [lints]
 workspace = true

@@ -155,6 +155,8 @@ members = [
     "watchtower",
     "wen-restart",
     "wire_format",
+    "wire_format/xtask",
+    "wire_format/wf_common",
     "xdp",
     "zk-keygen",
     "zk-sdk",

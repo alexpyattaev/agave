@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use std::{
     ffi::CStr,
     net::{Ipv4Addr, SocketAddrV4},
@@ -37,17 +38,17 @@ impl RepairInventory {
             RepairProtocol::LegacyAncestorHashes => todo!(),
             RepairProtocol::Pong(_pong) => self.pong.try_retain(bytes, size),
             RepairProtocol::WindowIndex {
-                header,
-                slot,
-                shred_index,
+                header: _,
+                slot: _,
+                shred_index: _,
             } => self.window_index.try_retain(bytes, size),
             RepairProtocol::HighestWindowIndex {
-                header,
-                slot,
-                shred_index,
+                header: _,
+                slot: _,
+                shred_index: _,
             } => self.highest_window_index.try_retain(bytes, size),
-            RepairProtocol::Orphan { header, slot } => self.orphan.try_retain(bytes, size),
-            RepairProtocol::AncestorHashes { header, slot } => {
+            RepairProtocol::Orphan { header: _, slot: _ } => self.orphan.try_retain(bytes, size),
+            RepairProtocol::AncestorHashes { header: _, slot: _ } => {
                 self.ancestor.try_retain(bytes, size)
             }
         }
@@ -165,7 +166,6 @@ pub fn validate_repair(filename: PathBuf) -> anyhow::Result<Stats> {
     let mut stats = Stats::default();
     let file_in = File::open(&filename).with_context(|| format!("opening file {filename:?}"))?;
     let mut reader = PcapNgReader::new(file_in).context("pcap reader creation")?;
-    let mut counter = Counter::default();
     loop {
         let Some(block) = reader.next_block() else {
             break;
@@ -195,7 +195,7 @@ pub fn validate_repair(filename: PathBuf) -> anyhow::Result<Stats> {
 
         stats.captured += 1;
         match parse_repair(pkt_payload) {
-            Ok(pkt) => {
+            Ok(_) => {
                 stats.valid += 1;
                 stats.retained += 1;
             }
@@ -209,7 +209,6 @@ pub fn validate_repair(filename: PathBuf) -> anyhow::Result<Stats> {
             }
         }
     }
-    dbg!(counter);
     Ok(stats)
 }
 
@@ -251,19 +250,19 @@ pub fn monitor_repair(bind_ip: Ipv4Addr, port: u16) -> anyhow::Result<Stats> {
             RepairProtocol::LegacyHighestWindowIndexWithNonce => counter.legacy += 1,
             RepairProtocol::LegacyOrphanWithNonce => counter.legacy += 1,
             RepairProtocol::LegacyAncestorHashes => counter.legacy += 1,
-            RepairProtocol::Pong(pong) => counter.pong += 1,
+            RepairProtocol::Pong(_) => counter.pong += 1,
             RepairProtocol::WindowIndex {
-                header,
-                slot,
-                shred_index,
+                header: _,
+                slot: _,
+                shred_index: _,
             } => counter.window_index += 1,
             RepairProtocol::HighestWindowIndex {
-                header,
-                slot,
-                shred_index,
+                header: _,
+                slot: _,
+                shred_index: _,
             } => counter.highest_window_index += 1,
-            RepairProtocol::Orphan { header, slot } => counter.orphan += 1,
-            RepairProtocol::AncestorHashes { header, slot } => counter.ancestor += 1,
+            RepairProtocol::Orphan { header: _, slot: _ } => counter.orphan += 1,
+            RepairProtocol::AncestorHashes { header: _, slot: _ } => counter.ancestor += 1,
         }
         stats.valid += 1;
         if last_report.elapsed() > Duration::from_millis(1000) {
