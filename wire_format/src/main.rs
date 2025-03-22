@@ -3,29 +3,22 @@ use {
     crate::gossip::*,
     anyhow::Context,
     clap::{Parser, Subcommand, ValueEnum},
-    cluster_probes::find_turbine_port,
+    cluster_probes::find_validator_ports,
     log::{error, info},
-    repair::monitor_repair,
-    signal_hook::{consts::SIGINT, iterator::Signals},
-    std::{
-        error::Error,
-        ffi::CString,
-        net::{IpAddr, Ipv4Addr, SocketAddr},
-        path::PathBuf,
-        sync::atomic::AtomicBool,
-        thread,
-        time::Duration,
-    },
-    turbine::{capture_turbine, monitor_turbine, validate_turbine},
+    monitor::start_monitor,
+    network_interface::{NetworkInterface, NetworkInterfaceConfig},
+    std::{net::SocketAddr, path::PathBuf, sync::atomic::AtomicBool, time::Duration},
+    turbine::validate_turbine,
 };
 
 mod cluster_probes;
 mod gossip;
+mod monitor;
 mod repair;
 mod storage;
 mod turbine;
 
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
 enum WireProtocol {
     Gossip,
     Turbine,
@@ -37,152 +30,94 @@ enum WireProtocol {
 struct Cli {
     #[arg(short, long)]
     verbose: bool,
-    #[arg(value_enum)]
-    protocol: WireProtocol,
     #[command(subcommand)]
     command: Commands,
-    #[arg(short, long)]
-    incoming: bool,
-    #[arg(short, long)]
-    outgoing: bool,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
+enum Direction {
+    /// Capture incoming traffic with eBPF
+    Inbound,
+    /// Capture outbound traffic with TC eBPF
+    Outbound,
+    /// Capture in both directions
+    Both,
 }
 
 #[derive(Subcommand)]
 enum Commands {
     Monitor {
         #[arg(short, long)]
-        ip_addr: Ipv4Addr,
-        #[arg(short, long, default_value_t = 8001)]
-        gossip_port: u16,
-        /// Directory with pcap files to write. Existing ontents will be destroyed!
-        #[arg(short, long, default_value = "monitor_captures")]
+        /// Gossip socket of the local validator (to fetch metadata and for interface bind)
+        gossip_addr: SocketAddr,
+        #[arg(short, long, value_enum, default_value_t=Direction::Inbound)]
+        ///Defines which direction to capture.
+        direction: Direction,
+        #[arg(short, long, default_value = "monitor_data")]
+        /// Directory for files to write. Existing contents may be destroyed!
         output: PathBuf,
-        /// Rough number of pacekts to capture (exact number will depend on the protocol)
-        #[arg(short, long, default_value_t = 10000)]
-        size_hint: usize,
-        #[arg(short, long, default_value_t = 10000)]
-        threshold_rate: usize,
-    },
-    Capture {
-        #[arg(short, long, default_value = "bond0")]
-        interface: String,
-        #[arg(short, long)]
-        ip_addr: Ipv4Addr,
-        #[arg(short, long, default_value_t = 8001)]
-        gossip_port: u16,
-        #[arg(short, long)]
-        /// Directory with pcap files to write. Existing ontents will be destroyed!
-        output: PathBuf,
-        #[arg(short, long, default_value_t = 512)]
-        /// Rough number of pacekts to capture (exact number will depend on the protocol)
-        size_hint: usize,
     },
     Parse {
+        #[arg(value_enum)]
+        protocol: WireProtocol,
         #[arg()]
         input: PathBuf,
     },
 }
 
 pub static EXIT: AtomicBool = AtomicBool::new(false);
+async fn sig_handler() {
+    tokio::signal::ctrl_c()
+        .await
+        .expect("failed to listen for event");
+    println!("Received termination siganl");
+    EXIT.store(true, std::sync::atomic::Ordering::Relaxed);
+    // Wait for workers to ack that they are exiting
+    tokio::time::sleep(Duration::from_secs(5)).await;
 
-fn main() -> Result<(), Box<dyn Error>> {
-    solana_logger::setup_with("info,solana_metrics=error");
-    let mut signals = Signals::new([SIGINT])?;
+    if crate::EXIT.load(std::sync::atomic::Ordering::Relaxed) {
+        println!("Timed out waiting for capture to stop, aborting!");
+        std::process::exit(1);
+    }
+}
 
-    thread::spawn(move || {
-        if let Some(sig) = signals.forever().next() {
-            println!("Received signal {:?}", sig);
-            EXIT.store(true, std::sync::atomic::Ordering::Relaxed);
-            // Wait for workers to ack that they are exiting
-            thread::sleep(Duration::from_secs(1));
-
-            if crate::EXIT.load(std::sync::atomic::Ordering::Relaxed) {
-                println!("Timed out waiting for capture to stop, aborting!");
-                std::process::exit(1);
-            }
-        }
-    });
+#[tokio::main]
+async fn main() -> Result<(), anyhow::Error> {
+    solana_logger::setup_with_default_filter();
+    tokio::spawn(sig_handler());
     let cli = Cli::parse();
-
     match cli.command {
         Commands::Monitor {
-            ip_addr,
-            gossip_port,
+            gossip_addr,
+            direction,
             output,
-            size_hint,
-            threshold_rate,
         } => {
-            let _ = std::fs::create_dir(&output);
-            let t = std::time::Instant::now();
-            let stats = match cli.protocol {
-                WireProtocol::Gossip => {
-                    dbg!(gossip_port);
-                    monitor_gossip(
-                        ip_addr,
-                        gossip_port,
-                        output,
-                        size_hint,
-                        threshold_rate,
-                        cli.incoming,
-                        cli.outgoing,
-                    )
-                    .context("Monitor failed")?
-                }
-                WireProtocol::Turbine => {
-                    let gossip_entrypoint = SocketAddr::new(IpAddr::V4(ip_addr), gossip_port);
-                    let port = find_turbine_port(gossip_entrypoint).context("Turbine IP")?;
-                    println!("Got port {port}");
-                    monitor_turbine(ip_addr, port, output).context("Monitor failed")?
-                }
-                WireProtocol::Repair => monitor_repair(ip_addr, 8008).context("Monitor failed")?,
+            let bind_interface = {
+                let network_interfaces = NetworkInterface::show()?;
+                network_interfaces
+                    .iter()
+                    .find(|itf| itf.addr.iter().any(|addr| addr.ip() == gossip_addr.ip()))
+                    .ok_or(anyhow::anyhow!("No interface found with specified IP!"))?
+                    .clone()
             };
+            info!("Binding to interface {}", &bind_interface.name);
 
-            let time = t.elapsed();
-            println!(
-                "Captured {} packets ({} valid) over {:?}, {} pps",
-                stats.captured,
-                stats.valid,
-                time,
-                (stats.valid as f64 / time.as_secs_f64()) as u64
-            );
-        }
-        Commands::Capture {
-            interface,
-            ip_addr,
-            gossip_port: port,
-            output,
-            size_hint,
-        } => {
-            let interface = CString::new(interface).unwrap();
-            let t = std::time::Instant::now();
+            if direction == Direction::Outbound {
+                todo!("Outbound capture is not supported yet");
+            }
             let _ = std::fs::create_dir(&output);
-            let stats = match cli.protocol {
-                WireProtocol::Gossip => {
-                    capture_gossip(&interface, ip_addr, port, output, size_hint)
-                        .context("Capture failed")?
-                }
-                WireProtocol::Turbine => {
-                    let gossip_entrypoint = SocketAddr::new(IpAddr::V4(ip_addr), port);
-                    let port = find_turbine_port(gossip_entrypoint)?;
-                    println!("Got port {port}");
-                    capture_turbine(&interface, ip_addr, port, output, size_hint)
-                        .context("capture failed")?
-                }
-                _ => {
-                    todo!()
-                }
-            };
-
-            let time = t.elapsed();
-            println!(
-                "Captured {} packets ({} valid) over {:?}, {} pps",
-                stats.captured,
-                stats.valid,
-                time,
-                (stats.valid as f64 / time.as_secs_f64()) as u64
-            );
+            let ports = find_validator_ports(gossip_addr).context("Lookup validator ports")?;
+            /*let ports = Ports {
+                gossip: gossip_addr,
+                repair: "1.1.1.1:1111".parse().unwrap(),
+                tpu: None,
+                tpu_quic: None,
+                tpu_vote: None,
+                turbine: "1.1.1.1:2222".parse().unwrap(),
+            };*/
+            start_monitor(bind_interface, ports).await?;
         }
-        Commands::Parse { input } => match cli.protocol {
+        Commands::Parse { input, protocol } => match protocol {
             WireProtocol::Gossip => {
                 let stats = validate_gossip(input)?;
                 if stats.captured == stats.retained {
@@ -209,12 +144,6 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
         },
     }
-    //let s = serde_json::to_string_pretty(&p).unwrap();
-    //println!("hi {s}");
-    //let e = epoch_slots();
-    //println!("epochslots {}", &e);
-    //let d: Protocol = serde_json::from_str(&e).unwrap();
-    //dbg!(d);
     std::process::exit(0);
 }
 

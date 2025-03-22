@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use anyhow::Context;
 use log::info;
 use solana_pubkey::Pubkey;
@@ -12,23 +13,33 @@ use std::{
 
 use solana_gossip::gossip_service::discover;
 
+#[derive(Debug)]
+pub struct Ports {
+    pub gossip: SocketAddr,
+    pub repair: SocketAddr,
+    pub tpu: Option<SocketAddr>,
+    pub tpu_quic: Option<SocketAddr>,
+    pub tpu_vote: Option<SocketAddr>,
+    pub turbine: SocketAddr,
+}
 /// Finds the turbine port on a given gossip endpoint
-pub(crate) fn find_turbine_port(gossip_peer_address: SocketAddr) -> anyhow::Result<u16> {
-    let spy_gossip_addr =
-        get_gossip_address(&gossip_peer_address).context("get new gossip address")?;
+pub(crate) fn find_validator_ports(gossip_address: SocketAddr) -> anyhow::Result<Ports> {
+    let spy_gossip_addr = get_gossip_address(&gossip_address).context("get new gossip address")?;
 
-    let shred_version = get_shred_version(&gossip_peer_address).context("get shred version")?;
+    info!("Allocated {} for gossip spy", &spy_gossip_addr);
+    let shred_version = get_shred_version(&gossip_address).context("get shred version")?;
 
+    info!("Cluster's shred version is {}", &shred_version);
     let discover_timeout = Duration::from_secs(60);
     info!("Looking for TVU address via gossip, this can take a minute");
     let (_all_peers, validators) = discover(
         None,
-        Some(&gossip_peer_address),
+        Some(&gossip_address),
         None,
         discover_timeout,
-        None,                       // find_nodes_by_pubkey
-        Some(&gossip_peer_address), // find_node_by_gossip_addr
-        Some(&spy_gossip_addr),     // my_gossip_addr
+        None,                   // find_nodes_by_pubkey
+        Some(&gossip_address),  // find_node_by_gossip_addr
+        Some(&spy_gossip_addr), // my_gossip_addr
         shred_version,
         SocketAddrSpace::new(true),
     )?;
@@ -37,15 +48,31 @@ pub(crate) fn find_turbine_port(gossip_peer_address: SocketAddr) -> anyhow::Resu
         .find(|ci| {
             ci.gossip()
                 .unwrap_or(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0))
-                == gossip_peer_address
+                == gossip_address
         })
         .ok_or(anyhow::anyhow!("Discover did not find the right validator"))?;
 
     dbg!(&me);
-    let tvu = me
+    let turbine = me
         .tvu(solana_gossip::contact_info::Protocol::UDP)
         .ok_or_else(|| anyhow::anyhow!("No TVU port published"))?;
-    Ok(tvu.port())
+    let repair = me
+        .serve_repair(solana_gossip::contact_info::Protocol::UDP)
+        .ok_or_else(|| anyhow::anyhow!("No REPAIR port published"))?;
+
+    let tpu = me.tpu(solana_gossip::contact_info::Protocol::UDP);
+    let tpu_quic = me.tpu(solana_gossip::contact_info::Protocol::QUIC);
+    let tpu_vote = me.tpu(solana_gossip::contact_info::Protocol::UDP);
+    let ports = Ports {
+        turbine,
+        repair,
+        gossip: gossip_address,
+        tpu,
+        tpu_quic,
+        tpu_vote,
+    };
+    info!("Fetched the port information: {:?}", &ports);
+    Ok(ports)
 }
 
 fn get_gossip_address(entrypoint: &SocketAddr) -> anyhow::Result<SocketAddr> {
