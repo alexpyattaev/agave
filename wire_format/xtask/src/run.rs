@@ -13,9 +13,9 @@ pub struct Options {
     /// Set the endianness of the BPF target
     #[clap(default_value = "bpfel-unknown-none", long)]
     pub bpf_target: Architecture,
-    /// Build and run the release target
+    /// Build and run the debug target
     #[clap(long)]
-    pub release: bool,
+    pub debug: bool,
     /// The command used to wrap your application
     #[clap(short, long, default_value = "sudo -E")]
     pub runner: String,
@@ -29,12 +29,12 @@ pub fn run(opts: Options) -> Result<(), anyhow::Error> {
     // Build our ebpf program and the project
     build(BuildOptions {
         bpf_target: opts.bpf_target,
-        release: opts.release,
+        debug: opts.debug,
     })
     .context("Error while building project")?;
 
     // profile we are building (release or debug)
-    let profile = if opts.release { "release" } else { "debug" };
+    let profile = if opts.debug { "debug" } else { "release" };
     let bin_path = format!("../target/{profile}/wire_format");
 
     // arguments to pass to the application

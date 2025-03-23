@@ -17,6 +17,7 @@ mod monitor;
 mod repair;
 mod storage;
 mod turbine;
+mod ui;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
 enum WireProtocol {
@@ -80,12 +81,39 @@ async fn sig_handler() {
         std::process::exit(1);
     }
 }
+use iocraft::prelude::*;
+#[component]
+fn Menu(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+    let mut progress = hooks.use_state::<f32, _>(|| 0.0);
+    hooks.use_future(async move {
+        loop {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            progress.set((progress.get() + 76.0));
+        }
+    });
+    /*let mut props = ui::BarProps {
+        max_val: 1000,
+        initial_val: 42,
+        label: "Mbps",
+    };*/
 
+    element! {
+        View(border_style: BorderStyle::Round, border_color: Color::Cyan) {
+            Text(content: "The speed is  ")
+            ContextProvider(value: iocraft::Context::owned(ui::BarPosition(progress.get()) )) {
+                        ui::BarIndicator(max_val:1000.0, initial_val:42.0, label:"Mbps")
+                    }
+        }
+    }
+}
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
     solana_logger::setup_with_default_filter();
-    tokio::spawn(sig_handler());
+    //tokio::spawn(sig_handler());
     let cli = Cli::parse();
+    element!(Menu).render_loop().await.unwrap();
+    return Ok(());
+    println!("done!");
     match cli.command {
         Commands::Monitor {
             gossip_addr,
@@ -107,6 +135,7 @@ async fn main() -> Result<(), anyhow::Error> {
             }
             let _ = std::fs::create_dir(&output);
             let ports = find_validator_ports(gossip_addr).context("Lookup validator ports")?;
+            dbg!(&ports);
             /*let ports = Ports {
                 gossip: gossip_addr,
                 repair: "1.1.1.1:1111".parse().unwrap(),

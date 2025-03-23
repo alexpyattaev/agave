@@ -486,6 +486,15 @@ pub async fn gossip_capture(
         guard.clear_ready();
     }
 }
+
+trait MonitorCommand {
+    fn setup<T>(cfg: T) -> Self;
+    async fn process_packet<R>(&mut self) -> anyhow::Result<R>;
+}
+use iocraft::prelude::*;
+
+pub struct GossipLogger {}
+
 pub async fn gossip_log_metadata(
     async_fd: &mut AsyncFd<RingBuf<MapData>>,
     size_hint: usize,
