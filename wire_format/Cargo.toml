@@ -40,6 +40,7 @@ pcap-file-tokio = "0.1.0"
 network-interface = "2.0.0"
 rustyline = "15.0.0"
 derive_more.workspace = true
+iocraft = "0.7.2"
 #iocraft = "0.7.1"
 [lints]
 workspace = true

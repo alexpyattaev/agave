@@ -10,15 +10,15 @@ pub struct Options {
     /// Set the endianness of the BPF target
     #[clap(default_value = "bpfel-unknown-none", long)]
     pub bpf_target: Architecture,
-    /// Build and run the release target
+    /// Build and run the debug target (release is default)
     #[clap(long)]
-    pub release: bool,
+    pub debug: bool,
 }
 
 /// Build the project
 fn build_project(opts: &Options) -> Result<(), anyhow::Error> {
     let mut args = vec!["build"];
-    if opts.release {
+    if !opts.debug {
         args.push("--release")
     }
     let status = Command::new("cargo")
@@ -34,7 +34,7 @@ pub fn build(opts: Options) -> Result<(), anyhow::Error> {
     // build our ebpf program followed by our application
     build_ebpf(BuildOptions {
         target: opts.bpf_target,
-        release: opts.release,
+        debug: opts.debug,
     })
     .context("Error while building eBPF program")?;
     build_project(&opts).context("Error while building userspace application")?;

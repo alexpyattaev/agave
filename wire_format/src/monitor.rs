@@ -1,5 +1,5 @@
 use {
-    crate::{cluster_probes::Ports, gossip::*, WireProtocol},
+    crate::{cluster_probes::Ports, gossip::*, ui, WireProtocol},
     anyhow::Context,
     aya::{
         include_bytes_aligned,
@@ -8,12 +8,11 @@ use {
         Ebpf,
     },
     aya_log::EbpfLogger,
-    clap::{Parser, Subcommand, ValueEnum},
+    clap::{Parser, Subcommand},
     log::{error, info, warn},
     std::{
         net::{IpAddr, Ipv4Addr},
         ops::DerefMut,
-        time::{SystemTime, UNIX_EPOCH},
     },
     tokio::{
         io::unix::AsyncFd,
@@ -160,11 +159,11 @@ impl BpfControls {
         // reach for `Bpf::load_file` instead.
         #[cfg(debug_assertions)]
         let mut bpf = Ebpf::load(include_bytes_aligned!(
-            "../target/bpfel-unknown-none/debug/wf-ebpf"
+            "../wf_ebpf/target/bpfel-unknown-none/debug/wf-ebpf"
         ))?;
         #[cfg(not(debug_assertions))]
         let mut bpf = Ebpf::load(include_bytes_aligned!(
-            "../target/bpfel-unknown-none/release/wf-ebpf"
+            "../wf_ebpf/target/bpfel-unknown-none/release/wf-ebpf"
         ))?;
         if let Err(e) = EbpfLogger::init(&mut bpf) {
             // This can happen if you remove all log statements from your eBPF program.
