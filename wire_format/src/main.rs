@@ -88,21 +88,16 @@ fn Menu(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     hooks.use_future(async move {
         loop {
             tokio::time::sleep(Duration::from_millis(100)).await;
-            progress.set((progress.get() + 76.0));
+            progress.set(progress.get() + 76.0);
         }
     });
-    /*let mut props = ui::BarProps {
-        max_val: 1000,
-        initial_val: 42,
-        label: "Mbps",
-    };*/
 
     element! {
         View(border_style: BorderStyle::Round, border_color: Color::Cyan) {
-            Text(content: "The speed is  ")
-            ContextProvider(value: iocraft::Context::owned(ui::BarPosition(progress.get()) )) {
-                        ui::BarIndicator(max_val:1000.0, initial_val:42.0, label:"Mbps")
-                    }
+            ui::BarIndicator<f32>(label:"Speed", max_val:1000.0, units:"Mbps",
+                val:progress.get()
+            )
+
         }
     }
 }
