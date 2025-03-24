@@ -1,62 +1,76 @@
-use std::sync::Arc;
+use std::time::Duration;
 
 use iocraft::prelude::*;
-use tokio::sync::broadcast::Receiver;
-#[derive(Default, Debug, Props)]
-/*pub struct BarProps<T>
+#[derive(Debug, Props)]
+pub struct BarProps<T>
 where
     T: Into<f32>,
     T: Send + Default + Sync + Clone,
 {
     pub max_val: T,
-    pub initial_val: T,
-    //value_rx: Option<Receiver<T>>,
-    pub label: &'static str,
-}*/
-pub struct BarProps {
-    pub max_val: f32,
-    pub initial_val: f32,
-    //value_rx: Option<Receiver<T>>,
+    pub val: T,
+    pub units: &'static str,
     pub label: &'static str,
 }
-/*pub struct BarPosition<T>(pub T)
+impl<T> Default for BarProps<T>
 where
-    T: Into<f32>,
-    T: Send + Default + Sync + Clone;*/
-pub struct BarPosition(pub f32);
-
-#[component]
-//fn BarIndicator<T>(mut hooks: Hooks, props: &BarProps<T>) -> impl Into<AnyElement<'static>>
-//pub fn BarIndicator<T>(props: &BarProps<T>) -> impl Into<AnyElement<'static>>
-pub fn BarIndicator(mut hooks: Hooks, props: &BarProps) -> impl Into<AnyElement<'static>>
-/*where
+    T: From<u8>,
     T: Into<f32>,
     T: Send + Default + Sync + Clone,
-    T: 'static,*/
 {
-    //let mut progress = hooks.use_state::<f32, _>(|| props.initial_val.clone().into());
-    /*     hooks.use_future(async move {
-        loop {
-            progress.set(rx.recv().await.map(|v| v.into()).unwrap_or(0.0))
+    fn default() -> Self {
+        Self {
+            max_val: T::from(100),
+            val: T::from(0),
+            units: r"%",
+            label: "",
         }
-    });*/
-    //  let pos = hooks.use_context::<BarPosition<T>>();
-    let pos = hooks.use_context::<BarPosition>();
+    }
+}
 
+#[component]
+pub fn BarIndicator<T>(props: &BarProps<T>) -> impl Into<AnyElement<'static>>
+where
+    T: Into<f32>,
+    T: Send + Default + Sync + Clone,
+    T: 'static,
+{
+    let pos: f32 = props.val.clone().into();
     let max: f32 = props.max_val.clone().into();
-    let color = if pos.0.clone() < max {
-        Color::Green
-    } else {
-        Color::Red
-    };
+    let color = if pos < max { Color::Green } else { Color::Red };
     element! {
         View {
+            View(padding: 1) {
+                            Text(content: format!("{}", props.label))
+                        }
             View(border_style: BorderStyle::Round, border_color: Color::Blue, width: 60) {
-                View(width: Percent(pos.0.clone().min(max)/max*100.0), height: 1, background_color: color )
+                View(width: Percent(pos.min(max)/max*100.0), height: 1, background_color: color )
             }
             View(padding: 1) {
-                Text(content: format!("{:.0}{}", pos.0.clone(), props.label))
+                Text(content: format!("{:.0}{}", pos, props.units))
             }
+        }
+    }
+}
+
+#[derive(Debug, Props)]
+pub struct RateDisplayProps {
+    pub rates: Vec<f32>,
+    pub units: &'static str,
+    pub label: &'static str,
+}
+
+#[component]
+fn RateDisplay(mut hooks: Hooks, props: &RateDisplayProps) -> impl Into<AnyElement<'static>> {
+    let rates = props.rates.clone();
+    element! {
+        View(border_style: BorderStyle::Round, border_color: Color::Cyan) {
+            #(rates.iter().map(|r|{
+            ui::BarIndicator<f32>(label:"Speed", max_val:1000.0, units:"Mbps",
+                val:progress.get()
+                }
+            )
+
         }
     }
 }
