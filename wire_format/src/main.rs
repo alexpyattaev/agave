@@ -84,20 +84,21 @@ async fn sig_handler() {
 use iocraft::prelude::*;
 #[component]
 fn Menu(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
-    let mut progress = hooks.use_state::<f32, _>(|| 0.0);
+    let mut speeds =
+        hooks.use_state::<Vec<(String, f32)>, _>(|| vec![("Speed".to_owned(), 0.0); 2]);
     hooks.use_future(async move {
         loop {
             tokio::time::sleep(Duration::from_millis(100)).await;
-            progress.set(progress.get() + 76.0);
+            let mut speeds = speeds.write();
+            for s in speeds.iter_mut() {
+                s.1 += 1.0;
+            }
         }
     });
 
     element! {
-        View(border_style: BorderStyle::Round, border_color: Color::Cyan) {
-            ui::BarIndicator<f32>(label:"Speed", max_val:1000.0, units:"Mbps",
-                val:progress.get()
-            )
-
+        View(border_style: BorderStyle::Round, border_color: Color::Cyan ) {
+            ui::RateDisplay(rates:speeds.read().clone(), )
         }
     }
 }

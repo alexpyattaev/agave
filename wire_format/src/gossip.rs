@@ -495,6 +495,26 @@ use iocraft::prelude::*;
 
 pub struct GossipLogger {}
 
+#[component]
+fn Menu(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+    let mut speeds =
+        hooks.use_state::<Vec<(String, f32)>, _>(|| vec![("Speed".to_owned(), 0.0); 2]);
+    hooks.use_future(async move {
+        loop {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let mut speeds = speeds.write();
+            for s in speeds.iter_mut() {
+                s.1 += 1.0;
+            }
+        }
+    });
+
+    element! {
+        View(border_style: BorderStyle::Round, border_color: Color::Cyan ) {
+            ui::RateDisplay(rates:speeds.read().clone(), )
+        }
+    }
+}
 pub async fn gossip_log_metadata(
     async_fd: &mut AsyncFd<RingBuf<MapData>>,
     size_hint: usize,
