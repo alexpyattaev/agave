@@ -10,7 +10,7 @@ where
     pub max_val: T,
     pub val: T,
     pub units: &'static str,
-    pub label: &'static str,
+    pub label: String,
 }
 impl<T> Default for BarProps<T>
 where
@@ -23,7 +23,7 @@ where
             max_val: T::from(100),
             val: T::from(0),
             units: r"%",
-            label: "",
+            label: "".to_owned(),
         }
     }
 }
@@ -53,23 +53,27 @@ where
     }
 }
 
-#[derive(Debug, Props)]
+#[derive(Debug, Default, Props)]
 pub struct RateDisplayProps {
-    pub rates: Vec<f32>,
+    pub rates: Vec<(String, f32)>,
     pub units: &'static str,
-    pub label: &'static str,
 }
 
 #[component]
-fn RateDisplay(mut hooks: Hooks, props: &RateDisplayProps) -> impl Into<AnyElement<'static>> {
+pub fn RateDisplay(props: &RateDisplayProps) -> impl Into<AnyElement<'static>> {
     let rates = props.rates.clone();
     element! {
-        View(border_style: BorderStyle::Round, border_color: Color::Cyan) {
-            #(rates.iter().map(|r|{
-            ui::BarIndicator<f32>(label:"Speed", max_val:1000.0, units:"Mbps",
-                val:progress.get()
-                }
-            )
+        View(border_style: BorderStyle::Round, border_color: Color::Cyan,
+                        flex_direction: FlexDirection::Column
+        )
+        {
+            #(rates.into_iter().enumerate().map(|(id,(n,r))|element!{
+            BarIndicator<f32>(
+                key: id,
+                label:n, max_val:1000.0, units:props.units,
+                                val:r
+                            )
+            }))
 
         }
     }
