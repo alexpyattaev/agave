@@ -271,3 +271,28 @@ async fn executor(
     crate::EXIT.store(true, std::sync::atomic::Ordering::Relaxed);
     Ok(())
 }
+
+pub async fn process_packet_flow(
+    async_fd: &mut AsyncFd<RingBuf<MapData>>,
+    mut handle_pkt: impl FnMut(&[u8]),
+) -> anyhow::Result<()> {
+    //Allocate buffer big enough for any valid datagram
+    while !crate::EXIT.load(std::sync::atomic::Ordering::Relaxed) {
+        // wait till it is ready to read and read
+        let mut guard = async_fd.readable_mut().await.unwrap();
+        let rb = guard.get_inner_mut();
+
+        while let Some(read) = rb.next() {
+            let ptr = read.as_ptr();
+
+            // retrieve packet len first then packet data
+            let size = unsafe { std::ptr::read_unaligned::<u16>(ptr as *const u16) };
+            let data = unsafe { std::slice::from_raw_parts(ptr.byte_add(2), size.into()) };
+
+            handle_pkt(data);
+        }
+        guard.clear_ready();
+    }
+    crate::EXIT.store(false, std::sync::atomic::Ordering::Relaxed);
+    Ok(())
+}

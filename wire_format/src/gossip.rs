@@ -491,30 +491,35 @@ trait MonitorCommand {
     fn setup<T>(cfg: T) -> Self;
     async fn process_packet<R>(&mut self) -> anyhow::Result<R>;
 }
+use crate::ui;
 use iocraft::prelude::*;
 
 pub struct GossipLogger {}
 
+struct GossipMonitorChannel(crossbeam_channel::Receiver<Vec<f32>>);
 #[component]
-fn Menu(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
-    let mut speeds =
-        hooks.use_state::<Vec<(String, f32)>, _>(|| vec![("Speed".to_owned(), 0.0); 2]);
+fn GossipMonitorMenu(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+    let bar_names = ["all", "things", "gossip"].map(|e| (String::from(e), 0.0));
+    let mut rates = hooks.use_state::<Vec<(String, f32)>, _>(|| bar_names.to_vec());
+    let chan = hooks.use_context::<GossipMonitorChannel>().0.clone();
     hooks.use_future(async move {
         loop {
             tokio::time::sleep(Duration::from_millis(100)).await;
-            let mut speeds = speeds.write();
-            for s in speeds.iter_mut() {
-                s.1 += 1.0;
+            let Ok(pkt) = chan.try_recv() else {
+                continue;
+            };
+            let mut rates_guard = rates.write();
+            for (d, s) in rates_guard.iter_mut().zip(pkt) {
+                d.1 = s;
             }
         }
     });
 
     element! {
-        View(border_style: BorderStyle::Round, border_color: Color::Cyan ) {
-            ui::RateDisplay(rates:speeds.read().clone(), )
-        }
+        ui::RateDisplay(rates:rates.read().clone(), units:"Mbps")
     }
 }
+
 pub async fn gossip_log_metadata(
     async_fd: &mut AsyncFd<RingBuf<MapData>>,
     size_hint: usize,

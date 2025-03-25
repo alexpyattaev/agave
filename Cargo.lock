@@ -14234,6 +14234,7 @@ dependencies = [
  "aya-log",
  "bincode",
  "clap 4.5.28",
+ "crossbeam-channel",
  "derive_more 1.0.0",
  "hxdmp",
  "indicatif",
