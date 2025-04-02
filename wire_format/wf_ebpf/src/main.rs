@@ -98,18 +98,18 @@ fn try_xdpdump(ctx: &XdpContext) -> Result<u32, ()> {
     let src_port = unsafe { u16::from_be((*udphdr).source) };
     let dst_port = unsafe { u16::from_be((*udphdr).dest) };
 
+    if !should_capture(src_ip, dst_ip, src_port, dst_port) {
+        return Ok(xdp_action::XDP_PASS);
+    }
+
     debug!(
         ctx,
-        "Got UDP packet {}:{}->{}:{}",
+        "captured UDP packet {}:{}->{}:{}",
         src_ip.to_bits(),
         src_port,
         dst_ip.to_bits(),
         dst_port
     );
-    if !should_capture(src_ip, dst_ip, src_port, dst_port) {
-        return Ok(xdp_action::XDP_PASS);
-    }
-
     const U16_SIZE: usize = mem::size_of::<u16>();
     const SIZE: usize = U16_SIZE + 1500;
 

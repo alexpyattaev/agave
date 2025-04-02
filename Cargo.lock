@@ -13512,6 +13512,7 @@ dependencies = [
  "rscap",
  "rustyline",
  "serde",
+ "serde_json",
  "solana-core",
  "solana-gossip",
  "solana-ledger",
@@ -13523,6 +13524,7 @@ dependencies = [
  "solana-streamer",
  "strum",
  "tokio",
+ "tokio-util 0.7.13",
  "wf-common",
 ]
 

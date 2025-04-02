@@ -13,7 +13,6 @@ use {
         PcapNgWriter,
     },
     pcap_file_tokio::pcap::{PcapPacket, PcapWriter},
-    serde::Serialize,
     solana_gossip::{crds_data::CrdsData, crds_value::CrdsValue, protocol::Protocol},
     solana_pubkey::Pubkey,
     solana_sanitize::Sanitize,
@@ -21,22 +20,19 @@ use {
         collections::HashMap,
         ffi::CStr,
         net::{Ipv4Addr, SocketAddr, SocketAddrV4},
-        path::PathBuf,
+        path::{Path, PathBuf},
         time::{Duration, Instant, SystemTime, UNIX_EPOCH},
     },
     strum::EnumCount,
     tokio::io::{unix::AsyncFd, BufWriter},
+    tokio_util::sync::CancellationToken,
 };
+pub mod log_invalid_senders;
+pub use log_invalid_senders::*;
+pub mod serialize;
+pub use serialize::*;
 
-fn parse_gossip(bytes: &[u8]) -> bincode::Result<Protocol> {
-    solana_perf::packet::deserialize_from_with_limit(bytes)
-}
-
-fn _serialize<T: Serialize>(pkt: T) -> Vec<u8> {
-    bincode::serialize(&pkt).unwrap()
-}
-
-type CrdsCounts = [usize; CrdsData::COUNT];
+pub type CrdsCounts = [usize; CrdsData::COUNT];
 
 #[derive(Default)]
 pub struct CrdsCaptures {
@@ -494,9 +490,8 @@ trait MonitorCommand {
 use crate::ui;
 use iocraft::prelude::*;
 
-pub struct GossipLogger {}
-
 struct GossipMonitorChannel(crossbeam_channel::Receiver<Vec<f32>>);
+
 #[component]
 fn GossipMonitorMenu(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let bar_names = ["all", "things", "gossip"].map(|e| (String::from(e), 0.0));

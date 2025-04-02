@@ -11,13 +11,17 @@ use {
     clap::{Parser, Subcommand},
     log::{error, info, warn},
     std::{
+        i64::MIN,
         net::{IpAddr, Ipv4Addr},
         ops::DerefMut,
+        path::PathBuf,
+        time::Duration,
     },
     tokio::{
         io::unix::AsyncFd,
         sync::mpsc::{channel, Receiver, Sender},
     },
+    tokio_util::sync::CancellationToken,
     wf_common::FILTER_LEN,
 };
 #[derive(Parser, Debug)]
@@ -35,6 +39,11 @@ enum Command {
         #[arg(short, long, default_value_t = 1024)]
         /// Rough number of pacekts to capture (exact number will depend on the protocol)
         size_hint: usize,
+    },
+    LogGossipInvalidSenders {
+        #[arg(short, long, default_value_t = 150)]
+        /// min number of seconds to monitor for
+        min_time: u64,
     },
     Bitrate,
     Exit,
@@ -203,6 +212,7 @@ fn v4(a: IpAddr) -> Ipv4Addr {
 pub async fn start_monitor(
     interface: network_interface::NetworkInterface,
     ports: Ports,
+    output: PathBuf,
 ) -> anyhow::Result<()> {
     info!(
         "Monitor set up on interface {}. Type 'help' for info.",
@@ -216,7 +226,7 @@ pub async fn start_monitor(
 
     let mut scope = tokio::task::JoinSet::new();
     scope.spawn_blocking(|| read_cli(cli_input_tx));
-    scope.spawn(executor(cli_input_rx, bpf_controls, ports));
+    scope.spawn(executor(cli_input_rx, bpf_controls, ports, output));
     while let Some(res) = scope.join_next().await {
         res??;
     }
@@ -227,6 +237,7 @@ async fn executor(
     mut cmd_rx: Receiver<Command>,
     mut bpf_controls: BpfControls,
     ports: Ports,
+    output: PathBuf,
 ) -> anyhow::Result<()> {
     while !crate::EXIT.load(std::sync::atomic::Ordering::Relaxed) {
         let Some(cmd) = cmd_rx.recv().await else {
@@ -235,6 +246,27 @@ async fn executor(
 
         dbg!(&cmd);
         match cmd {
+            Command::LogGossipInvalidSenders { min_time } => {
+                bpf_controls.allow_dst_ip(v4(ports.gossip.ip()))?;
+                bpf_controls.allow_dst_port(ports.gossip.port())?;
+                let cancel = CancellationToken::new();
+
+                let cap_thread = gossip_log_invalid_senders(
+                    &mut bpf_controls.rx_ring,
+                    &output,
+                    cancel.clone(),
+                    Duration::from_secs(min_time),
+                    ports.shred_version,
+                );
+
+                tokio::select! {
+                    result = cap_thread =>{println!("{result:?}");},
+                    _= cmd_rx.recv()=>{}
+                }
+                cancel.cancel();
+                println!("Gossip monitoring done");
+                bpf_controls.reset_dst()?;
+            }
             Command::LogMetadata {
                 size_hint,
                 protocol,
@@ -243,8 +275,9 @@ async fn executor(
                     bpf_controls.allow_dst_ip(v4(ports.gossip.ip()))?;
                     bpf_controls.allow_dst_port(ports.gossip.port())?;
 
+                    let cap_thread = gossip_log_metadata(&mut bpf_controls.rx_ring, size_hint);
                     tokio::select! {
-                        _ = gossip_log_metadata(&mut bpf_controls.rx_ring, size_hint)=>{},
+                        _ = cap_thread =>{},
                         _= cmd_rx.recv()=>{}
                     }
                     println!("Gossip monitoring done");
