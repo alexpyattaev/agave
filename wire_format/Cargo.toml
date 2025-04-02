@@ -25,7 +25,7 @@ solana-ledger.workspace = true
 solana-logger.workspace = true
 solana-net-utils = { workspace = true, features = ["dev-context-only-utils"] }
 solana-perf.workspace = true
-solana-pubkey.workspace = true
+solana-pubkey = { workspace = true, features = ["serde"] }
 solana-sanitize.workspace = true
 solana-streamer.workspace = true
 indicatif.workspace = true
@@ -42,6 +42,8 @@ rustyline = "15.0.0"
 derive_more.workspace = true
 iocraft = "0.7.2"
 crossbeam-channel.workspace = true
+serde_json.workspace = true
+tokio-util.workspace = true
 #iocraft = "0.7.1"
 [lints]
 workspace = true

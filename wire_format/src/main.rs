@@ -57,6 +57,10 @@ enum Commands {
         #[arg(short, long, default_value = "monitor_data")]
         /// Directory for files to write. Existing contents may be destroyed!
         output: PathBuf,
+
+        #[arg(short, long, default_value = "60")]
+        /// Timeout for discovery of turbine and repair ports. set to 0 to ony work with gossip
+        discovery_timeout_sec: u64,
     },
     Parse {
         #[arg(value_enum)]
@@ -105,16 +109,17 @@ fn Menu(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
     solana_logger::setup_with_default_filter();
-    //tokio::spawn(sig_handler());
+    tokio::spawn(sig_handler());
     let cli = Cli::parse();
-    element!(Menu).render_loop().await.unwrap();
-    return Ok(());
-    println!("done!");
+    // element!(Menu).render_loop().await.unwrap();
+    // return Ok(());
+    // println!("done!");
     match cli.command {
         Commands::Monitor {
             gossip_addr,
             direction,
             output,
+            discovery_timeout_sec,
         } => {
             let bind_interface = {
                 let network_interfaces = NetworkInterface::show()?;
@@ -130,7 +135,10 @@ async fn main() -> Result<(), anyhow::Error> {
                 todo!("Outbound capture is not supported yet");
             }
             let _ = std::fs::create_dir(&output);
-            let ports = find_validator_ports(gossip_addr).context("Lookup validator ports")?;
+            let ports =
+                find_validator_ports(gossip_addr, Duration::from_secs(discovery_timeout_sec))
+                    .await
+                    .context("Lookup validator ports")?;
             dbg!(&ports);
             /*let ports = Ports {
                 gossip: gossip_addr,
@@ -140,7 +148,7 @@ async fn main() -> Result<(), anyhow::Error> {
                 tpu_vote: None,
                 turbine: "1.1.1.1:2222".parse().unwrap(),
             };*/
-            start_monitor(bind_interface, ports).await?;
+            start_monitor(bind_interface, ports, output).await?;
         }
         Commands::Parse { input, protocol } => match protocol {
             WireProtocol::Gossip => {

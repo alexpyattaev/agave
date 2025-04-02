@@ -15,31 +15,46 @@ use solana_gossip::gossip_service::discover;
 
 #[derive(Debug)]
 pub struct Ports {
+    pub shred_version: u16,
     pub gossip: SocketAddr,
-    pub repair: SocketAddr,
+    pub repair: Option<SocketAddr>,
     pub tpu: Option<SocketAddr>,
     pub tpu_quic: Option<SocketAddr>,
     pub tpu_vote: Option<SocketAddr>,
-    pub turbine: SocketAddr,
+    pub turbine: Option<SocketAddr>,
 }
 /// Finds the turbine port on a given gossip endpoint
-pub(crate) fn find_validator_ports(gossip_address: SocketAddr) -> anyhow::Result<Ports> {
-    let spy_gossip_addr = get_gossip_address(&gossip_address).context("get new gossip address")?;
+pub async fn find_validator_ports(
+    gossip_address: SocketAddr,
+    timeout: Duration,
+) -> anyhow::Result<Ports> {
+    let info = solana_net_utils::get_echo_server_info(&gossip_address).await?;
 
-    info!("Allocated {} for gossip spy", &spy_gossip_addr);
-    let shred_version = get_shred_version(&gossip_address).context("get shred version")?;
-
+    let shred_version = info
+        .shred_version
+        .context("Shred version not provided by entrypoint!")?;
+    if timeout.is_zero() {
+        let ports = Ports {
+            shred_version,
+            turbine: None,
+            repair: None,
+            gossip: gossip_address,
+            tpu: None,
+            tpu_quic: None,
+            tpu_vote: None,
+        };
+        return Ok(ports);
+    }
     info!("Cluster's shred version is {}", &shred_version);
-    let discover_timeout = Duration::from_secs(60);
     info!("Looking for TVU address via gossip, this can take a minute");
     let (_all_peers, validators) = discover(
         None,
         Some(&gossip_address),
         None,
-        discover_timeout,
-        None,                   // find_nodes_by_pubkey
-        Some(&gossip_address),  // find_node_by_gossip_addr
-        Some(&spy_gossip_addr), // my_gossip_addr
+        timeout,
+        None,                  // find_nodes_by_pubkey
+        Some(&gossip_address), // find_node_by_gossip_addr
+        None,                  // my_gossip_addr
         shred_version,
         SocketAddrSpace::new(true),
     )?;
@@ -53,17 +68,13 @@ pub(crate) fn find_validator_ports(gossip_address: SocketAddr) -> anyhow::Result
         .ok_or(anyhow::anyhow!("Discover did not find the right validator"))?;
 
     dbg!(&me);
-    let turbine = me
-        .tvu(solana_gossip::contact_info::Protocol::UDP)
-        .ok_or_else(|| anyhow::anyhow!("No TVU port published"))?;
-    let repair = me
-        .serve_repair(solana_gossip::contact_info::Protocol::UDP)
-        .ok_or_else(|| anyhow::anyhow!("No REPAIR port published"))?;
-
+    let turbine = me.tvu(solana_gossip::contact_info::Protocol::UDP);
+    let repair = me.serve_repair(solana_gossip::contact_info::Protocol::UDP);
     let tpu = me.tpu(solana_gossip::contact_info::Protocol::UDP);
     let tpu_quic = me.tpu(solana_gossip::contact_info::Protocol::QUIC);
     let tpu_vote = me.tpu(solana_gossip::contact_info::Protocol::UDP);
     let ports = Ports {
+        shred_version,
         turbine,
         repair,
         gossip: gossip_address,
@@ -75,32 +86,11 @@ pub(crate) fn find_validator_ports(gossip_address: SocketAddr) -> anyhow::Result
     Ok(ports)
 }
 
-fn get_gossip_address(entrypoint: &SocketAddr) -> anyhow::Result<SocketAddr> {
-    info!("Allocating gossip address");
-    let ip = solana_net_utils::get_public_ip_addr(entrypoint)
-        .map_err(|e| anyhow::anyhow!(e))
-        .context("contact cluster entrypoint")?;
-
+fn get_gossip_address(ip: IpAddr) -> anyhow::Result<SocketAddr> {
     let port =
         solana_net_utils::find_available_port_in_range(IpAddr::V4(Ipv4Addr::UNSPECIFIED), (0, 1))
             .context("unable to find an available gossip port")?;
     Ok(SocketAddr::new(ip, port))
-}
-
-fn get_shred_version(entrypoint: &SocketAddr) -> anyhow::Result<u16> {
-    info!("Getting shred version");
-    match solana_net_utils::get_cluster_shred_version(entrypoint) {
-        Err(err) => {
-            anyhow::bail!("get_cluster_shred_version failed: {entrypoint}, {err}");
-        }
-        Ok(0) => {
-            anyhow::bail!("entrypoint {entrypoint} returned shred-version zero");
-        }
-        Ok(shred_version) => {
-            info!("obtained shred-version {shred_version} from entrypoint: {entrypoint}");
-            Ok(shred_version)
-        }
-    }
 }
 
 pub(crate) fn _get_leader_schedule() -> anyhow::Result<HashMap<u64, Pubkey>> {
