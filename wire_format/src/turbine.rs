@@ -1,23 +1,30 @@
 #![allow(dead_code)]
 use std::{
     ffi::CStr,
-    io::{BufWriter, Write},
+    io::Write,
     net::{Ipv4Addr, SocketAddrV4},
+    ops::ControlFlow,
     path::PathBuf,
     time::{Duration, Instant},
 };
 
 use crate::{
+    monitor::PacketLogger,
     storage::{fetch_dest, hexdump, DumbStorage, Monitor, WritePackets},
     Stats,
 };
 use anyhow::Context;
 use log::{debug, error, info};
 use pcap_file::pcapng::PcapNgReader;
-use pcap_file::pcapng::{blocks::interface_description::InterfaceDescriptionBlock, PcapNgWriter};
+use pcap_file::pcapng::PcapNgWriter;
 use solana_ledger::shred::Shred;
 use solana_ledger::shred::ShredVariant;
-use std::fs::File;
+use tokio::{
+    fs::File,
+    io::{AsyncWriteExt, BufWriter},
+    sync::mpsc::Receiver,
+    sync::mpsc::Sender,
+};
 
 #[derive(Default)]
 struct TurbineInventory {
@@ -83,16 +90,10 @@ impl TurbineInventory {
         suffix: &str,
     ) -> anyhow::Result<()> {
         filename.push(suffix);
-        let file_out =
-            File::create(&filename).with_context(|| format!("opening file {filename:?}"))?;
+        let file_out = std::fs::File::create(&filename)
+            .with_context(|| format!("opening file {filename:?}"))?;
         let mut writer = PcapNgWriter::new(file_out).context("pcap writer creation")?;
 
-        let interface = InterfaceDescriptionBlock {
-            linktype: pcap_file::DataLink::IPV4,
-            snaplen: 2048,
-            options: vec![],
-        };
-        writer.write_pcapng_block(interface)?;
         store
             .write_packets(&mut writer)
             .context("storing packets into pcap file")
@@ -195,7 +196,8 @@ struct Counter {
 
 pub fn validate_turbine(filename: PathBuf) -> anyhow::Result<Stats> {
     let mut stats = Stats::default();
-    let file_in = File::open(&filename).with_context(|| format!("opening file {filename:?}"))?;
+    let file_in =
+        std::fs::File::open(&filename).with_context(|| format!("opening file {filename:?}"))?;
     let mut reader = PcapNgReader::new(file_in).context("pcap reader creation")?;
     let mut counter = Counter::default();
     loop {
@@ -262,34 +264,112 @@ pub fn validate_turbine(filename: PathBuf) -> anyhow::Result<Stats> {
     Ok(stats)
 }
 
-pub fn monitor_turbine(bind_ip: Ipv4Addr, port: u16, mut output: PathBuf) -> anyhow::Result<Stats> {
-    output.push("time_log.csv");
-    let mut logfile = BufWriter::new(std::fs::File::create(&output)?);
-    info!("Logging arrival pattern into {output:?}");
+pub struct TurbineLogger {
+    turbine_port: u16,
+    repair_port: u16,
+    num_captured: usize,
+    chan: Option<Sender<Vec<u8>>>,
+    writer: Option<tokio::task::JoinHandle<anyhow::Result<()>>>,
+}
 
-    let socket = rscap::linux::l4::L4Socket::new(rscap::linux::l4::L4Protocol::Udp)
-        .context("L4 socket creation")?;
-    socket
-        .bind(&SocketAddrV4::new(bind_ip, port))
-        .context("bind should not fail")?;
-    let mut buf = vec![0; 2048];
+impl TurbineLogger {
+    pub async fn new(
+        mut output: PathBuf,
+        turbine_port: u16,
+        repair_port: u16,
+    ) -> anyhow::Result<Self> {
+        output.push("time_log.csv");
+        let (tx, rx) = tokio::sync::mpsc::channel(1024 * 1024);
+        let writer = BufWriter::with_capacity(64 * 1024 * 1024, File::create(&output).await?);
+        async fn write_worker(
+            mut writer: BufWriter<File>,
+            mut rx: Receiver<Vec<u8>>,
+        ) -> anyhow::Result<()> {
+            while let Some(pkt) = rx.recv().await {
+                writer.write(pkt.as_ref()).await?;
+            }
+            writer.flush().await?;
+            Ok(())
+        }
+        let jh = tokio::spawn(write_worker(writer, rx));
+        info!("Logging arrival pattern into {output:?}");
+        Ok(TurbineLogger {
+            turbine_port,
+            repair_port,
+            num_captured: 0,
+            chan: Some(tx),
+            writer: Some(jh),
+        })
+    }
+}
+
+impl PacketLogger for TurbineLogger {
+    fn handle_pkt(&mut self, wire_bytes: &[u8]) -> std::ops::ControlFlow<()> {
+        let udp_hdr = &wire_bytes[(14 + 20)..(14 + 20 + 8)];
+        let dst_port = u16::from_be_bytes(udp_hdr[2..4].try_into().unwrap());
+        let data_slice = &wire_bytes[14 + 20 + 8..];
+        let pkt = match parse_turbine(data_slice) {
+            Ok(pkt) => pkt,
+            Err(_) => {
+                println!("WTF");
+                return ControlFlow::Break(());
+                //return ControlFlow::Continue(());
+            }
+        };
+        if pkt.sanitize().is_err() {
+            return ControlFlow::Continue(());
+        }
+        let event_type = if dst_port == self.turbine_port {
+            "SHRED_RX"
+        } else {
+            "REPAIR_RX"
+        };
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros();
+        let mut buf = Vec::with_capacity(128);
+        write!(
+            &mut buf,
+            "{event_type}:{slot}:{idx}:{fecidx}:{timestamp}\n",
+            slot = pkt.slot(),
+            idx = pkt.index(),
+            fecidx = pkt.fec_set_index(),
+        )
+        .unwrap();
+
+        self.num_captured += 1;
+        if self.num_captured % 10000 == 0 {
+            info!("Logged {} packets", self.num_captured);
+        }
+        if let Err(_e) = self.chan.as_mut().unwrap().try_send(buf) {
+            return ControlFlow::Break(());
+        };
+        ControlFlow::Continue(())
+    }
+
+    async fn finalize(&mut self) -> anyhow::Result<()> {
+        // signal the writer that no more packets are coming
+        drop(self.chan.take());
+        info!("Flushing file to disk...");
+        self.writer
+            .take()
+            .unwrap()
+            .await
+            .expect("Writer should not panic!")
+    }
+}
+pub fn monitor_turbine(bind_ip: Ipv4Addr, port: u16, mut output: PathBuf) -> anyhow::Result<Stats> {
     let mut stats = Stats::default();
 
-    let mut rate = Monitor::default();
+    let mut rate: Monitor<1000> = Monitor::default();
     let mut last_report = Instant::now();
     let mut counter = Counter::default();
     while !crate::EXIT.load(std::sync::atomic::Ordering::Relaxed) {
-        let len = socket.recv(&mut buf).context("socket RX")?;
-        let buf = &buf[0..len];
-        let (dst_ip, dst_port) = fetch_dest(&buf);
-        // skip packets that socket filter let through
-        if dst_ip != bind_ip || dst_port != port {
-            continue;
-        }
         stats.captured += 1;
-        let data_slice = &buf[20 + 8..];
+        let data_slice = [1, 2, 3];
 
-        let pkt = match parse_turbine(data_slice) {
+        let pkt = match parse_turbine(&data_slice) {
             Ok(pkt) => pkt,
             Err(_) => {
                 continue;
@@ -299,19 +379,6 @@ pub fn monitor_turbine(bind_ip: Ipv4Addr, port: u16, mut output: PathBuf) -> any
             continue;
         }
 
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_micros();
-        {
-            write!(
-                logfile,
-                "SHRED_RX:{slot}:{idx}:{fecidx}:{timestamp}\n",
-                slot = pkt.slot(),
-                idx = pkt.index(),
-                fecidx = pkt.fec_set_index(),
-            )?;
-        }
         if pkt.merkle_root().is_ok() {
             counter.merkle_shreds += 1;
         } else {
@@ -324,7 +391,7 @@ pub fn monitor_turbine(bind_ip: Ipv4Addr, port: u16, mut output: PathBuf) -> any
         }
         counter.zero_bytes += data_slice.iter().filter(|&e| *e == 0).count();
         counter.total_bytes += data_slice.len();
-        rate.try_retain(data_slice, data_slice.len());
+        rate.push(data_slice.len());
         stats.valid += 1;
         if last_report.elapsed() > Duration::from_millis(1000) {
             last_report = Instant::now();
@@ -346,6 +413,5 @@ pub fn monitor_turbine(bind_ip: Ipv4Addr, port: u16, mut output: PathBuf) -> any
     }
     // Ack the command to exit the capture
     crate::EXIT.store(false, std::sync::atomic::Ordering::Relaxed);
-    logfile.flush()?;
     Ok(stats)
 }

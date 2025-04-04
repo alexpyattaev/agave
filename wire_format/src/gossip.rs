@@ -1,16 +1,17 @@
 #![allow(dead_code)]
 use {
     crate::{
-        storage::{fetch_dest, hexdump, DumbStorage, Monitor, WritePackets},
+        storage::{epb_from_bytes, fetch_dest, hexdump, DumbStorage, WritePackets},
         Stats,
     },
     anyhow::Context,
     aya::maps::{MapData, RingBuf},
-    indicatif::{MultiProgress, ProgressBar, ProgressStyle},
     log::{debug, error},
     pcap_file::pcapng::{
-        blocks::interface_description::InterfaceDescriptionBlock, PcapNgBlock, PcapNgReader,
-        PcapNgWriter,
+        blocks::{
+            enhanced_packet::EnhancedPacketBlock, interface_description::InterfaceDescriptionBlock,
+        },
+        PcapNgReader, PcapNgWriter,
     },
     pcap_file_tokio::pcap::{PcapPacket, PcapWriter},
     solana_gossip::{crds_data::CrdsData, crds_value::CrdsValue, protocol::Protocol},
@@ -19,25 +20,26 @@ use {
     std::{
         collections::HashMap,
         ffi::CStr,
-        net::{Ipv4Addr, SocketAddr, SocketAddrV4},
-        path::{Path, PathBuf},
-        time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+        net::{Ipv4Addr, SocketAddrV4},
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
     },
     strum::EnumCount,
     tokio::io::{unix::AsyncFd, BufWriter},
-    tokio_util::sync::CancellationToken,
 };
 pub mod log_invalid_senders;
 pub use log_invalid_senders::*;
 pub mod serialize;
 pub use serialize::*;
+pub mod speed_meter;
+pub use speed_meter::*;
 
 pub type CrdsCounts = [usize; CrdsData::COUNT];
 
 #[derive(Default)]
 pub struct CrdsCaptures {
     crds_types: CrdsCounts,
-    packets: Vec<Box<[u8]>>,
+    packets: Vec<EnhancedPacketBlock<'static>>,
 }
 
 /// This will try to capture new and rare CRDS values until cost of doing so is not too high,
@@ -63,7 +65,7 @@ impl CrdsCaptures {
             self.packets.len()
         );*/
         if profit > cost_to_store {
-            self.packets.push(bytes.to_owned().into_boxed_slice());
+            self.packets.push(epb_from_bytes(bytes));
             true
         } else {
             false
@@ -83,8 +85,14 @@ impl WritePackets for CrdsCaptures {
         &mut self,
         writer: &mut PcapNgWriter<W>,
     ) -> anyhow::Result<()> {
-        for p in self.packets.iter() {
-            crate::storage::write_packet(p, writer)?
+        let interface = InterfaceDescriptionBlock {
+            linktype: pcap_file::DataLink::IPV4,
+            snaplen: 1500,
+            options: vec![],
+        };
+        writer.write_pcapng_block(interface)?;
+        for p in self.packets.drain(..) {
+            writer.write_pcapng_block(p)?;
         }
         Ok(())
     }
@@ -324,132 +332,6 @@ pub fn validate_gossip(filename: PathBuf) -> anyhow::Result<Stats> {
     Ok(stats)
 }
 
-#[derive(Default)]
-pub struct GossipMonitor {
-    // All invalid packets
-    invalid: Monitor,
-    // All valid packets
-    valid: Monitor,
-    // All push packets
-    push: Monitor,
-    // All prune packets
-    prune: Monitor,
-    // Ping and Pong
-    pingpong: Monitor,
-    // Whatever is not covered above
-    others: Monitor,
-    // CRDS stats
-    //  ContactInfo and LegacyContactInfo packets (i.e. the whole point of gossip)
-    crds_contact_info: Monitor,
-    crds_epoch_slots: Monitor,
-    crds_node_instance: Monitor,
-    crds_vote: Monitor,
-}
-impl WritePackets for Monitor {
-    fn write_packets<W: std::io::Write>(
-        &mut self,
-        writer: &mut PcapNgWriter<W>,
-    ) -> anyhow::Result<()> {
-        for packet in self.packets.drain(..) {
-            writer.write_block(&packet.into_block())?;
-        }
-        Ok(())
-    }
-}
-
-impl GossipMonitor {
-    fn try_retain(&mut self, pkt: &Protocol, bytes: &[u8], size: usize) -> bool {
-        match pkt {
-            Protocol::PushMessage(_pubkey, crds_values) => {
-                dbg!(_pubkey);
-                for cv in crds_values {
-                    self.try_retain_crds(cv);
-                }
-                self.push.try_retain(bytes, size);
-            }
-            Protocol::PullResponse(_pubkey, crds_values) => {
-                dbg!(_pubkey);
-                for cv in crds_values {
-                    self.try_retain_crds(cv);
-                }
-            }
-            Protocol::PruneMessage(_pubkey, _) => {
-                dbg!(_pubkey);
-                self.prune.try_retain(bytes, size);
-            }
-            Protocol::PingMessage(_) | Protocol::PongMessage(_) => {
-                self.pingpong.try_retain(bytes, size);
-            }
-            _ => {
-                self.others.try_retain(bytes, size);
-            }
-        }
-        self.valid.try_retain(bytes, size)
-    }
-
-    fn try_retain_crds(&mut self, cv: &CrdsValue) {
-        let ser = bincode::serialize(cv.data()).unwrap();
-        if cv.label().pubkey()
-            != Pubkey::from_str_const("DmCowGH9DUHYCetfGaWzPzYCi455yDxewcycdyWuPLjx")
-        {
-            return;
-        }
-        dbg!(cv.label());
-        match cv.data() {
-            CrdsData::EpochSlots(_esi, _es) => {
-                self.crds_epoch_slots.try_retain(&ser, ser.len());
-            }
-            CrdsData::Vote(_, _) => {
-                self.crds_vote.try_retain(&ser, ser.len());
-            }
-            CrdsData::ContactInfo(_) | CrdsData::LegacyContactInfo(_) => {
-                self.crds_contact_info.try_retain(&ser, ser.len());
-            }
-            CrdsData::NodeInstance(_) => {
-                self.crds_node_instance.try_retain(&ser, ser.len());
-            }
-            _ => {}
-        }
-    }
-
-    fn write_file(
-        store: &mut impl WritePackets,
-        mut filename: PathBuf,
-        suffix: &str,
-    ) -> anyhow::Result<()> {
-        filename.push(suffix);
-        let file_out = std::fs::File::create(&filename)
-            .with_context(|| format!("opening file {filename:?}"))?;
-        let mut writer = PcapNgWriter::new(file_out).context("pcap writer creation")?;
-
-        let interface = InterfaceDescriptionBlock {
-            linktype: pcap_file::DataLink::IPV4,
-            snaplen: 2048,
-            options: vec![],
-        };
-        writer.write_pcapng_block(interface)?;
-        store
-            .write_packets(&mut writer)
-            .context("storing packets into pcap file")
-    }
-    fn dump_to_files(&mut self, filename: PathBuf) -> anyhow::Result<()> {
-        macro_rules! write_thing {
-            ($name:ident) => {
-                Self::write_file(
-                    &mut self.$name,
-                    filename.clone(),
-                    concat!(stringify!($name), ".pcap"),
-                )?;
-            };
-        }
-        write_thing!(push);
-        write_thing!(prune);
-        write_thing!(invalid);
-        write_thing!(valid);
-        Ok(())
-    }
-}
-
 pub async fn gossip_capture(
     async_fd: &mut AsyncFd<RingBuf<MapData>>,
     filename: PathBuf,
@@ -481,110 +363,4 @@ pub async fn gossip_capture(
 
         guard.clear_ready();
     }
-}
-
-trait MonitorCommand {
-    fn setup<T>(cfg: T) -> Self;
-    async fn process_packet<R>(&mut self) -> anyhow::Result<R>;
-}
-use crate::ui;
-use iocraft::prelude::*;
-
-struct GossipMonitorChannel(crossbeam_channel::Receiver<Vec<f32>>);
-
-#[component]
-fn GossipMonitorMenu(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
-    let bar_names = ["all", "things", "gossip"].map(|e| (String::from(e), 0.0));
-    let mut rates = hooks.use_state::<Vec<(String, f32)>, _>(|| bar_names.to_vec());
-    let chan = hooks.use_context::<GossipMonitorChannel>().0.clone();
-    hooks.use_future(async move {
-        loop {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            let Ok(pkt) = chan.try_recv() else {
-                continue;
-            };
-            let mut rates_guard = rates.write();
-            for (d, s) in rates_guard.iter_mut().zip(pkt) {
-                d.1 = s;
-            }
-        }
-    });
-
-    element! {
-        ui::RateDisplay(rates:rates.read().clone(), units:"Mbps")
-    }
-}
-
-pub async fn gossip_log_metadata(
-    async_fd: &mut AsyncFd<RingBuf<MapData>>,
-    size_hint: usize,
-) -> anyhow::Result<()> {
-    let m = MultiProgress::new();
-    let sty = ProgressStyle::with_template(
-        "[{elapsed_precise}] {bar:80.cyan/blue} {pos:>7}/{len:7} {msg}",
-    )
-    .unwrap()
-    .progress_chars("##-");
-
-    let n = 1000;
-    let new_pb = |msg| {
-        let rate = m.add(ProgressBar::new(n));
-        rate.set_style(sty.clone());
-        rate.set_message(msg);
-        rate
-    };
-    let rate_gossip = new_pb("All glacier");
-    let rate_junk = new_pb("Junk");
-    let rate_prune = new_pb("Prune");
-    let rate_ping = new_pb("Ping & Pong");
-    let rate_contact_info = new_pb("CRDS: ContactInfo");
-    let rate_votes = new_pb("CRDS: Vote");
-    let rate_epoch_slots = new_pb("CRDS: EpochSlots");
-    let rate_node_instance = new_pb("CRDS: NodeInstance");
-
-    //Allocate buffer big enough for any valid datagram
-    let mut monitor = GossipMonitor::default();
-    let mut last_report = Instant::now();
-    while !crate::EXIT.load(std::sync::atomic::Ordering::Relaxed) {
-        // wait till it is ready to read and read
-        let mut guard = async_fd.readable_mut().await.unwrap();
-        let rb = guard.get_inner_mut();
-
-        while let Some(read) = rb.next() {
-            let ptr = read.as_ptr();
-
-            // retrieve packet len first then packet data
-            let size = unsafe { std::ptr::read_unaligned::<u16>(ptr as *const u16) };
-            let data = unsafe { std::slice::from_raw_parts(ptr.byte_add(2), size.into()) };
-
-            let Ok(pkt) = parse_gossip(&data[20 + 8..]) else {
-                monitor.invalid.try_retain(&data, size_hint);
-                continue;
-            };
-            if pkt.sanitize().is_err() {
-                monitor.invalid.try_retain(&data, size_hint);
-                continue;
-            }
-            //let ts = SystemTime::now().duration_since(UNIX_EPOCH)?;
-            monitor.try_retain(&pkt, &data, size_hint);
-
-            fn set_pos(pb: &ProgressBar, rate_bps: Option<f32>) {
-                pb.set_position((rate_bps.unwrap_or_default() / 1e6) as u64);
-            }
-            if last_report.elapsed() > Duration::from_millis(500) {
-                last_report = Instant::now();
-                set_pos(&rate_junk, monitor.invalid.rate_bps());
-                set_pos(&rate_gossip, monitor.valid.rate_bps());
-                set_pos(&rate_votes, monitor.crds_vote.rate_bps());
-                set_pos(&rate_prune, monitor.prune.rate_bps());
-                set_pos(&rate_contact_info, monitor.crds_contact_info.rate_bps());
-                set_pos(&rate_epoch_slots, monitor.crds_epoch_slots.rate_bps());
-                set_pos(&rate_node_instance, monitor.crds_node_instance.rate_bps());
-                set_pos(&rate_ping, monitor.pingpong.rate_bps());
-            }
-        }
-        guard.clear_ready();
-    }
-    crate::EXIT.store(false, std::sync::atomic::Ordering::Relaxed);
-    Ok(())
 }

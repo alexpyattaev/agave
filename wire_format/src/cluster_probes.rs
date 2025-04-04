@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 use anyhow::Context;
 use log::info;
+use serde::{Deserialize, Serialize};
 use solana_pubkey::Pubkey;
 use solana_streamer::socket::SocketAddrSpace;
 use std::collections::HashMap;
@@ -13,7 +14,7 @@ use std::{
 
 use solana_gossip::gossip_service::discover;
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Ports {
     pub shred_version: u16,
     pub gossip: SocketAddr,
@@ -69,7 +70,8 @@ pub async fn find_validator_ports(
 
     dbg!(&me);
     let turbine = me.tvu(solana_gossip::contact_info::Protocol::UDP);
-    let repair = me.serve_repair(solana_gossip::contact_info::Protocol::UDP);
+    let repair = me.repair(solana_gossip::contact_info::Protocol::UDP);
+
     let tpu = me.tpu(solana_gossip::contact_info::Protocol::UDP);
     let tpu_quic = me.tpu(solana_gossip::contact_info::Protocol::QUIC);
     let tpu_vote = me.tpu(solana_gossip::contact_info::Protocol::UDP);
