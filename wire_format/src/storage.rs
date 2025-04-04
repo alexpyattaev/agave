@@ -2,23 +2,12 @@ use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::io::Write;
 use std::net::Ipv4Addr;
+use std::time::{Duration, Instant, SystemTime};
 
 use pcap_file::pcapng::blocks::enhanced_packet::EnhancedPacketBlock;
+use pcap_file::pcapng::blocks::interface_description::InterfaceDescriptionBlock;
 use pcap_file::pcapng::blocks::simple_packet::SimplePacketBlock;
 use pcap_file::pcapng::{PcapNgBlock, PcapNgWriter};
-
-pub(crate) fn write_packet<W: std::io::Write>(
-    data: &[u8],
-    writer: &mut PcapNgWriter<W>,
-) -> anyhow::Result<()> {
-    let packet = SimplePacketBlock {
-        original_len: data.len() as u32,
-        data: Cow::Borrowed(data),
-    };
-
-    writer.write_block(&packet.into_block())?;
-    Ok(())
-}
 
 pub trait WritePackets {
     fn write_packets<W: std::io::Write>(
@@ -28,14 +17,24 @@ pub trait WritePackets {
 }
 
 #[derive(Default)]
-pub(crate) struct DumbStorage(Vec<Box<[u8]>>);
+pub(crate) struct DumbStorage(Vec<EnhancedPacketBlock<'static>>);
+
+pub fn epb_from_bytes(bytes: &[u8]) -> EnhancedPacketBlock<'static> {
+    EnhancedPacketBlock {
+        interface_id: 0,
+        timestamp: SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap(),
+        original_len: bytes.len() as u32,
+        data: Cow::Owned(bytes.to_owned()),
+        options: vec![],
+    }
+}
 
 impl DumbStorage {
     pub(crate) fn try_retain(&mut self, bytes: &[u8], size: usize) -> bool {
         if self.0.len() < size {
-            let bytes = bytes.to_owned().into_boxed_slice();
-            self.0.push(bytes);
-
+            self.0.push(epb_from_bytes(bytes));
             true
         } else {
             false
@@ -47,8 +46,14 @@ impl WritePackets for DumbStorage {
         &mut self,
         writer: &mut PcapNgWriter<W>,
     ) -> anyhow::Result<()> {
-        for p in self.0.iter() {
-            write_packet(p, writer)?
+        let interface = InterfaceDescriptionBlock {
+            linktype: pcap_file::DataLink::IPV4,
+            snaplen: 1500,
+            options: vec![],
+        };
+        writer.write_pcapng_block(interface)?;
+        for p in self.0.drain(..) {
+            writer.write_pcapng_block(p)?;
         }
         Ok(())
     }
@@ -61,46 +66,49 @@ pub fn hexdump(bytes: &[u8]) -> anyhow::Result<()> {
 }
 
 #[derive(Default)]
-pub struct Monitor {
-    pub packets: VecDeque<EnhancedPacketBlock<'static>>,
+pub struct Monitor<const WINDOW_MS: u64 = 1000> {
+    pub packets: VecDeque<(Instant, usize)>,
     pub bytes_stored: usize,
 }
-impl Monitor {
-    pub fn try_retain(&mut self, bytes: &[u8], size: usize) -> bool {
-        self.packets.push_back(EnhancedPacketBlock {
-            original_len: bytes.len() as u32,
-            data: Cow::from(bytes.to_owned()),
-            interface_id: 0,
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap(),
-            options: vec![],
-        });
-        self.bytes_stored += bytes.len();
-        if self.packets.len() > size {
-            let p = self.packets.pop_front().unwrap();
-            self.bytes_stored -= p.original_len as usize;
-        }
-        true
+impl<const WINDOW_MS: u64> Monitor<WINDOW_MS> {
+    pub fn push(&mut self, bytes: usize) {
+        self.packets.push_back((Instant::now(), bytes));
+        self.bytes_stored += bytes;
     }
 
-    pub fn rate_bps(&self) -> Option<f32> {
+    pub fn rate_bps(&mut self) -> Option<f32> {
+        self.evict();
         let oldest = self.packets.front()?;
         let newest = self.packets.back()?;
         if oldest == newest {
             return None;
         }
-        let dt = newest.timestamp - oldest.timestamp;
+        let dt = newest.0 - oldest.0;
+
         let dt_secs = dt.as_secs_f32();
         Some((self.bytes_stored * 8) as f32 / dt_secs)
     }
-    pub fn rate_pps(&self) -> Option<f32> {
+    pub fn evict(&mut self) {
+        loop {
+            let Some(oldest) = self.packets.front() else {
+                return;
+            };
+            if oldest.0.elapsed() > Duration::from_millis(WINDOW_MS) {
+                let pkt = self.packets.pop_front().unwrap();
+                self.bytes_stored -= pkt.1;
+            } else {
+                break;
+            }
+        }
+    }
+    pub fn rate_pps(&mut self) -> Option<f32> {
+        self.evict();
         let oldest = self.packets.front()?;
         let newest = self.packets.back()?;
         if oldest == newest {
             return None;
         }
-        let dt = newest.timestamp - oldest.timestamp;
+        let dt = newest.0 - oldest.0;
         let num = self.packets.len() as f32;
         let dt_secs = dt.as_secs_f32();
         Some(num / dt_secs)

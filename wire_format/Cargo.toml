@@ -44,6 +44,7 @@ iocraft = "0.7.2"
 crossbeam-channel.workspace = true
 serde_json.workspace = true
 tokio-util.workspace = true
+arrayvec.workspace = true
 #iocraft = "0.7.1"
 [lints]
 workspace = true

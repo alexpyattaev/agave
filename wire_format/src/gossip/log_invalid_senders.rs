@@ -1,19 +1,20 @@
 #![allow(dead_code)]
 use {
     super::{parse_gossip, CrdsCounts},
-    aya::maps::{MapData, RingBuf},
+    crate::monitor::PacketLogger,
+    anyhow::Context,
+    log::info,
     serde::Serialize,
     solana_gossip::{crds_data::CrdsData, crds_value::CrdsValue, protocol::Protocol},
     solana_pubkey::Pubkey,
     solana_sanitize::Sanitize,
     std::{
-        collections::{hash_map::Entry, HashMap, HashSet},
-        io::Write,
-        path::Path,
+        collections::{hash_map::Entry, HashMap},
+        ops::ControlFlow,
+        path::PathBuf,
         time::{Duration, Instant},
     },
-    tokio::io::unix::AsyncFd,
-    tokio_util::sync::CancellationToken,
+    tokio::io::AsyncWriteExt,
 };
 #[derive(Default, Clone, Serialize)]
 struct Stat {
@@ -22,26 +23,25 @@ struct Stat {
     crds_stats: CrdsCounts,
     shred_versions: Vec<u16>,
 }
-#[derive(Default)]
-struct MysteryCrdsLogger {
-    senders: HashMap<Pubkey, Stat>,
+
+pub struct MysteryCRDSLogger {
     shred_version: u16,
+    path: PathBuf,
+    senders: HashMap<Pubkey, Stat>,
+    forwarders: HashMap<Pubkey, Stat>,
+    last_report: Instant,
+    last_batch: usize,
 }
-impl MysteryCrdsLogger {
-    fn dump_to_file(&self, path: &Path) -> anyhow::Result<()> {
-        let mut path = path.to_path_buf();
-        path.push("mystery.json");
-        println!("Saving captured abusers into {:?}", &path);
-        let mut file = std::fs::File::create(path)?;
-        let new_map: HashMap<_, _> = self
-            .senders
-            .iter()
-            .map(|(k, v)| (k.to_string(), v))
-            .collect();
-        serde_json::to_writer_pretty(&mut file, &new_map)?;
-        println!("Saving completed");
-        file.flush()?;
-        Ok(())
+impl MysteryCRDSLogger {
+    pub fn new(shred_version: u16, path: PathBuf) -> Self {
+        Self {
+            shred_version,
+            path,
+            senders: Default::default(),
+            forwarders: Default::default(),
+            last_report: Instant::now(),
+            last_batch: 0,
+        }
     }
     fn try_retain_crds(&mut self, cv: CrdsValue, push: bool) -> bool {
         let from = cv.label().pubkey();
@@ -109,60 +109,40 @@ impl MysteryCrdsLogger {
         total
     }
 }
-pub async fn gossip_log_invalid_senders(
-    async_fd: &mut AsyncFd<RingBuf<MapData>>,
-    path: &Path,
-    cancel: CancellationToken,
-    min_time: Duration,
-    shred_version: u16,
-) -> anyhow::Result<()> {
-    println!("Start catching stuff");
-    //Allocate buffer big enough for any valid datagram
-    let mut monitor = MysteryCrdsLogger::default();
-    monitor.shred_version = shred_version;
-    let start = Instant::now();
-    let mut last_report = Instant::now();
-    let mut last_num_abusers = 0;
-    let mut num_abuse_crds = 0;
-    'outer: while !crate::EXIT.load(std::sync::atomic::Ordering::Relaxed) {
-        if cancel.is_cancelled() {
-            break;
-        }
-        // wait till it is ready to read and read
-        let mut guard = async_fd.readable_mut().await.unwrap();
-        let rb = guard.get_inner_mut();
 
-        while let Some(read) = rb.next() {
-            let ptr = read.as_ptr();
-
-            // retrieve packet len first then packet data
-            let size = unsafe { std::ptr::read_unaligned::<u16>(ptr as *const u16) };
-            let data = unsafe { std::slice::from_raw_parts(ptr.byte_add(2), size.into()) };
-
-            let Ok(pkt) = parse_gossip(&data[14 + 20 + 8..]) else {
-                continue;
-            };
-            if pkt.sanitize().is_err() {
-                continue;
-            }
-            num_abuse_crds += monitor.analyze(pkt);
-
-            if last_report.elapsed() > Duration::from_millis(1000) {
-                last_report = Instant::now();
-                let num_abusers = monitor.senders.len();
-                println!("Caught {num_abusers} abusers, {num_abuse_crds}/second",);
-                num_abuse_crds = 0;
-                if last_num_abusers == num_abusers {
-                    if start.elapsed() > min_time {
-                        break 'outer;
-                    }
-                }
-                last_num_abusers = num_abusers;
-            }
-        }
-        guard.clear_ready();
+impl PacketLogger for MysteryCRDSLogger {
+    async fn finalize(&mut self) -> anyhow::Result<()> {
+        self.path.push("mystery.json");
+        let mut file = tokio::fs::File::create(&self.path)
+            .await
+            .context("could not open file fow writing")?;
+        info!("Saving captured abusers into {:?}", &self.path);
+        let new_map: HashMap<_, _> = self
+            .senders
+            .iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
+        let json = serde_json::to_string_pretty(&new_map).context("serialize failed")?;
+        file.write_all(json.as_bytes()).await?;
+        info!("Saving completed");
+        file.flush().await?;
+        Ok(())
     }
-    crate::EXIT.store(false, std::sync::atomic::Ordering::Relaxed);
-    monitor.dump_to_file(path)?;
-    Ok(())
+    fn handle_pkt(&mut self, wire_bytes: &[u8]) -> ControlFlow<()> {
+        let Ok(pkt) = parse_gossip(&wire_bytes[14 + 20 + 8..]) else {
+            return ControlFlow::Continue(());
+        };
+        if pkt.sanitize().is_err() {
+            return ControlFlow::Continue(());
+        }
+        self.last_batch += self.analyze(pkt);
+
+        if self.last_report.elapsed() > Duration::from_millis(1000) {
+            self.last_report = Instant::now();
+            let num_abusers = self.senders.len();
+            println!("Caught {num_abusers} abusers, {}/second", self.last_batch);
+            self.last_batch = 0;
+        }
+        ControlFlow::Continue(())
+    }
 }

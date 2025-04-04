@@ -221,7 +221,7 @@ pub fn monitor_repair(bind_ip: Ipv4Addr, port: u16) -> anyhow::Result<Stats> {
     let mut buf = vec![0; 2048];
     let mut stats = Stats::default();
 
-    let mut rate = Monitor::default();
+    let mut rate: Monitor<1000> = Monitor::default();
     let mut last_report = Instant::now();
     let mut counter = Counter::default();
     while !crate::EXIT.load(std::sync::atomic::Ordering::Relaxed) {
@@ -241,7 +241,7 @@ pub fn monitor_repair(bind_ip: Ipv4Addr, port: u16) -> anyhow::Result<Stats> {
                 continue;
             }
         };
-        rate.try_retain(data_slice, data_slice.len());
+        rate.push(data_slice.len());
         match pkt {
             RepairProtocol::LegacyWindowIndex => counter.legacy += 1,
             RepairProtocol::LegacyHighestWindowIndex => counter.legacy += 1,

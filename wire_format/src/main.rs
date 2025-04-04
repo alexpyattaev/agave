@@ -3,14 +3,15 @@ use {
     crate::gossip::*,
     anyhow::Context,
     clap::{Parser, Subcommand, ValueEnum},
-    cluster_probes::find_validator_ports,
+    cluster_probes::{find_validator_ports, Ports},
     log::{error, info},
-    monitor::start_monitor,
+    monitor::{start_monitor, MonitorCommand},
     network_interface::{NetworkInterface, NetworkInterfaceConfig},
-    std::{net::SocketAddr, path::PathBuf, sync::atomic::AtomicBool, time::Duration},
+    std::{fs::File, net::SocketAddr, path::PathBuf, sync::atomic::AtomicBool, time::Duration},
     turbine::validate_turbine,
 };
 
+mod bpf_controls;
 mod cluster_probes;
 mod gossip;
 mod monitor;
@@ -33,6 +34,8 @@ struct Cli {
     verbose: bool,
     #[command(subcommand)]
     command: Commands,
+    #[arg(short, long, default_value = ".wire_format.json")]
+    config: PathBuf,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
@@ -47,20 +50,23 @@ enum Direction {
 
 #[derive(Subcommand)]
 enum Commands {
-    Monitor {
+    Discover {
         #[arg(short, long)]
         /// Gossip socket of the local validator (to fetch metadata and for interface bind)
         gossip_addr: SocketAddr,
-        #[arg(short, long, value_enum, default_value_t=Direction::Inbound)]
+        #[arg(short, long, default_value = "120")]
+        /// Timeout for discovery of turbine and repair ports. set to 0 to ony work with gossip
+        discovery_timeout_sec: u64,
+    },
+    Monitor {
+        /*  #[arg(short, long, value_enum, default_value_t=Direction::Inbound)]
         ///Defines which direction to capture.
-        direction: Direction,
+        direction: Direction,*/
         #[arg(short, long, default_value = "monitor_data")]
         /// Directory for files to write. Existing contents may be destroyed!
         output: PathBuf,
-
-        #[arg(short, long, default_value = "60")]
-        /// Timeout for discovery of turbine and repair ports. set to 0 to ony work with gossip
-        discovery_timeout_sec: u64,
+        #[command(subcommand)]
+        command: MonitorCommand,
     },
     Parse {
         #[arg(value_enum)]
@@ -72,83 +78,57 @@ enum Commands {
 
 pub static EXIT: AtomicBool = AtomicBool::new(false);
 async fn sig_handler() {
-    tokio::signal::ctrl_c()
-        .await
-        .expect("failed to listen for event");
-    println!("Received termination siganl");
-    EXIT.store(true, std::sync::atomic::Ordering::Relaxed);
-    // Wait for workers to ack that they are exiting
-    tokio::time::sleep(Duration::from_secs(5)).await;
+    loop {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to listen for event");
+        println!("Received termination siganal");
+        EXIT.store(true, std::sync::atomic::Ordering::Relaxed);
+        // Wait for workers to ack that they are exiting
+        tokio::time::sleep(Duration::from_secs(10)).await;
 
-    if crate::EXIT.load(std::sync::atomic::Ordering::Relaxed) {
-        println!("Timed out waiting for capture to stop, aborting!");
-        std::process::exit(1);
-    }
-}
-use iocraft::prelude::*;
-#[component]
-fn Menu(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
-    let mut speeds =
-        hooks.use_state::<Vec<(String, f32)>, _>(|| vec![("Speed".to_owned(), 0.0); 2]);
-    hooks.use_future(async move {
-        loop {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            let mut speeds = speeds.write();
-            for s in speeds.iter_mut() {
-                s.1 += 1.0;
-            }
-        }
-    });
-
-    element! {
-        View(border_style: BorderStyle::Round, border_color: Color::Cyan ) {
-            ui::RateDisplay(rates:speeds.read().clone(), )
+        if crate::EXIT.load(std::sync::atomic::Ordering::Relaxed) {
+            println!("Timed out waiting for capture to stop, aborting!");
+            std::process::exit(1);
         }
     }
 }
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
-    solana_logger::setup_with_default_filter();
+    solana_logger::setup_with_default("info");
     tokio::spawn(sig_handler());
     let cli = Cli::parse();
-    // element!(Menu).render_loop().await.unwrap();
-    // return Ok(());
-    // println!("done!");
     match cli.command {
-        Commands::Monitor {
+        Commands::Discover {
             gossip_addr,
-            direction,
-            output,
             discovery_timeout_sec,
         } => {
-            let bind_interface = {
-                let network_interfaces = NetworkInterface::show()?;
-                network_interfaces
-                    .iter()
-                    .find(|itf| itf.addr.iter().any(|addr| addr.ip() == gossip_addr.ip()))
-                    .ok_or(anyhow::anyhow!("No interface found with specified IP!"))?
-                    .clone()
-            };
-            info!("Binding to interface {}", &bind_interface.name);
-
-            if direction == Direction::Outbound {
-                todo!("Outbound capture is not supported yet");
-            }
-            let _ = std::fs::create_dir(&output);
             let ports =
                 find_validator_ports(gossip_addr, Duration::from_secs(discovery_timeout_sec))
                     .await
                     .context("Lookup validator ports")?;
             dbg!(&ports);
-            /*let ports = Ports {
-                gossip: gossip_addr,
-                repair: "1.1.1.1:1111".parse().unwrap(),
-                tpu: None,
-                tpu_quic: None,
-                tpu_vote: None,
-                turbine: "1.1.1.1:2222".parse().unwrap(),
-            };*/
-            start_monitor(bind_interface, ports, output).await?;
+            let configfile = File::create(&cli.config)?;
+            serde_json::to_writer_pretty(configfile, &ports)?;
+            info!("Written ports to {:?}", &cli.config);
+        }
+        Commands::Monitor { output, command } => {
+            let configfile = File::open(&cli.config)
+                .context("Config file not found, create it with discover command")?;
+            let ports: Ports =
+                serde_json::from_reader(configfile).context("Config file is invalid")?;
+            info!("Loaded ports from {:?}", &cli.config);
+            let bind_interface = {
+                let network_interfaces = NetworkInterface::show()?;
+                network_interfaces
+                    .iter()
+                    .find(|itf| itf.addr.iter().any(|addr| addr.ip() == ports.gossip.ip()))
+                    .ok_or(anyhow::anyhow!("No interface found with specified IP!"))?
+                    .clone()
+            };
+
+            let _ = std::fs::create_dir(&output);
+            start_monitor(bind_interface, ports, command, output).await?;
         }
         Commands::Parse { input, protocol } => match protocol {
             WireProtocol::Gossip => {
