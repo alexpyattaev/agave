@@ -6,6 +6,7 @@ use solana_pubkey::Pubkey;
 use solana_streamer::socket::SocketAddrSpace;
 use std::collections::HashMap;
 use std::io::{prelude::*, BufReader};
+use std::ops::Range;
 use std::str::FromStr;
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -19,10 +20,26 @@ pub struct Ports {
     pub shred_version: u16,
     pub gossip: SocketAddr,
     pub repair: Option<SocketAddr>,
+    pub serve_repair: Option<SocketAddr>,
     pub tpu: Option<SocketAddr>,
     pub tpu_quic: Option<SocketAddr>,
     pub tpu_vote: Option<SocketAddr>,
     pub turbine: Option<SocketAddr>,
+}
+
+impl Ports {
+    pub fn repair_candidates(&self, range: Range<u16>) -> Vec<u16> {
+        let occupied_ports = [
+            self.gossip.port(),
+            self.serve_repair.map_or(0, |e| e.port()),
+            self.tpu.map_or(0, |e| e.port()),
+            self.tpu_quic.map_or(0, |e| e.port()),
+            self.tpu_vote.map_or(0, |e| e.port()),
+            self.turbine.map_or(0, |e| e.port()),
+        ];
+        let range = range.filter(|&e| !occupied_ports.iter().any(|&o| e == o));
+        Vec::from_iter(range)
+    }
 }
 /// Finds the turbine port on a given gossip endpoint
 pub async fn find_validator_ports(
@@ -39,6 +56,7 @@ pub async fn find_validator_ports(
             shred_version,
             turbine: None,
             repair: None,
+            serve_repair: None,
             gossip: gossip_address,
             tpu: None,
             tpu_quic: None,
@@ -70,7 +88,7 @@ pub async fn find_validator_ports(
 
     dbg!(&me);
     let turbine = me.tvu(solana_gossip::contact_info::Protocol::UDP);
-    let repair = me.repair(solana_gossip::contact_info::Protocol::UDP);
+    let serve_repair = me.serve_repair(solana_gossip::contact_info::Protocol::UDP);
 
     let tpu = me.tpu(solana_gossip::contact_info::Protocol::UDP);
     let tpu_quic = me.tpu(solana_gossip::contact_info::Protocol::QUIC);
@@ -78,13 +96,14 @@ pub async fn find_validator_ports(
     let ports = Ports {
         shred_version,
         turbine,
-        repair,
+        repair: None,
+        serve_repair,
         gossip: gossip_address,
         tpu,
         tpu_quic,
         tpu_vote,
     };
-    info!("Fetched the port information: {:?}", &ports);
+    info!("Fetched the port information from gossip: {:?}", &ports);
     Ok(ports)
 }
 

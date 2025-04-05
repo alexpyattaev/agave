@@ -22,7 +22,7 @@ use {
 };
 
 #[inline]
-fn get_shred_size(shred: &[u8]) -> Option<usize> {
+pub fn get_shred_size(shred: &[u8]) -> Option<usize> {
     // Legacy data shreds have zero padding at the end which might have been
     // trimmed. Other variants do not have any trailing zeros.
     Some(match get_shred_variant(shred).ok()? {

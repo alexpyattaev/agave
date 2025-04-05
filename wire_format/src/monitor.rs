@@ -7,8 +7,9 @@ use {
     clap::{Parser, Subcommand},
     log::{error, info, warn},
     std::{
+        io::Write,
         net::{IpAddr, Ipv4Addr},
-        ops::ControlFlow,
+        ops::{ControlFlow, Range},
         path::PathBuf,
         time::Duration,
     },
@@ -70,11 +71,12 @@ pub async fn start_monitor(
                 let turbine_port = ports.turbine.expect("Turbine port is required").port();
                 let repair_port = ports.repair.expect("Repair port is required").port();
 
-                let mut logger = TurbineLogger::new(output, turbine_port, repair_port).await?;
+                let mut logger =
+                    TurbineLogger::new_with_file_writer(output, turbine_port, repair_port).await?;
 
                 info!("Turbine + Repair capture starting");
                 bpf_controls.allow_dst_port(turbine_port)?;
-                bpf_controls.allow_dst_port(repair_port)?;
+                //bpf_controls.allow_dst_port(repair_port)?;
                 process_packet_flow(&mut bpf_controls, &mut logger).await?;
             }
             WireProtocol::Repair => todo!(),
@@ -99,6 +101,56 @@ pub async fn start_monitor(
     }
     bpf_controls.reset_dst()?;
     Ok(())
+}
+
+pub async fn detect_repair_shreds(
+    interface: network_interface::NetworkInterface,
+    port_range: &[u16],
+    dst_ip: IpAddr,
+) -> anyhow::Result<Option<u16>> {
+    let mut bpf_controls = BpfControls::new(&interface.name)?;
+    info!("Monitor set up on interface {}", &interface.name);
+    // Allow all senders
+    bpf_controls.allow_src_ip(Ipv4Addr::UNSPECIFIED)?;
+    bpf_controls.allow_src_port(0)?;
+    let (mut logger, mut rx) = TurbineLogger::new_with_channel(0, 0)?;
+    let timeout = Duration::from_secs(1);
+    let mut result = 0;
+    for port in port_range.iter().cloned() {
+        bpf_controls.reset_dst()?;
+        info!("Probing for repair packets on port {port}...");
+        bpf_controls.allow_dst_ip(v4(dst_ip))?;
+        bpf_controls.allow_dst_port(port)?;
+        tokio::select! {
+           res =  tokio::time::timeout(timeout, rx.recv())=> {
+               match res{
+                   Ok(shred) => {
+                       if let Some(shred) = shred {
+                           bpf_controls.reset_dst()?;
+                           std::io::stdout().write_all(&shred)?;
+                           result = port;
+                       }
+                       else{
+                           anyhow::bail!("Channel closed wtf");
+                       }
+                       break;
+                   },
+                   Err(_) => {
+                       continue;
+                   }
+               }
+           },
+               _ = process_packet_flow(&mut bpf_controls, &mut logger) => {}
+        }
+    }
+    bpf_controls.reset_dst()?;
+    logger.finalize().await?;
+    if result != 0 {
+        info!("Found repair traffic on port {result}");
+        return Ok(Some(result));
+    }
+    error!("Could not find repair shreds anywhere in {:?}!", port_range);
+    return Ok(None);
 }
 
 pub trait PacketLogger {
