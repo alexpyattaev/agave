@@ -24,3 +24,10 @@ will show turbine bitrates broken down by shred types + repair bandwidth
 
 ``` cargo xtask run  --   monitor log-metadata turbine```
 will log turbine (and repair) arrivals into a csv file for plotting
+
+```python plotter.py ./monitor_data/time_log.csv 30000```
+will then make nice interactive turbine delivery plots
+
+== Gossip abusers
+```cargo xtask run  -- monitor log-gossip-invalid-senders```
+will look for suspicious gossip packets and log them for you

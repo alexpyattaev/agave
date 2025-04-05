@@ -110,9 +110,11 @@ impl MysteryCRDSLogger {
     }
 }
 
+const FILENAME: &str = "gossip-invalid-senders.json";
+
 impl PacketLogger for MysteryCRDSLogger {
     async fn finalize(&mut self) -> anyhow::Result<()> {
-        self.path.push("mystery.json");
+        self.path.push(FILENAME);
         let mut file = tokio::fs::File::create(&self.path)
             .await
             .context("could not open file fow writing")?;
