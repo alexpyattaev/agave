@@ -9,7 +9,7 @@ use {
     network_interface::{NetworkInterface, NetworkInterfaceConfig},
     std::{
         fs::File,
-        net::{IpAddr, SocketAddr, SocketAddrV4},
+        net::{IpAddr, SocketAddr},
         path::PathBuf,
         sync::atomic::AtomicBool,
         time::Duration,

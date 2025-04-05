@@ -1,20 +1,22 @@
 use {
     crate::{
-        bpf_controls::*, cluster_probes::Ports, gossip::*, turbine::TurbineLogger, WireProtocol,
+        bpf_controls::*,
+        cluster_probes::Ports,
+        gossip,
+        turbine::{self, TurbineLogger},
+        WireProtocol,
     },
-    anyhow::Context,
-    aya::maps::{Array, MapData, RingBuf},
-    clap::{Parser, Subcommand},
-    log::{error, info, warn},
+    clap::Subcommand,
+    log::{error, info},
     std::{
         io::Write,
         net::{IpAddr, Ipv4Addr},
-        ops::{ControlFlow, Range},
+        ops::ControlFlow,
         path::PathBuf,
         time::Duration,
     },
-    tokio::io::unix::AsyncFd,
 };
+
 #[derive(Debug, Subcommand)]
 pub enum MonitorCommand {
     LogMetadata {
@@ -55,7 +57,7 @@ pub async fn start_monitor(
     bpf_controls.allow_dst_ip(v4(ports.gossip.ip()))?;
     match command {
         MonitorCommand::LogGossipInvalidSenders => {
-            let mut logger = MysteryCRDSLogger::new(ports.shred_version, output.clone());
+            let mut logger = gossip::MysteryCRDSLogger::new(ports.shred_version, output.clone());
             bpf_controls.allow_dst_port(ports.gossip.port())?;
             process_packet_flow(&mut bpf_controls, &mut logger).await?;
 
@@ -76,19 +78,26 @@ pub async fn start_monitor(
 
                 info!("Turbine + Repair capture starting");
                 bpf_controls.allow_dst_port(turbine_port)?;
-                //bpf_controls.allow_dst_port(repair_port)?;
+                bpf_controls.allow_dst_port(repair_port)?;
                 process_packet_flow(&mut bpf_controls, &mut logger).await?;
             }
             WireProtocol::Repair => todo!(),
         },
         MonitorCommand::Bitrate { protocol } => match protocol {
             WireProtocol::Gossip => {
-                let mut monitor = GossipBitrateMonitor::new();
+                let mut monitor = gossip::BitrateMonitor::new();
                 bpf_controls.allow_dst_port(ports.gossip.port())?;
                 process_packet_flow(&mut bpf_controls, &mut monitor).await?;
             }
-            WireProtocol::Turbine => {}
-            WireProtocol::Repair => todo!(),
+            WireProtocol::Turbine => {
+                let turbine_port = ports.turbine.expect("Turbine port is required").port();
+                let repair_port = ports.repair.expect("Repair port is required").port();
+                let mut monitor = turbine::BitrateMonitor::new();
+                bpf_controls.allow_dst_port(turbine_port)?;
+                bpf_controls.allow_dst_port(repair_port)?;
+                process_packet_flow(&mut bpf_controls, &mut monitor).await?;
+            }
+            WireProtocol::Repair => todo!("Repair not yet supported"),
         },
         MonitorCommand::Capture {
             size_hint,

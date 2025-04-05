@@ -256,18 +256,18 @@ struct ShredCommonHeader {
 
 /// The data shred header has parent offset and flags
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
-struct DataShredHeader {
+pub struct DataShredHeader {
     parent_offset: u16,
-    flags: ShredFlags,
+    pub flags: ShredFlags,
     size: u16, // common shred header + data shred header + data
 }
 
 /// The coding shred header has FEC information
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
-struct CodingShredHeader {
-    num_data_shreds: u16,
-    num_coding_shreds: u16,
-    position: u16, // [0..num_coding_shreds)
+pub struct CodingShredHeader {
+    pub num_data_shreds: u16,
+    pub num_coding_shreds: u16,
+    pub position: u16, // [0..num_coding_shreds)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

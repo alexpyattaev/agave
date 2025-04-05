@@ -1,52 +1,17 @@
 use std::{
     f32,
     ops::ControlFlow,
-    sync::atomic::Ordering,
     time::{Duration, Instant},
 };
 
-use crate::{monitor::PacketLogger, storage::Monitor, ui};
-use crossbeam_channel::{Sender, TryRecvError};
+use crate::{monitor::PacketLogger, storage::Monitor, ui::*};
+use crossbeam_channel::Sender;
 use iocraft::prelude::*;
 use solana_gossip::{crds_data::CrdsData, crds_value::CrdsValue, protocol::Protocol};
 use solana_sanitize::Sanitize;
 
 use super::parse_gossip;
-pub type RateDisplayItems = Vec<(String, f32)>;
-struct GossipMonitorChannel(crossbeam_channel::Receiver<RateDisplayItems>);
-
-#[component]
-fn GossipMonitorMenu(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
-    let mut rates =
-        hooks.use_state::<Vec<(String, f32)>, _>(|| vec![("Waiting for data".to_owned(), 0.0)]);
-    let mut should_exit = hooks.use_state(|| false);
-    let chan = hooks.use_context::<GossipMonitorChannel>().0.clone();
-    hooks.use_future(async move {
-        loop {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            let pkt = match chan.try_recv() {
-                Ok(pkt) => pkt,
-                Err(TryRecvError::Empty) => continue,
-                Err(TryRecvError::Disconnected) => {
-                    should_exit.set(true);
-                    break;
-                }
-            };
-            let mut rates_guard = rates.write();
-            *rates_guard = pkt;
-        }
-    });
-    if should_exit.get() || crate::EXIT.load(Ordering::Relaxed) {
-        let mut system = hooks.use_context_mut::<SystemContext>();
-        system.exit();
-    }
-
-    element! {
-        ui::RateDisplay(rates:rates.read().clone(), units:"Mbps")
-    }
-}
-
-impl PacketLogger for GossipBitrateMonitor {
+impl PacketLogger for BitrateMonitor {
     fn handle_pkt(&mut self, wire_bytes: &[u8]) -> std::ops::ControlFlow<()> {
         let data = &wire_bytes[14 + 20 + 8..];
         let Ok(pkt) = parse_gossip(data) else {
@@ -64,7 +29,7 @@ impl PacketLogger for GossipBitrateMonitor {
             *last_report = Instant::now();
 
             fn row(l: &str, m: &mut Monitor) -> (String, f32) {
-                (l.to_owned(), m.rate_bps().unwrap_or(f32::NAN) / 1e6)
+                (l.to_owned(), m.rate_bps().unwrap_or(0.0) / 1e6)
             }
             let reports = vec![
                 row("All Gossip", &mut self.valid),
@@ -92,7 +57,7 @@ impl PacketLogger for GossipBitrateMonitor {
 }
 
 #[derive(Default)]
-pub struct GossipBitrateMonitor {
+pub struct BitrateMonitor {
     // All invalid packets
     invalid: Monitor,
     // All valid packets
@@ -116,7 +81,7 @@ pub struct GossipBitrateMonitor {
     last_report: Option<Instant>,
 }
 
-impl GossipBitrateMonitor {
+impl BitrateMonitor {
     pub fn new() -> Self {
         let (tx, rx) = crossbeam_channel::bounded(4);
         let me = Self {
@@ -126,8 +91,8 @@ impl GossipBitrateMonitor {
         };
         tokio::spawn(async move {
             let mut elem = element! {
-                ContextProvider(value: Context::owned(GossipMonitorChannel(rx))) {
-                    GossipMonitorMenu
+                ContextProvider(value: Context::owned(RatesMonitorChannel(rx))) {
+                    RatesMonitorMenu
                 }
             };
             elem.render_loop().await.expect("UI should exit cleanly");
