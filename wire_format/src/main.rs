@@ -5,9 +5,15 @@ use {
     clap::{Parser, Subcommand, ValueEnum},
     cluster_probes::{find_validator_ports, Ports},
     log::{error, info},
-    monitor::{start_monitor, MonitorCommand},
+    monitor::{detect_repair_shreds, start_monitor, MonitorCommand},
     network_interface::{NetworkInterface, NetworkInterfaceConfig},
-    std::{fs::File, net::SocketAddr, path::PathBuf, sync::atomic::AtomicBool, time::Duration},
+    std::{
+        fs::File,
+        net::{IpAddr, SocketAddr, SocketAddrV4},
+        path::PathBuf,
+        sync::atomic::AtomicBool,
+        time::Duration,
+    },
     turbine::validate_turbine,
 };
 
@@ -48,6 +54,14 @@ enum Direction {
     Both,
 }
 
+fn parse_port_range(port_range: &str) -> Result<(u16, u16), String> {
+    if let Some((start, end)) = solana_net_utils::parse_port_range(port_range) {
+        Ok((start, end))
+    } else {
+        Err("Invalid port range".to_string())
+    }
+}
+
 #[derive(Subcommand)]
 enum Commands {
     Discover {
@@ -57,6 +71,10 @@ enum Commands {
         #[arg(short, long, default_value = "120")]
         /// Timeout for discovery of turbine and repair ports. set to 0 to ony work with gossip
         discovery_timeout_sec: u64,
+
+        #[arg(short, long,  value_parser = parse_port_range, default_value = "8000-8020")]
+        /// Port range to consider when looking for repair RX port
+        repair_search_port_range: (u16, u16),
     },
     Monitor {
         /*  #[arg(short, long, value_enum, default_value_t=Direction::Inbound)]
@@ -93,21 +111,36 @@ async fn sig_handler() {
         }
     }
 }
+fn find_interface(ip: IpAddr) -> anyhow::Result<NetworkInterface> {
+    let network_interfaces = NetworkInterface::show()?;
+    Ok(network_interfaces
+        .iter()
+        .find(|itf| itf.addr.iter().any(|addr| addr.ip() == ip))
+        .ok_or(anyhow::anyhow!("No interface found with specified IP!"))?
+        .clone())
+}
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
-    solana_logger::setup_with_default("info");
+    solana_logger::setup_with_default("info,solana-metrics=error");
     tokio::spawn(sig_handler());
     let cli = Cli::parse();
     match cli.command {
         Commands::Discover {
             gossip_addr,
             discovery_timeout_sec,
+            repair_search_port_range,
         } => {
-            let ports =
+            let mut ports =
                 find_validator_ports(gossip_addr, Duration::from_secs(discovery_timeout_sec))
                     .await
                     .context("Lookup validator ports")?;
-            dbg!(&ports);
+            info!("Discovered via gossip: {:?}", &ports);
+            let bind_interface = find_interface(ports.gossip.ip())?;
+            let cand_ports =
+                ports.repair_candidates(repair_search_port_range.0..repair_search_port_range.1);
+            let repair_port =
+                detect_repair_shreds(bind_interface, &cand_ports, ports.gossip.ip()).await?;
+            ports.repair = repair_port.map(|p| SocketAddr::new(ports.gossip.ip(), p));
             let configfile = File::create(&cli.config)?;
             serde_json::to_writer_pretty(configfile, &ports)?;
             info!("Written ports to {:?}", &cli.config);
@@ -117,16 +150,13 @@ async fn main() -> Result<(), anyhow::Error> {
                 .context("Config file not found, create it with discover command")?;
             let ports: Ports =
                 serde_json::from_reader(configfile).context("Config file is invalid")?;
-            info!("Loaded ports from {:?}", &cli.config);
-            let bind_interface = {
-                let network_interfaces = NetworkInterface::show()?;
-                network_interfaces
-                    .iter()
-                    .find(|itf| itf.addr.iter().any(|addr| addr.ip() == ports.gossip.ip()))
-                    .ok_or(anyhow::anyhow!("No interface found with specified IP!"))?
-                    .clone()
-            };
+            info!("Loaded ports from {:?}: {:?}", &cli.config, &ports);
 
+            let bind_interface = find_interface(ports.gossip.ip())?;
+            // let cand_ports = ports.repair_candidates(8000..8010);
+            // let repair_port =
+            //     detect_repair_shreds(bind_interface, &cand_ports, ports.gossip.ip()).await?;
+            // dbg!(repair_port);
             let _ = std::fs::create_dir(&output);
             start_monitor(bind_interface, ports, command, output).await?;
         }

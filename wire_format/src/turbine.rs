@@ -14,11 +14,13 @@ use crate::{
     Stats,
 };
 use anyhow::Context;
+use libc::EILSEQ;
 use log::{debug, error, info};
 use pcap_file::pcapng::PcapNgReader;
 use pcap_file::pcapng::PcapNgWriter;
-use solana_ledger::shred::Shred;
-use solana_ledger::shred::ShredVariant;
+use solana_ledger::shred::{wire::get_shred_and_repair_nonce, Shred};
+use solana_ledger::shred::{wire::get_shred_size, ShredVariant};
+use solana_perf::packet::solana_packet;
 use tokio::{
     fs::File,
     io::{AsyncWriteExt, BufWriter},
@@ -273,7 +275,7 @@ pub struct TurbineLogger {
 }
 
 impl TurbineLogger {
-    pub async fn new(
+    pub async fn new_with_file_writer(
         mut output: PathBuf,
         turbine_port: u16,
         repair_port: u16,
@@ -301,25 +303,55 @@ impl TurbineLogger {
             writer: Some(jh),
         })
     }
+    pub fn new_with_channel(
+        turbine_port: u16,
+        repair_port: u16,
+    ) -> anyhow::Result<(Self, Receiver<Vec<u8>>)> {
+        let (tx, rx) = tokio::sync::mpsc::channel(1024 * 1024);
+        Ok((
+            TurbineLogger {
+                turbine_port,
+                repair_port,
+                num_captured: 0,
+                chan: Some(tx),
+                writer: None,
+            },
+            rx,
+        ))
+    }
+}
+
+fn detect_repair_nonce(data: &[u8]) -> Option<(&[u8], Option<u32>)> {
+    let shred_end = get_shred_size(data)?;
+    let shred = data.get(..shred_end)?;
+    let offset = data.len().checked_sub(4)?;
+    if offset < shred_end {
+        return Some((shred, None));
+    }
+    let nonce = <[u8; 4]>::try_from(data.get(offset..)?).ok()?;
+    let nonce = u32::from_le_bytes(nonce);
+    Some((shred, Some(nonce)))
 }
 
 impl PacketLogger for TurbineLogger {
     fn handle_pkt(&mut self, wire_bytes: &[u8]) -> std::ops::ControlFlow<()> {
-        let udp_hdr = &wire_bytes[(14 + 20)..(14 + 20 + 8)];
-        let dst_port = u16::from_be_bytes(udp_hdr[2..4].try_into().unwrap());
+        //let udp_hdr = &wire_bytes[(14 + 20)..(14 + 20 + 8)];
+        //let dst_port = u16::from_be_bytes(udp_hdr[2..4].try_into().unwrap());
         let data_slice = &wire_bytes[14 + 20 + 8..];
+        let Some((data_slice, nonce)) = detect_repair_nonce(data_slice) else {
+            return ControlFlow::Continue(());
+        };
+
         let pkt = match parse_turbine(data_slice) {
             Ok(pkt) => pkt,
             Err(_) => {
-                println!("WTF");
-                return ControlFlow::Break(());
-                //return ControlFlow::Continue(());
+                return ControlFlow::Continue(());
             }
         };
         if pkt.sanitize().is_err() {
             return ControlFlow::Continue(());
         }
-        let event_type = if dst_port == self.turbine_port {
+        let event_type = if nonce.is_none() {
             "SHRED_RX"
         } else {
             "REPAIR_RX"
@@ -351,12 +383,11 @@ impl PacketLogger for TurbineLogger {
     async fn finalize(&mut self) -> anyhow::Result<()> {
         // signal the writer that no more packets are coming
         drop(self.chan.take());
-        info!("Flushing file to disk...");
-        self.writer
-            .take()
-            .unwrap()
-            .await
-            .expect("Writer should not panic!")
+        if let Some(writer) = self.writer.take() {
+            info!("Flushing file to disk...");
+            writer.await.expect("Writer should not panic!")?;
+        }
+        Ok(())
     }
 }
 pub fn monitor_turbine(bind_ip: Ipv4Addr, port: u16, mut output: PathBuf) -> anyhow::Result<Stats> {
