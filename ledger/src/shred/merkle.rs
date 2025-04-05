@@ -64,7 +64,7 @@ type MerkleProofEntry = [u8; 20];
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ShredData {
     common_header: ShredCommonHeader,
-    data_header: DataShredHeader,
+    pub data_header: DataShredHeader,
     payload: Payload,
 }
 
@@ -77,7 +77,7 @@ pub struct ShredData {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ShredCode {
     common_header: ShredCommonHeader,
-    coding_header: CodingShredHeader,
+    pub coding_header: CodingShredHeader,
     payload: Payload,
 }
 

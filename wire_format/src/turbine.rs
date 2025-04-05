@@ -10,17 +10,15 @@ use std::{
 
 use crate::{
     monitor::PacketLogger,
-    storage::{fetch_dest, hexdump, DumbStorage, Monitor, WritePackets},
+    storage::{fetch_dest, hexdump, DumbStorage, WritePackets},
     Stats,
 };
 use anyhow::Context;
-use libc::EILSEQ;
 use log::{debug, error, info};
 use pcap_file::pcapng::PcapNgReader;
 use pcap_file::pcapng::PcapNgWriter;
-use solana_ledger::shred::{wire::get_shred_and_repair_nonce, Shred};
 use solana_ledger::shred::{wire::get_shred_size, ShredVariant};
-use solana_perf::packet::solana_packet;
+use solana_ledger::shred::{CodingShredHeader, Shred};
 use tokio::{
     fs::File,
     io::{AsyncWriteExt, BufWriter},
@@ -28,10 +26,11 @@ use tokio::{
     sync::mpsc::Sender,
 };
 
+mod speed_meter;
+pub use speed_meter::*;
+
 #[derive(Default)]
 struct TurbineInventory {
-    legacy_code: DumbStorage,
-    legacy_data: DumbStorage,
     merkle_code: DumbStorage,
     merkle_code_resigned: DumbStorage,
     merkle_data: DumbStorage,
@@ -42,8 +41,6 @@ impl TurbineInventory {
     fn try_retain(&mut self, _shred: &Shred, bytes: &[u8], size_hint: usize) -> bool {
         let variant = solana_ledger::shred::layout::get_shred_variant(bytes).unwrap();
         match variant {
-            ShredVariant::LegacyCode => self.legacy_code.try_retain(bytes, size_hint),
-            ShredVariant::LegacyData => self.legacy_data.try_retain(bytes, size_hint),
             ShredVariant::MerkleCode {
                 proof_size: _,
                 chained: _,
@@ -64,6 +61,7 @@ impl TurbineInventory {
                 chained: _,
                 resigned: false,
             } => self.merkle_data.try_retain(bytes, size_hint),
+            _ => false,
         }
     }
 
@@ -77,8 +75,6 @@ impl TurbineInventory {
                 )?;
             };
         }
-        write_thing!(legacy_data);
-        write_thing!(legacy_code);
         write_thing!(merkle_code);
         write_thing!(merkle_code_resigned);
         write_thing!(merkle_data);
@@ -113,6 +109,18 @@ fn parse_turbine(bytes: &[u8]) -> anyhow::Result<Shred> {
 
 fn serialize(pkt: &Shred) -> Vec<u8> {
     pkt.payload().to_vec()
+}
+
+fn get_coding_header(pkt: &Shred) -> Option<CodingShredHeader> {
+    match pkt {
+        Shred::ShredCode(shred_code) => match shred_code {
+            solana_ledger::shred::shred_code::ShredCode::Merkle(shred_code) => {
+                Some(shred_code.coding_header.clone())
+            }
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 pub fn capture_turbine(
@@ -282,7 +290,10 @@ impl TurbineLogger {
     ) -> anyhow::Result<Self> {
         output.push("time_log.csv");
         let (tx, rx) = tokio::sync::mpsc::channel(1024 * 1024);
-        let writer = BufWriter::with_capacity(64 * 1024 * 1024, File::create(&output).await?);
+        let mut writer = BufWriter::with_capacity(64 * 1024 * 1024, File::create(&output).await?);
+        writer
+            .write(b"event_type:slot_number:index:fec_index:shreds_in_batch:us_since_epoch\n")
+            .await?;
         async fn write_worker(
             mut writer: BufWriter<File>,
             mut rx: Receiver<Vec<u8>>,
@@ -335,11 +346,17 @@ fn detect_repair_nonce(data: &[u8]) -> Option<(&[u8], Option<u32>)> {
 
 impl PacketLogger for TurbineLogger {
     fn handle_pkt(&mut self, wire_bytes: &[u8]) -> std::ops::ControlFlow<()> {
-        //let udp_hdr = &wire_bytes[(14 + 20)..(14 + 20 + 8)];
-        //let dst_port = u16::from_be_bytes(udp_hdr[2..4].try_into().unwrap());
+        // let udp_hdr = &wire_bytes[(14 + 20)..(14 + 20 + 8)];
+        // let dst_port = u16::from_be_bytes(udp_hdr[2..4].try_into().unwrap());
+        // TODO: validate that repair packets are coming over repair port
         let data_slice = &wire_bytes[14 + 20 + 8..];
         let Some((data_slice, nonce)) = detect_repair_nonce(data_slice) else {
             return ControlFlow::Continue(());
+        };
+        let event_type = if nonce.is_none() {
+            "SHRED_RX"
+        } else {
+            "REPAIR_RX"
         };
 
         let pkt = match parse_turbine(data_slice) {
@@ -351,10 +368,10 @@ impl PacketLogger for TurbineLogger {
         if pkt.sanitize().is_err() {
             return ControlFlow::Continue(());
         }
-        let event_type = if nonce.is_none() {
-            "SHRED_RX"
-        } else {
-            "REPAIR_RX"
+        let coding_header = get_coding_header(&pkt);
+        let shreds_in_batch = match coding_header {
+            Some(ch) => ch.num_coding_shreds + ch.num_data_shreds,
+            None => 0,
         };
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -363,7 +380,7 @@ impl PacketLogger for TurbineLogger {
         let mut buf = Vec::with_capacity(128);
         write!(
             &mut buf,
-            "{event_type}:{slot}:{idx}:{fecidx}:{timestamp}\n",
+            "{event_type}:{slot}:{idx}:{fecidx}:{shreds_in_batch}:{timestamp}\n",
             slot = pkt.slot(),
             idx = pkt.index(),
             fecidx = pkt.fec_set_index(),
@@ -389,60 +406,4 @@ impl PacketLogger for TurbineLogger {
         }
         Ok(())
     }
-}
-pub fn monitor_turbine(bind_ip: Ipv4Addr, port: u16, mut output: PathBuf) -> anyhow::Result<Stats> {
-    let mut stats = Stats::default();
-
-    let mut rate: Monitor<1000> = Monitor::default();
-    let mut last_report = Instant::now();
-    let mut counter = Counter::default();
-    while !crate::EXIT.load(std::sync::atomic::Ordering::Relaxed) {
-        stats.captured += 1;
-        let data_slice = [1, 2, 3];
-
-        let pkt = match parse_turbine(&data_slice) {
-            Ok(pkt) => pkt,
-            Err(_) => {
-                continue;
-            }
-        };
-        if pkt.sanitize().is_err() {
-            continue;
-        }
-
-        if pkt.merkle_root().is_ok() {
-            counter.merkle_shreds += 1;
-        } else {
-            counter.legacy_shreds += 1;
-        }
-        if pkt.is_code() {
-            counter.coding_shreds += 1;
-        } else {
-            counter.data_shreds += 1;
-        }
-        counter.zero_bytes += data_slice.iter().filter(|&e| *e == 0).count();
-        counter.total_bytes += data_slice.len();
-        rate.push(data_slice.len());
-        stats.valid += 1;
-        if last_report.elapsed() > Duration::from_millis(1000) {
-            last_report = Instant::now();
-            println!("{}: {:?}", last_report.elapsed().as_secs(), counter);
-            let rate = rate.rate_pps().unwrap_or(0.0);
-            println!("Turbine data rate is {:?} pps", rate);
-            println!(
-                "Turbine zeros rate is {}/{}",
-                counter.zero_bytes, counter.total_bytes
-            );
-            println!(
-                "Merkle:{} Legacy: {} Coding: {} Data: {}",
-                counter.merkle_shreds,
-                counter.legacy_shreds,
-                counter.coding_shreds,
-                counter.data_shreds
-            );
-        }
-    }
-    // Ack the command to exit the capture
-    crate::EXIT.store(false, std::sync::atomic::Ordering::Relaxed);
-    Ok(stats)
 }

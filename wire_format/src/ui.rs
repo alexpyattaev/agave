@@ -1,5 +1,6 @@
-use std::time::Duration;
+use std::{collections::VecDeque, sync::atomic::Ordering, time::Duration};
 
+use crossbeam_channel::TryRecvError;
 use iocraft::prelude::*;
 
 #[derive(Debug, Props)]
@@ -10,6 +11,7 @@ where
 {
     pub max_val: T,
     pub val: T,
+    pub label_width: iocraft::Size,
     pub units: &'static str,
     pub label: String,
 }
@@ -22,6 +24,7 @@ where
     fn default() -> Self {
         Self {
             max_val: T::from(100),
+            label_width: 0.into(),
             val: T::from(0),
             units: r"%",
             label: "".to_owned(),
@@ -41,7 +44,7 @@ where
     let color = if pos < max { Color::Green } else { Color::Red };
     element! {
         View {
-            View(padding: 1) {
+            View(padding: 1, width:props.label_width) {
                             Text(content: format!("{}", props.label))
                         }
             View(border_style: BorderStyle::Round, border_color: Color::Blue, width: 60) {
@@ -72,6 +75,7 @@ impl Default for RateDisplayProps {
 #[component]
 pub fn RateDisplay(props: &RateDisplayProps) -> impl Into<AnyElement<'static>> {
     let rates = props.rates.clone();
+    let max_label_chars = rates.iter().map(|(l, _)| l.len()).max().unwrap_or(0) as u32;
     element! {
         View(border_style: BorderStyle::Round, border_color: Color::Cyan,
                         flex_direction: FlexDirection::Column
@@ -80,6 +84,7 @@ pub fn RateDisplay(props: &RateDisplayProps) -> impl Into<AnyElement<'static>> {
             #(rates.into_iter().enumerate().map(|(id,(n,r))|element!{
             BarIndicator<f32>(
                 key: id,
+                label_width: max_label_chars+2,
                 label:n, max_val:props.max_val, units:props.units,
                                 val:r
                             )
@@ -234,5 +239,59 @@ async fn MainMenu(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         HlButton( label:"test1", has_focus: focus == 2, handler:|_|{println!("waa3");})
         //FormField(label: "Last Name", value: last_name, has_focus: focus == 2)
         }
+    }
+}
+
+pub type RateDisplayItems = Vec<(String, f32)>;
+pub struct RatesMonitorChannel(pub crossbeam_channel::Receiver<RateDisplayItems>);
+
+#[component]
+pub fn RatesMonitorMenu(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+    let mut rates =
+        hooks.use_state::<Vec<(String, f32)>, _>(|| vec![("Waiting for data".to_owned(), 0.0)]);
+    let mut should_exit = hooks.use_state(|| false);
+    let mut max_val = hooks.use_state(|| {
+        let mut vv = VecDeque::<u32>::new();
+        vv.push_back(1000);
+        vv
+    });
+
+    let chan = hooks.use_context::<RatesMonitorChannel>().0.clone();
+    hooks.use_future(async move {
+        loop {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let pkt = match chan.try_recv() {
+                Ok(pkt) => pkt,
+                Err(TryRecvError::Empty) => continue,
+                Err(TryRecvError::Disconnected) => {
+                    should_exit.set(true);
+                    break;
+                }
+            };
+            let maxval = pkt.iter().map(|(_, v)| *v as u32).max().unwrap_or(0);
+            {
+                let mut max_val = max_val.write();
+                max_val.push_back(maxval);
+                if max_val.len() > 5 {
+                    max_val.pop_front();
+                }
+            }
+            let mut rates_guard = rates.write();
+            *rates_guard = pkt;
+        }
+    });
+    if should_exit.get() || crate::EXIT.load(Ordering::Relaxed) {
+        let mut system = hooks.use_context_mut::<SystemContext>();
+        system.exit();
+    }
+    let smooth_max = match max_val.read().iter().max().cloned().unwrap() {
+        0..=10 => 10,
+        11..=100 => 100,
+        101..=1000 => 1000,
+        _ => 10000,
+    };
+
+    element! {
+        RateDisplay(rates:rates.read().clone(), units:"Mbps", max_val:smooth_max as f32)
     }
 }

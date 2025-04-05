@@ -6,8 +6,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use pcap_file::pcapng::blocks::enhanced_packet::EnhancedPacketBlock;
 use pcap_file::pcapng::blocks::interface_description::InterfaceDescriptionBlock;
-use pcap_file::pcapng::blocks::simple_packet::SimplePacketBlock;
-use pcap_file::pcapng::{PcapNgBlock, PcapNgWriter};
+use pcap_file::pcapng::PcapNgWriter;
 
 pub trait WritePackets {
     fn write_packets<W: std::io::Write>(
