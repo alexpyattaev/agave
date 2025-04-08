@@ -1515,9 +1515,17 @@ mod test {
     }
 
     #[test]
-    fn test_merkle_tree_round_trip() {
+    fn test_merkle_tree_round_trip_small() {
         let mut rng = rand::thread_rng();
-        for size in 1..=143 {
+        for size in 1..=110 {
+            run_merkle_tree_round_trip(&mut rng, size);
+        }
+    }
+
+    #[test]
+    fn test_merkle_tree_round_trip_big() {
+        let mut rng = rand::thread_rng();
+        for size in 110..=143 {
             run_merkle_tree_round_trip(&mut rng, size);
         }
     }
