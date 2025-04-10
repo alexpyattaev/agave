@@ -4,6 +4,7 @@
 use {
     aya_ebpf::{
         bindings::xdp_action,
+        check_bounds_signed,
         macros::{map, xdp},
         maps::{Array, RingBuf},
         programs::XdpContext,
@@ -110,8 +111,9 @@ fn try_xdpdump(ctx: &XdpContext) -> Result<u32, ()> {
         dst_ip.to_bits(),
         dst_port
     );
+    const MTU: usize = 1500;
     const U16_SIZE: usize = mem::size_of::<u16>();
-    const SIZE: usize = U16_SIZE + 1500;
+    const SIZE: usize = U16_SIZE + MTU;
 
     match RING_BUF.reserve::<[u8; SIZE]>(0) {
         Some(mut event) => {
@@ -124,20 +126,41 @@ fn try_xdpdump(ctx: &XdpContext) -> Result<u32, ()> {
             }
 
             unsafe {
+                let dst_buf = event.as_mut_ptr() as *mut u8;
                 // we first save into the buffer the packet length.
                 // Useful on userspace to retrieve the correct amount of bytes and not some bytes not part of the packet.
-                ptr::write_unaligned(event.as_mut_ptr() as *mut _, len as u16);
+                ptr::write_unaligned(dst_buf as *mut u16, len as u16);
+                //let dst_buf = dst_buf.byte_add(U16_SIZE);
 
-                // We copy the entire content of the packet to the buffer (L2 to L7)
-                match aya_ebpf::helpers::gen::bpf_xdp_load_bytes(
-                    ctx.ctx,
-                    0,
-                    event.as_mut_ptr().byte_add(U16_SIZE) as *mut _,
-                    len as u32,
-                ) {
-                    0 => event.submit(0),
-                    _ => event.discard(0),
+                // We copy the entire content of the packet to the remaining part of the buffer
+                let data_start = ctx.data();
+                let data_end = ctx.data_end();
+                let data_len = data_end - data_start;
+                if data_len > MTU {
+                    event.discard(0);
+                    return Ok(xdp_action::XDP_PASS);
                 }
+                for read_offset in 0..MTU {
+                    let write_offset = read_offset + 2;
+                    if data_start + read_offset > data_end {
+                        break;
+                    }
+                    if dst_buf as usize + write_offset > SIZE {
+                        break;
+                    }
+                    *dst_buf.byte_add(write_offset) = *((data_start + read_offset) as *const u8);
+                }
+
+                // if data_len > MTU {
+                //     event.discard(0);
+                //     return Ok(xdp_action::XDP_PASS);
+                // }
+                // if data_start + data_len > data_end {
+                //     event.discard(0);
+                //     return Ok(xdp_action::XDP_PASS);
+                // }
+                // dst_buf.copy_from_nonoverlapping(data_start as *const u8, data_len);
+                event.submit(0);
             }
         }
         None => {
