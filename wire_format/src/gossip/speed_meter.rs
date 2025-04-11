@@ -13,7 +13,7 @@ use solana_sanitize::Sanitize;
 use super::parse_gossip;
 impl PacketLogger for BitrateMonitor {
     fn handle_pkt(&mut self, wire_bytes: &[u8]) -> std::ops::ControlFlow<()> {
-        let data = &wire_bytes[14 + 20 + 8..];
+        let data = &wire_bytes[20 + 8..];
         let Ok(pkt) = parse_gossip(data) else {
             self.invalid.push(data.len());
             return ControlFlow::Continue(());
