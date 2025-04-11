@@ -28,21 +28,13 @@ impl PacketLogger for BitrateMonitor {
         if last_report.elapsed() > Duration::from_millis(500) {
             *last_report = Instant::now();
 
-            fn row(l: &str, m: &mut Monitor) -> (String, f32) {
-                (l.to_owned(), m.rate_bps().unwrap_or(0.0) / 1e6)
-            }
-            let reports = vec![
-                row("All Gossip", &mut self.valid),
-                row("Junk", &mut self.invalid),
-                row("Prune", &mut self.prune),
-                row("Ping & Pong", &mut self.pingpong),
-                row("CRDS: ContactInfo", &mut self.crds_contact_info),
-                row("CRDS: Vote", &mut self.crds_vote),
-                row("CRDS: EpochSlots", &mut self.crds_epoch_slots),
-                row("CRDS: NodeInstance", &mut self.crds_node_instance),
-            ];
-            if self.channel.as_ref().unwrap().try_send(reports).is_err() {
-                return ControlFlow::Break(());
+            if self.report_metrics {
+                self.send_metrics();
+            } else {
+                let reports = self.feed_gui();
+                if self.channel.as_ref().unwrap().try_send(reports).is_err() {
+                    return ControlFlow::Break(());
+                }
             }
         }
         ControlFlow::Continue(())
@@ -75,30 +67,88 @@ pub struct BitrateMonitor {
     crds_contact_info: Monitor,
     crds_epoch_slots: Monitor,
     crds_node_instance: Monitor,
+    crds_other: Monitor,
     crds_vote: Monitor,
 
     channel: Option<Sender<RateDisplayItems>>,
     last_report: Option<Instant>,
+    report_metrics: bool,
 }
 
 impl BitrateMonitor {
-    pub fn new() -> Self {
+    pub fn new(report_metrics: bool) -> Self {
         let (tx, rx) = crossbeam_channel::bounded(4);
         let me = Self {
             channel: Some(tx),
             last_report: Some(Instant::now()),
+            report_metrics,
             ..Default::default()
         };
-        tokio::spawn(async move {
-            let mut elem = element! {
-                ContextProvider(value: Context::owned(RatesMonitorChannel(rx))) {
-                    RatesMonitorMenu
-                }
-            };
-            elem.render_loop().await.expect("UI should exit cleanly");
-        });
+        if !report_metrics {
+            tokio::spawn(async move {
+                let mut elem = element! {
+                    ContextProvider(value: Context::owned(RatesMonitorChannel(rx))) {
+                        RatesMonitorMenu
+                    }
+                };
+                elem.render_loop().await.expect("UI should exit cleanly");
+            });
+        }
 
         me
+    }
+
+    fn send_metrics(&mut self) {
+        macro_rules! bps {
+            ($x:ident) => {
+                (self.$x.rate_bps().unwrap_or_default() as f64)
+            };
+        }
+        solana_metrics::datapoint_info!(
+            "gossip_bitrates",
+            ("crds_contact_info", bps!(crds_contact_info), f64),
+            ("crds_epoch_slots", bps!(crds_epoch_slots), f64),
+            ("crds_node_instance", bps!(crds_node_instance), f64),
+            ("crds_other", bps!(crds_other), f64),
+            ("crds_vote", bps!(crds_vote), f64),
+            ("junk", bps!(invalid), f64),
+            ("pingpong", bps!(pingpong), f64),
+            ("prune", bps!(prune), f64),
+            ("valid", bps!(valid), f64),
+        );
+        macro_rules! pps {
+            ($x:ident) => {
+                (self.$x.rate_pps().unwrap_or_default() as f64)
+            };
+        }
+        solana_metrics::datapoint_info!(
+            "gossip_packet_rates",
+            ("crds_contact_info", pps!(crds_contact_info), f64),
+            ("crds_epoch_slots", pps!(crds_epoch_slots), f64),
+            ("crds_node_instance", pps!(crds_node_instance), f64),
+            ("crds_other", pps!(crds_other), f64),
+            ("crds_vote", pps!(crds_vote), f64),
+            ("junk", pps!(invalid), f64),
+            ("pingpong", pps!(pingpong), f64),
+            ("prune", pps!(prune), f64),
+            ("valid", pps!(valid), f64),
+        );
+    }
+    fn feed_gui(&mut self) -> Vec<(String, f32)> {
+        fn row(l: &str, m: &mut Monitor) -> (String, f32) {
+            (l.to_owned(), m.rate_bps().unwrap_or(0.0) / 1e6)
+        }
+        vec![
+            row("All Gossip", &mut self.valid),
+            row("Junk", &mut self.invalid),
+            row("Prune", &mut self.prune),
+            row("Ping & Pong", &mut self.pingpong),
+            row("CRDS: ContactInfo", &mut self.crds_contact_info),
+            row("CRDS: Vote", &mut self.crds_vote),
+            row("CRDS: EpochSlots", &mut self.crds_epoch_slots),
+            row("CRDS: NodeInstance", &mut self.crds_node_instance),
+            row("CRDS: Other", &mut self.crds_other),
+        ]
     }
     fn try_retain(&mut self, pkt: &Protocol, bytes: &[u8]) {
         match pkt {
@@ -141,7 +191,9 @@ impl BitrateMonitor {
             CrdsData::NodeInstance(_) => {
                 self.crds_node_instance.push(ser.len());
             }
-            _ => {}
+            _ => {
+                self.crds_other.push(ser.len());
+            }
         }
     }
 }

@@ -25,25 +25,71 @@ pub struct BitrateMonitor {
 
     channel: Option<Sender<RateDisplayItems>>,
     last_report: Option<Instant>,
+    report_metrics: bool,
 }
 impl BitrateMonitor {
-    pub fn new() -> Self {
+    pub fn new(report_metrics: bool) -> Self {
         let (tx, rx) = crossbeam_channel::bounded(4);
         let me = Self {
             channel: Some(tx),
             last_report: Some(Instant::now()),
+            report_metrics,
             ..Default::default()
         };
-        tokio::spawn(async move {
-            let mut elem = element! {
-                ContextProvider(value: Context::owned(RatesMonitorChannel(rx))) {
-                    RatesMonitorMenu
-                }
-            };
-            elem.render_loop().await.expect("UI should exit cleanly");
-        });
+        if !report_metrics {
+            tokio::spawn(async move {
+                let mut elem = element! {
+                    ContextProvider(value: Context::owned(RatesMonitorChannel(rx))) {
+                        RatesMonitorMenu
+                    }
+                };
+                elem.render_loop().await.expect("UI should exit cleanly");
+            });
+        }
 
         me
+    }
+    fn feed_gui(&mut self) -> Vec<(String, f32)> {
+        fn row(l: &str, m: &mut Monitor) -> (String, f32) {
+            (l.to_owned(), m.rate_bps().unwrap_or(0.0) / 1e6)
+        }
+        vec![
+            row("All turbine", &mut self.turbine),
+            row("Junk", &mut self.invalid),
+            row("All repairs", &mut self.repairs),
+            row("Coding shreds", &mut self.coding_shreds),
+            row("Data shreds", &mut self.data_shreds),
+            row("Zero bytes", &mut self.zero_bytes),
+        ]
+    }
+    fn send_metrics(&mut self) {
+        macro_rules! bps {
+            ($x:ident) => {
+                (self.$x.rate_bps().unwrap_or_default() as f64)
+            };
+        }
+        solana_metrics::datapoint_info!(
+            "turbine_bitrates",
+            ("everything", bps!(turbine), f64),
+            ("junk", bps!(invalid), f64),
+            ("repairs", bps!(repairs), f64),
+            ("coding", bps!(coding_shreds), f64),
+            ("data", bps!(data_shreds), f64),
+            ("zero_bytes", bps!(zero_bytes), f64),
+        );
+        macro_rules! pps {
+            ($x:ident) => {
+                (self.$x.rate_pps().unwrap_or_default() as f64)
+            };
+        }
+        solana_metrics::datapoint_info!(
+            "turbine_packet_rates",
+            ("everything", pps!(turbine), f64),
+            ("junk", pps!(invalid), f64),
+            ("repairs", pps!(repairs), f64),
+            ("coding", pps!(coding_shreds), f64),
+            ("data", pps!(data_shreds), f64),
+        );
     }
 }
 
@@ -82,19 +128,13 @@ impl PacketLogger for BitrateMonitor {
         if last_report.elapsed() > Duration::from_millis(500) {
             *last_report = Instant::now();
 
-            fn row(l: &str, m: &mut Monitor) -> (String, f32) {
-                (l.to_owned(), m.rate_bps().unwrap_or(0.0) / 1e6)
-            }
-            let reports = vec![
-                row("All turbine", &mut self.turbine),
-                row("Junk", &mut self.invalid),
-                row("All repairs", &mut self.repairs),
-                row("Coding shreds", &mut self.coding_shreds),
-                row("Data shreds", &mut self.data_shreds),
-                row("Zero bytes", &mut self.zero_bytes),
-            ];
-            if self.channel.as_ref().unwrap().try_send(reports).is_err() {
-                return ControlFlow::Break(());
+            if self.report_metrics {
+                self.send_metrics();
+            } else {
+                let reports = self.feed_gui();
+                if self.channel.as_ref().unwrap().try_send(reports).is_err() {
+                    return ControlFlow::Break(());
+                }
             }
         }
         ControlFlow::Continue(())

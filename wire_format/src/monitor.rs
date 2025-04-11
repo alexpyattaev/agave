@@ -15,6 +15,7 @@ use {
         path::PathBuf,
         time::Duration,
     },
+    wf_common::Flags,
 };
 
 #[derive(Debug, Subcommand)]
@@ -25,6 +26,8 @@ pub enum MonitorCommand {
     },
     LogGossipInvalidSenders,
     Bitrate {
+        #[arg(short, long)]
+        report_metrics: bool,
         #[arg()]
         protocol: WireProtocol,
     },
@@ -42,6 +45,7 @@ pub enum MonitorCommand {
 
 pub async fn start_monitor(
     interface: network_interface::NetworkInterface,
+    bpf_flags: Flags,
     ports: Ports,
     command: MonitorCommand,
     output: PathBuf,
@@ -50,6 +54,7 @@ pub async fn start_monitor(
     // return Ok(());
     let mut bpf_controls = BpfControls::new(&interface.name)?;
     info!("Monitor set up on interface {}", &interface.name);
+    bpf_controls.set_flags(bpf_flags)?;
     // Allow all senders
     bpf_controls.allow_src_ip(Ipv4Addr::UNSPECIFIED)?;
     bpf_controls.allow_src_port(0)?;
@@ -83,16 +88,19 @@ pub async fn start_monitor(
             }
             WireProtocol::Repair => todo!(),
         },
-        MonitorCommand::Bitrate { protocol } => match protocol {
+        MonitorCommand::Bitrate {
+            protocol,
+            report_metrics,
+        } => match protocol {
             WireProtocol::Gossip => {
-                let mut monitor = gossip::BitrateMonitor::new();
+                let mut monitor = gossip::BitrateMonitor::new(report_metrics);
                 bpf_controls.allow_dst_port(ports.gossip.port())?;
                 process_packet_flow(&mut bpf_controls, &mut monitor).await?;
             }
             WireProtocol::Turbine => {
                 let turbine_port = ports.turbine.expect("Turbine port is required").port();
                 let repair_port = ports.repair.expect("Repair port is required").port();
-                let mut monitor = turbine::BitrateMonitor::new();
+                let mut monitor = turbine::BitrateMonitor::new(report_metrics);
                 bpf_controls.allow_dst_port(turbine_port)?;
                 bpf_controls.allow_dst_port(repair_port)?;
                 process_packet_flow(&mut bpf_controls, &mut monitor).await?;
@@ -114,6 +122,7 @@ pub async fn start_monitor(
 
 pub async fn detect_repair_shreds(
     interface: network_interface::NetworkInterface,
+    bpf_flags: Flags,
     port_range: &[u16],
     dst_ip: IpAddr,
 ) -> anyhow::Result<Option<u16>> {
@@ -122,6 +131,7 @@ pub async fn detect_repair_shreds(
     // Allow all senders
     bpf_controls.allow_src_ip(Ipv4Addr::UNSPECIFIED)?;
     bpf_controls.allow_src_port(0)?;
+    bpf_controls.set_flags(bpf_flags)?;
     let (mut logger, mut rx) = TurbineLogger::new_with_channel(0, 0)?;
     let timeout = Duration::from_secs(1);
     let mut result = 0;
