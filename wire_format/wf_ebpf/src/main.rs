@@ -167,13 +167,13 @@ fn try_xdpdump(ctx: &XdpContext) -> Result<u32, ()> {
                 // if it is not present
                 let data_start = core::hint::black_box(ctx.data());
                 let data_end = core::hint::black_box(ctx.data_end());
+                let mut write_offset = U16_SIZE;
                 for read_offset in ip_header_offset..MTU {
-                    let write_offset = read_offset + 2;
-
                     if data_start + read_offset + 1 > data_end {
                         break;
                     }
                     *dst_buf.byte_add(write_offset) = *((data_start + read_offset) as *const u8);
+                    write_offset += 1;
                 }
                 event.submit(0);
             }

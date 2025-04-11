@@ -346,10 +346,10 @@ fn detect_repair_nonce(data: &[u8]) -> Option<(&[u8], Option<u32>)> {
 
 impl PacketLogger for TurbineLogger {
     fn handle_pkt(&mut self, wire_bytes: &[u8]) -> std::ops::ControlFlow<()> {
-        // let udp_hdr = &wire_bytes[(14 + 20)..(14 + 20 + 8)];
+        // let udp_hdr = &wire_bytes[20..(20 + 8)];
         // let dst_port = u16::from_be_bytes(udp_hdr[2..4].try_into().unwrap());
         // TODO: validate that repair packets are coming over repair port
-        let data_slice = &wire_bytes[14 + 20 + 8..];
+        let data_slice = &wire_bytes[20 + 8..];
         let Some((data_slice, nonce)) = detect_repair_nonce(data_slice) else {
             return ControlFlow::Continue(());
         };
