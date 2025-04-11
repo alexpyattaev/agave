@@ -17,6 +17,7 @@ use solana_gossip::gossip_service::discover;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Ports {
+    pub pubkey: Pubkey,
     pub shred_version: u16,
     pub gossip: SocketAddr,
     pub repair: Option<SocketAddr>,
@@ -53,6 +54,7 @@ pub async fn find_validator_ports(
         .context("Shred version not provided by entrypoint!")?;
     if timeout.is_zero() {
         let ports = Ports {
+            pubkey: Pubkey::default(),
             shred_version,
             turbine: None,
             repair: None,
@@ -95,6 +97,7 @@ pub async fn find_validator_ports(
     let tpu_vote = me.tpu(solana_gossip::contact_info::Protocol::UDP);
     let ports = Ports {
         shred_version,
+        pubkey: *me.pubkey(),
         turbine,
         repair: None,
         serve_repair,
