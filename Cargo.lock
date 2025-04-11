@@ -14255,6 +14255,7 @@ dependencies = [
  "solana-gossip",
  "solana-ledger",
  "solana-logger",
+ "solana-metrics",
  "solana-net-utils",
  "solana-perf",
  "solana-pubkey",

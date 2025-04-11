@@ -13,7 +13,7 @@ use {
         ops::DerefMut,
     },
     tokio::io::unix::AsyncFd,
-    wf_common::FILTER_LEN,
+    wf_common::{Flags, FILTER_LEN},
 };
 #[derive(Clone, Copy, Debug, derive_more::Deref, derive_more::DerefMut, derive_more::From)]
 pub struct PortPod(Option<u16>);
@@ -31,9 +31,15 @@ pub struct BpfControls {
     dst_port: Array<MapData, PortPod>,
     src_ip: Array<MapData, IpPod>,
     dst_ip: Array<MapData, IpPod>,
+    flags: Array<MapData, Flags>,
 }
 
 impl BpfControls {
+    pub fn set_flags(&mut self, flags: Flags) -> anyhow::Result<()> {
+        self.flags.set(0, flags, 0)?;
+        Ok(())
+    }
+
     fn allow<T, V>(map: &mut Array<MapData, T>, new: V) -> anyhow::Result<()>
     where
         T: aya::Pod + DerefMut<Target = Option<V>>,
@@ -123,12 +129,14 @@ impl BpfControls {
         let dst_ip = Array::try_from(bpf.take_map("ALLOW_DST_IP").unwrap()).unwrap();
         let src_ip = Array::try_from(bpf.take_map("ALLOW_SRC_IP").unwrap()).unwrap();
         let rx_ring = RingBuf::try_from(bpf.take_map("RING_BUF").unwrap()).unwrap();
+        let flags = Array::try_from(bpf.take_map("FLAGS").unwrap()).unwrap();
         Ok(BpfControls {
             _bpf: bpf,
             rx_ring: AsyncFd::new(rx_ring)?,
             src_port: src_ports,
             dst_port: dst_ports,
             src_ip,
+            flags,
             dst_ip,
         })
     }

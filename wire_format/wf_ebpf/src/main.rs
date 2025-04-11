@@ -4,7 +4,6 @@
 use {
     aya_ebpf::{
         bindings::xdp_action,
-        check_bounds_signed,
         macros::{map, xdp},
         maps::{Array, RingBuf},
         programs::XdpContext,
@@ -16,9 +15,10 @@ use {
         ip::{IpProto, Ipv4Hdr},
         udp::UdpHdr,
     },
-    wf_common::FILTER_LEN,
+    wf_common::{Flags, FILTER_LEN},
 };
 
+const GRE_HDR_LEN: usize = 4;
 #[map]
 static ALLOW_DST_PORTS: Array<Option<u16>> = Array::with_max_entries(FILTER_LEN, 0);
 #[map]
@@ -29,6 +29,8 @@ static ALLOW_SRC_IP: Array<Option<Ipv4Addr>> = Array::with_max_entries(FILTER_LE
 static ALLOW_SRC_PORTS: Array<Option<u16>> = Array::with_max_entries(FILTER_LEN, 0);
 #[map]
 static RING_BUF: RingBuf = RingBuf::with_byte_size(16 * 1024 * 1024u32, 0);
+#[map]
+static FLAGS: Array<Flags> = Array::with_max_entries(1, 0);
 
 #[xdp]
 pub fn wf_ebpf(ctx: XdpContext) -> u32 {
@@ -77,6 +79,13 @@ fn should_capture(src_ip: Ipv4Addr, dst_ip: Ipv4Addr, src_port: u16, dst_port: u
         && has_entry(&ALLOW_SRC_PORTS, src_port, 0)
 }
 
+fn parse_ip_header(ipv4hdr: *const Ipv4Hdr) -> (Ipv4Addr, Ipv4Addr, IpProto) {
+    let src_ip = Ipv4Addr::from_bits(unsafe { u32::from_be((*ipv4hdr).src_addr) });
+    let dst_ip = Ipv4Addr::from_bits(unsafe { u32::from_be((*ipv4hdr).dst_addr) });
+    let ip_proto = unsafe { (*ipv4hdr).proto };
+    (src_ip, dst_ip, ip_proto)
+}
+
 fn try_xdpdump(ctx: &XdpContext) -> Result<u32, ()> {
     // Search for IPv4 packets only
     let ethhdr: *const EthHdr = unsafe { ptr_at(&ctx, 0)? };
@@ -85,17 +94,39 @@ fn try_xdpdump(ctx: &XdpContext) -> Result<u32, ()> {
         _ => return Ok(xdp_action::XDP_PASS),
     }
 
-    let ipv4hdr: *const Ipv4Hdr = unsafe { ptr_at(&ctx, EthHdr::LEN)? };
+    let mut ip_header_offset = EthHdr::LEN;
+    let mut ipv4hdr: *const Ipv4Hdr = unsafe { ptr_at(&ctx, ip_header_offset)? };
+    let flags = FLAGS.get(0).cloned().unwrap_or_default();
+    let (src_ip, dst_ip, ip_proto) = parse_ip_header(ipv4hdr);
 
-    // Search for UDP only
-    match unsafe { (*ipv4hdr).proto } {
-        IpProto::Udp => {}
-        _ => return Ok(xdp_action::XDP_PASS),
-    }
+    let (src_ip, dst_ip) = match (ip_proto, flags) {
+        (IpProto::Udp, Flags::Default) | (IpProto::Udp, Flags::StripGre) => (src_ip, dst_ip),
+        (IpProto::Gre, Flags::OnlyGre) => {
+            ip_header_offset = EthHdr::LEN + Ipv4Hdr::LEN + GRE_HDR_LEN;
 
-    let src_ip = Ipv4Addr::from_bits(unsafe { u32::from_be((*ipv4hdr).src_addr) });
-    let dst_ip = Ipv4Addr::from_bits(unsafe { u32::from_be((*ipv4hdr).dst_addr) });
-    let udphdr: *const UdpHdr = unsafe { ptr_at(&ctx, EthHdr::LEN + Ipv4Hdr::LEN)? };
+            ipv4hdr = unsafe { ptr_at(&ctx, ip_header_offset)? };
+            let (src_ip, dst_ip, ip_proto) = parse_ip_header(ipv4hdr);
+            if !matches!(ip_proto, IpProto::Udp) {
+                return Ok(xdp_action::XDP_PASS);
+            }
+            (src_ip, dst_ip)
+        }
+        (IpProto::Gre, Flags::StripGre) => {
+            ip_header_offset = EthHdr::LEN + Ipv4Hdr::LEN + GRE_HDR_LEN;
+
+            ipv4hdr = unsafe { ptr_at(&ctx, ip_header_offset)? };
+            let (src_ip, dst_ip, ip_proto) = parse_ip_header(ipv4hdr);
+            if !matches!(ip_proto, IpProto::Udp) {
+                return Ok(xdp_action::XDP_PASS);
+            }
+            (src_ip, dst_ip)
+        }
+        _ => {
+            return Ok(xdp_action::XDP_PASS);
+        }
+    };
+
+    let udphdr: *const UdpHdr = unsafe { ptr_at(&ctx, ip_header_offset + Ipv4Hdr::LEN)? };
     let src_port = unsafe { u16::from_be((*udphdr).source) };
     let dst_port = unsafe { u16::from_be((*udphdr).dest) };
 
@@ -136,7 +167,7 @@ fn try_xdpdump(ctx: &XdpContext) -> Result<u32, ()> {
                 // if it is not present
                 let data_start = core::hint::black_box(ctx.data());
                 let data_end = core::hint::black_box(ctx.data_end());
-                for read_offset in 0..MTU {
+                for read_offset in ip_header_offset..MTU {
                     let write_offset = read_offset + 2;
 
                     if data_start + read_offset + 1 > data_end {

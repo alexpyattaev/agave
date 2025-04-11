@@ -15,6 +15,7 @@ use {
         time::Duration,
     },
     turbine::validate_turbine,
+    wf_common::Flags,
 };
 
 mod bpf_controls;
@@ -38,10 +39,16 @@ enum WireProtocol {
 struct Cli {
     #[arg(short, long)]
     verbose: bool,
-    #[command(subcommand)]
-    command: Commands,
+    #[arg(short, long)]
+    // Ignores all non-GRE traffic.
+    only_gre: bool,
+    #[arg(short, long)]
+    // Strips the GRE header in the incoming packets and merges them into common flow.
+    strip_gre: bool,
     #[arg(short, long, default_value = ".wire_format.json")]
     config: PathBuf,
+    #[command(subcommand)]
+    command: Commands,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
@@ -124,6 +131,13 @@ async fn main() -> Result<(), anyhow::Error> {
     solana_logger::setup_with_default("info,solana-metrics=error");
     tokio::spawn(sig_handler());
     let cli = Cli::parse();
+    let flags = if cli.strip_gre {
+        Flags::StripGre
+    } else if cli.only_gre {
+        Flags::OnlyGre
+    } else {
+        Flags::Default
+    };
     match cli.command {
         Commands::Discover {
             gossip_addr,
@@ -139,7 +153,7 @@ async fn main() -> Result<(), anyhow::Error> {
             let cand_ports =
                 ports.repair_candidates(repair_search_port_range.0..repair_search_port_range.1);
             let repair_port =
-                detect_repair_shreds(bind_interface, &cand_ports, ports.gossip.ip()).await?;
+                detect_repair_shreds(bind_interface, flags, &cand_ports, ports.gossip.ip()).await?;
             ports.repair = repair_port.map(|p| SocketAddr::new(ports.gossip.ip(), p));
             let configfile = File::create(&cli.config)?;
             serde_json::to_writer_pretty(configfile, &ports)?;
@@ -158,7 +172,7 @@ async fn main() -> Result<(), anyhow::Error> {
             //     detect_repair_shreds(bind_interface, &cand_ports, ports.gossip.ip()).await?;
             // dbg!(repair_port);
             let _ = std::fs::create_dir(&output);
-            start_monitor(bind_interface, ports, command, output).await?;
+            start_monitor(bind_interface, flags, ports, command, output).await?;
         }
         Commands::Parse { input, protocol } => match protocol {
             WireProtocol::Gossip => {
