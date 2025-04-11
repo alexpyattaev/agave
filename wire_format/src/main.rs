@@ -47,6 +47,9 @@ struct Cli {
     strip_gre: bool,
     #[arg(short, long, default_value = ".wire_format.json")]
     config: PathBuf,
+    #[arg(short, long)]
+    interface: Option<IpAddr>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -126,6 +129,7 @@ fn find_interface(ip: IpAddr) -> anyhow::Result<NetworkInterface> {
         .ok_or(anyhow::anyhow!("No interface found with specified IP!"))?
         .clone())
 }
+
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
     solana_logger::setup_with_default("info,solana-metrics=error");
@@ -149,7 +153,8 @@ async fn main() -> Result<(), anyhow::Error> {
                     .await
                     .context("Lookup validator ports")?;
             info!("Discovered via gossip: {:?}", &ports);
-            let bind_interface = find_interface(ports.gossip.ip())?;
+            let iface_addr = cli.interface.unwrap_or(ports.gossip.ip());
+            let bind_interface = find_interface(iface_addr)?;
             let cand_ports =
                 ports.repair_candidates(repair_search_port_range.0..repair_search_port_range.1);
             let repair_port =
@@ -166,11 +171,8 @@ async fn main() -> Result<(), anyhow::Error> {
                 serde_json::from_reader(configfile).context("Config file is invalid")?;
             info!("Loaded ports from {:?}: {:?}", &cli.config, &ports);
 
-            let bind_interface = find_interface(ports.gossip.ip())?;
-            // let cand_ports = ports.repair_candidates(8000..8010);
-            // let repair_port =
-            //     detect_repair_shreds(bind_interface, &cand_ports, ports.gossip.ip()).await?;
-            // dbg!(repair_port);
+            let iface_addr = cli.interface.unwrap_or(ports.gossip.ip());
+            let bind_interface = find_interface(iface_addr)?;
             let _ = std::fs::create_dir(&output);
             start_monitor(bind_interface, flags, ports, command, output).await?;
         }
