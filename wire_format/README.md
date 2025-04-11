@@ -1,5 +1,6 @@
 === Prerequisistes
 You are on a host running solana validator, for example its gossip port is `11.12.13.14:8001`
+You have bpf-linker installed. If not `cargo install bpf-linker`.
 
 === Discover the ports of running validator
 This is required for any monitor command!
@@ -31,3 +32,16 @@ will then make nice interactive turbine delivery plots
 == Gossip abusers
 ```cargo xtask run  -- monitor log-gossip-invalid-senders```
 will look for suspicious gossip packets and log them for you
+
+
+== Reporting metrics / unattended mode
+
+```SOLANA_METRICS_CONFIG="host=https://internal-metrics.solana.com:8086,db=<database>,u=<user>,p=<password>" cargo xtask run --  monitor bitrate --report-metrics gossip```
+will report metrics into influxdb rather than showing GUI
+
+== Working with doublezero
+
+running with `--strip-gre` will attach to provided interface and strip GRE headers to get to the actual packets. So, on a doublezero host:
+```cargo xtask run -- --strip-gre --interface=<actual_eth_ip> discover --gossip-addr <dz_ip_addr>:8001```
+and then to actually run monitor:
+```cargo xtask run -- --strip-gre --interface=<actual_eth_ip> monitor bitrate gossip```

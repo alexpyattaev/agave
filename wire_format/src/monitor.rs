@@ -91,22 +91,27 @@ pub async fn start_monitor(
         MonitorCommand::Bitrate {
             protocol,
             report_metrics,
-        } => match protocol {
-            WireProtocol::Gossip => {
-                let mut monitor = gossip::BitrateMonitor::new(report_metrics);
-                bpf_controls.allow_dst_port(ports.gossip.port())?;
-                process_packet_flow(&mut bpf_controls, &mut monitor).await?;
+        } => {
+            if report_metrics {
+                solana_metrics::set_host_id(ports.pubkey.to_string());
             }
-            WireProtocol::Turbine => {
-                let turbine_port = ports.turbine.expect("Turbine port is required").port();
-                let repair_port = ports.repair.expect("Repair port is required").port();
-                let mut monitor = turbine::BitrateMonitor::new(report_metrics);
-                bpf_controls.allow_dst_port(turbine_port)?;
-                bpf_controls.allow_dst_port(repair_port)?;
-                process_packet_flow(&mut bpf_controls, &mut monitor).await?;
+            match protocol {
+                WireProtocol::Gossip => {
+                    let mut monitor = gossip::BitrateMonitor::new(report_metrics);
+                    bpf_controls.allow_dst_port(ports.gossip.port())?;
+                    process_packet_flow(&mut bpf_controls, &mut monitor).await?;
+                }
+                WireProtocol::Turbine => {
+                    let turbine_port = ports.turbine.expect("Turbine port is required").port();
+                    let repair_port = ports.repair.expect("Repair port is required").port();
+                    let mut monitor = turbine::BitrateMonitor::new(report_metrics);
+                    bpf_controls.allow_dst_port(turbine_port)?;
+                    bpf_controls.allow_dst_port(repair_port)?;
+                    process_packet_flow(&mut bpf_controls, &mut monitor).await?;
+                }
+                WireProtocol::Repair => todo!("Repair not yet supported"),
             }
-            WireProtocol::Repair => todo!("Repair not yet supported"),
-        },
+        }
         MonitorCommand::Capture {
             size_hint,
             threshold_rate,
