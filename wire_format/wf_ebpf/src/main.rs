@@ -130,36 +130,20 @@ fn try_xdpdump(ctx: &XdpContext) -> Result<u32, ()> {
                 // we first save into the buffer the packet length.
                 // Useful on userspace to retrieve the correct amount of bytes and not some bytes not part of the packet.
                 ptr::write_unaligned(dst_buf as *mut u16, len as u16);
-                //let dst_buf = dst_buf.byte_add(U16_SIZE);
 
                 // We copy the entire content of the packet to the remaining part of the buffer
-                let data_start = ctx.data();
-                let data_end = ctx.data_end();
-                let data_len = data_end - data_start;
-                if data_len > MTU {
-                    event.discard(0);
-                    return Ok(xdp_action::XDP_PASS);
-                }
+                // black_box is needed because LLVM is too smart and erases the bounds checks
+                // if it is not present
+                let data_start = core::hint::black_box(ctx.data());
+                let data_end = core::hint::black_box(ctx.data_end());
                 for read_offset in 0..MTU {
                     let write_offset = read_offset + 2;
-                    if data_start + read_offset > data_end {
-                        break;
-                    }
-                    if dst_buf as usize + write_offset > SIZE {
+
+                    if data_start + read_offset + 1 > data_end {
                         break;
                     }
                     *dst_buf.byte_add(write_offset) = *((data_start + read_offset) as *const u8);
                 }
-
-                // if data_len > MTU {
-                //     event.discard(0);
-                //     return Ok(xdp_action::XDP_PASS);
-                // }
-                // if data_start + data_len > data_end {
-                //     event.discard(0);
-                //     return Ok(xdp_action::XDP_PASS);
-                // }
-                // dst_buf.copy_from_nonoverlapping(data_start as *const u8, data_len);
                 event.submit(0);
             }
         }
