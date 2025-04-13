@@ -39,8 +39,7 @@ pub struct Options {
     pub debug: bool,
 }
 
-pub fn build_ebpf(opts: Options) -> Result<(), anyhow::Error> {
-    let dir = PathBuf::from("wf_ebpf");
+pub fn build_ebpf(opts: Options, dir: PathBuf) -> Result<(), anyhow::Error> {
     let target = format!("--target={}", opts.target);
     let mut args = vec!["build", target.as_str(), "-Z", "build-std=core"];
     if !opts.debug {

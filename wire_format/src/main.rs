@@ -87,9 +87,9 @@ enum Commands {
         repair_search_port_range: (u16, u16),
     },
     Monitor {
-        /*  #[arg(short, long, value_enum, default_value_t=Direction::Inbound)]
+        #[arg(short, long, value_enum, default_value_t=Direction::Inbound)]
         ///Defines which direction to capture.
-        direction: Direction,*/
+        direction: Direction,
         #[arg(short, long, default_value = "monitor_data")]
         /// Directory for files to write. Existing contents may be destroyed!
         output: PathBuf,
@@ -164,7 +164,11 @@ async fn main() -> Result<(), anyhow::Error> {
             serde_json::to_writer_pretty(configfile, &ports)?;
             info!("Written ports to {:?}", &cli.config);
         }
-        Commands::Monitor { output, command } => {
+        Commands::Monitor {
+            output,
+            command,
+            direction,
+        } => {
             let configfile = File::open(&cli.config)
                 .context("Config file not found, create it with discover command")?;
             let ports: Ports =
@@ -174,7 +178,7 @@ async fn main() -> Result<(), anyhow::Error> {
             let iface_addr = cli.interface.unwrap_or(ports.gossip.ip());
             let bind_interface = find_interface(iface_addr)?;
             let _ = std::fs::create_dir(&output);
-            start_monitor(bind_interface, flags, ports, command, output).await?;
+            start_monitor(bind_interface, flags, ports, command, output, direction).await?;
         }
         Commands::Parse { input, protocol } => match protocol {
             WireProtocol::Gossip => {

@@ -1,6 +1,7 @@
 === Prerequisistes
 You are on a host running solana validator, for example its gossip port is `11.12.13.14:8001`
-You have bpf-linker installed. If not `cargo install bpf-linker`.
+You have bpf-linker installed. If not `cargo install bpf-linker`. This also pretty much
+requires a decently new kernel from 6.0 branch at least to work correctly.
 
 === Discover the ports of running validator
 This is required for any monitor command!
@@ -13,6 +14,13 @@ When done it will write results to a JSON file for later use.
 === Actual use
 Remember that hitting Ctrl-C will always terminate the app gracefully, i.e. it will try to wait for a few seconds to do cleanup and flush files. If it times out, it will kill itself, no need to spam.
 
+== Inbound vs outbound
+
+Most (not all) commands support monitoring in either direction. Supply the `--direction` argument to
+specify, inbound is the default. Capture in both directions at once is under development. For example,
+``` cargo xtask run  -- monitor --direction=outbound bitrate turbine```
+will show turbine bitrates for outbound traffic.
+
 == Bitrate monitoring
 
 ```cargo xtask run  -- monitor bitrate gossip```
@@ -20,6 +28,7 @@ will show current bitrate of gossip broken down by CRDS type and message type
 
 ``` cargo xtask run  -- monitor bitrate turbine```
 will show turbine bitrates broken down by shred types + repair bandwidth
+
 
 == Metadata logging
 

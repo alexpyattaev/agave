@@ -28,8 +28,8 @@ impl PacketLogger for BitrateMonitor {
         if last_report.elapsed() > Duration::from_millis(500) {
             *last_report = Instant::now();
 
-            if self.report_metrics {
-                self.send_metrics();
+            if let Some(metrics_category) = self.metrics_category {
+                self.send_metrics(metrics_category);
             } else {
                 let reports = self.feed_gui();
                 if self.channel.as_ref().unwrap().try_send(reports).is_err() {
@@ -72,19 +72,19 @@ pub struct BitrateMonitor {
 
     channel: Option<Sender<RateDisplayItems>>,
     last_report: Option<Instant>,
-    report_metrics: bool,
+    metrics_category: Option<&'static str>,
 }
 
 impl BitrateMonitor {
-    pub fn new(report_metrics: bool) -> Self {
+    pub fn new(metrics_category: Option<&'static str>) -> Self {
         let (tx, rx) = crossbeam_channel::bounded(4);
         let me = Self {
             channel: Some(tx),
             last_report: Some(Instant::now()),
-            report_metrics,
+            metrics_category,
             ..Default::default()
         };
-        if !report_metrics {
+        if metrics_category.is_none() {
             tokio::spawn(async move {
                 let mut elem = element! {
                     ContextProvider(value: Context::owned(RatesMonitorChannel(rx))) {
@@ -98,14 +98,14 @@ impl BitrateMonitor {
         me
     }
 
-    fn send_metrics(&mut self) {
+    fn send_metrics(&mut self, metrics_category: &'static str) {
         macro_rules! bps {
             ($x:ident) => {
                 (self.$x.rate_bps().unwrap_or_default() as f64)
             };
         }
         solana_metrics::datapoint_info!(
-            "gossip_bitrates",
+            metrics_category,
             ("crds_contact_info", bps!(crds_contact_info), f64),
             ("crds_epoch_slots", bps!(crds_epoch_slots), f64),
             ("crds_node_instance", bps!(crds_node_instance), f64),

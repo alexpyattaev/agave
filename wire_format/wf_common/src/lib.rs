@@ -18,3 +18,6 @@ impl Default for Flags {
 
 #[cfg(feature = "user")]
 unsafe impl aya::Pod for Flags {}
+
+#[cfg(not(feature = "user"))]
+pub mod ebpf_helpers;

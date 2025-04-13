@@ -46,6 +46,5 @@ serde_json.workspace = true
 tokio-util.workspace = true
 arrayvec.workspace = true
 solana-metrics.workspace = true
-#iocraft = "0.7.1"
 [lints]
 workspace = true

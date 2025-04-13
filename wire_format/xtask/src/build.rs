@@ -1,4 +1,4 @@
-use std::process::Command;
+use std::{path::PathBuf, process::Command};
 
 use anyhow::Context as _;
 use clap::Parser;
@@ -32,11 +32,22 @@ fn build_project(opts: &Options) -> Result<(), anyhow::Error> {
 /// Build our ebpf program and the project
 pub fn build(opts: Options) -> Result<(), anyhow::Error> {
     // build our ebpf program followed by our application
-    build_ebpf(BuildOptions {
-        target: opts.bpf_target,
-        debug: opts.debug,
-    })
-    .context("Error while building eBPF program")?;
+    build_ebpf(
+        BuildOptions {
+            target: opts.bpf_target,
+            debug: opts.debug,
+        },
+        PathBuf::from("wf_ebpf"),
+    )
+    .context("Error while building eBPF XDP program")?;
+    build_ebpf(
+        BuildOptions {
+            target: opts.bpf_target,
+            debug: opts.debug,
+        },
+        PathBuf::from("wf_tc"),
+    )
+    .context("Error while building eBPF TC program")?;
     build_project(&opts).context("Error while building userspace application")?;
     Ok(())
 }

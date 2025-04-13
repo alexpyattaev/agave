@@ -1,8 +1,8 @@
-mod build_ebpf;
 mod build;
+mod build_ebpf;
 mod run;
 
-use std::process::exit;
+use std::{path::PathBuf, process::exit};
 
 use clap::Parser;
 
@@ -14,7 +14,8 @@ pub struct Options {
 
 #[derive(Debug, Parser)]
 enum Command {
-    BuildEbpf(build_ebpf::Options),
+    BuildXdp(build_ebpf::Options),
+    BuildTc(build_ebpf::Options),
     Build(build::Options),
     Run(run::Options),
 }
@@ -24,7 +25,8 @@ fn main() {
 
     use Command::*;
     let ret = match opts.command {
-        BuildEbpf(opts) => build_ebpf::build_ebpf(opts),
+        BuildXdp(opts) => build_ebpf::build_ebpf(opts, PathBuf::from("wf_ebpf")),
+        BuildTc(opts) => build_ebpf::build_ebpf(opts, PathBuf::from("wf_tc")),
         Run(opts) => run::run(opts),
         Build(opts) => build::build(opts),
     };
