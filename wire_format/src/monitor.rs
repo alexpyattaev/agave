@@ -4,8 +4,9 @@ use {
         cluster_probes::Ports,
         gossip,
         turbine::{self, TurbineLogger},
-        WireProtocol,
+        Direction, WireProtocol,
     },
+    anyhow::Context as _,
     clap::Subcommand,
     log::{error, info},
     std::{
@@ -49,41 +50,85 @@ pub async fn start_monitor(
     ports: Ports,
     command: MonitorCommand,
     output: PathBuf,
+    direction: Direction,
 ) -> anyhow::Result<()> {
     // element!(MainMenu).fullscreen().await.unwrap();
     // return Ok(());
-    let mut bpf_controls = BpfControls::new(&interface.name)?;
-    info!("Monitor set up on interface {}", &interface.name);
-    bpf_controls.set_flags(bpf_flags)?;
-    // Allow all senders
-    bpf_controls.allow_src_ip(Ipv4Addr::UNSPECIFIED)?;
-    bpf_controls.allow_src_port(0)?;
+    bump_rlimit();
+    let mut bpf_controls = match direction {
+        Direction::Inbound => {
+            let mut bpf_controls = BpfControls::new_ingress(&interface.name)?;
+            info!("Ingress monitor set up on interface {}", &interface.name);
+            bpf_controls.set_flags(bpf_flags)?;
+            // Allow all senders
+            bpf_controls.allow_src_ip(Ipv4Addr::UNSPECIFIED)?;
+            bpf_controls.allow_src_port(0)?;
+            // only capture packets to me, not stuff i might forward
+            bpf_controls.allow_dst_ip(v4(ports.gossip.ip()))?;
+            bpf_controls
+        }
+        Direction::Outbound => {
+            let mut bpf_controls = BpfControls::new_egress(&interface.name)?;
+            info!("Egress monitor set up on interface {}", &interface.name);
+            bpf_controls.set_flags(bpf_flags)?;
+            // Allow all destinations
+            bpf_controls.allow_dst_ip(Ipv4Addr::UNSPECIFIED)?;
+            bpf_controls.allow_dst_port(0)?;
+            // only capture packets from my own IP not forwarded
+            bpf_controls.allow_src_ip(v4(ports.gossip.ip()))?;
+            bpf_controls
+        }
+        Direction::Both => {
+            anyhow::bail!("Capturing in both directions not supported yet")
+        }
+    };
 
-    bpf_controls.allow_dst_ip(v4(ports.gossip.ip()))?;
     match command {
         MonitorCommand::LogGossipInvalidSenders => {
             let mut logger = gossip::MysteryCRDSLogger::new(ports.shred_version, output.clone());
-            bpf_controls.allow_dst_port(ports.gossip.port())?;
+            match direction {
+                Direction::Inbound => bpf_controls.allow_dst_port(ports.gossip.port())?,
+                Direction::Outbound => bpf_controls.allow_src_port(ports.gossip.port())?,
+                Direction::Both => todo!(),
+            }
             process_packet_flow(&mut bpf_controls, &mut logger).await?;
 
             info!("Gossip monitoring done");
         }
         MonitorCommand::LogMetadata { protocol } => match protocol {
             WireProtocol::Gossip => {
-                bpf_controls.allow_dst_port(ports.gossip.port())?;
+                //bpf_controls.allow_dst_port(ports.gossip.port())?;
                 //gossip_log_metadata(&mut bpf_controls.rx_ring, size_hint).await;
                 todo!();
             }
             WireProtocol::Turbine => {
-                let turbine_port = ports.turbine.expect("Turbine port is required").port();
-                let repair_port = ports.repair.expect("Repair port is required").port();
-
-                let mut logger =
-                    TurbineLogger::new_with_file_writer(output, turbine_port, repair_port).await?;
+                let turbine_port = ports.turbine.context("Turbine port is required")?.port();
 
                 info!("Turbine + Repair capture starting");
-                bpf_controls.allow_dst_port(turbine_port)?;
-                bpf_controls.allow_dst_port(repair_port)?;
+                let mut logger = match direction {
+                    Direction::Inbound => {
+                        let repair_port = ports.repair.context("Repair port is required")?.port();
+                        let logger =
+                            TurbineLogger::new_with_file_writer(output, turbine_port, repair_port)
+                                .await?;
+                        bpf_controls.allow_dst_port(turbine_port)?;
+                        bpf_controls.allow_dst_port(repair_port)?;
+                        logger
+                    }
+                    Direction::Outbound => {
+                        let repair_port = ports
+                            .serve_repair
+                            .context("Repair port is required")?
+                            .port();
+                        let logger =
+                            TurbineLogger::new_with_file_writer(output, turbine_port, repair_port)
+                                .await?;
+                        bpf_controls.allow_src_port(turbine_port)?;
+                        bpf_controls.allow_src_port(repair_port)?;
+                        logger
+                    }
+                    Direction::Both => todo!(),
+                };
                 process_packet_flow(&mut bpf_controls, &mut logger).await?;
             }
             WireProtocol::Repair => todo!(),
@@ -94,19 +139,55 @@ pub async fn start_monitor(
         } => {
             if report_metrics {
                 solana_metrics::set_host_id(ports.pubkey.to_string());
-            }
+            };
             match protocol {
                 WireProtocol::Gossip => {
-                    let mut monitor = gossip::BitrateMonitor::new(report_metrics);
-                    bpf_controls.allow_dst_port(ports.gossip.port())?;
+                    let metrics = if report_metrics {
+                        Some(match direction {
+                            Direction::Inbound => "gossip_rates_inbound",
+                            Direction::Outbound => "gossip_rates_outbound",
+                            Direction::Both => todo!(),
+                        })
+                    } else {
+                        None
+                    };
+                    let mut monitor = gossip::BitrateMonitor::new(metrics);
+                    match direction {
+                        Direction::Inbound => bpf_controls.allow_dst_port(ports.gossip.port())?,
+                        Direction::Outbound => bpf_controls.allow_src_port(ports.gossip.port())?,
+                        Direction::Both => todo!(),
+                    }
                     process_packet_flow(&mut bpf_controls, &mut monitor).await?;
                 }
                 WireProtocol::Turbine => {
                     let turbine_port = ports.turbine.expect("Turbine port is required").port();
-                    let repair_port = ports.repair.expect("Repair port is required").port();
-                    let mut monitor = turbine::BitrateMonitor::new(report_metrics);
-                    bpf_controls.allow_dst_port(turbine_port)?;
-                    bpf_controls.allow_dst_port(repair_port)?;
+                    let metrics = if report_metrics {
+                        Some(match direction {
+                            Direction::Inbound => "turbine_rates_inbound",
+                            Direction::Outbound => "turbine_rates_outbound",
+                            Direction::Both => todo!(),
+                        })
+                    } else {
+                        None
+                    };
+                    let mut monitor = turbine::BitrateMonitor::new(metrics);
+                    match direction {
+                        Direction::Inbound => {
+                            let repair_port =
+                                ports.repair.context("Repair port is required")?.port();
+                            bpf_controls.allow_dst_port(turbine_port)?;
+                            bpf_controls.allow_dst_port(repair_port)?;
+                        }
+                        Direction::Outbound => {
+                            let repair_port = ports
+                                .serve_repair
+                                .context("Repair port is required")?
+                                .port();
+                            bpf_controls.allow_src_port(turbine_port)?;
+                            bpf_controls.allow_src_port(repair_port)?;
+                        }
+                        Direction::Both => todo!(),
+                    };
                     process_packet_flow(&mut bpf_controls, &mut monitor).await?;
                 }
                 WireProtocol::Repair => todo!("Repair not yet supported"),
@@ -131,7 +212,7 @@ pub async fn detect_repair_shreds(
     port_range: &[u16],
     dst_ip: IpAddr,
 ) -> anyhow::Result<Option<u16>> {
-    let mut bpf_controls = BpfControls::new(&interface.name)?;
+    let mut bpf_controls = BpfControls::new_ingress(&interface.name)?;
     info!("Monitor set up on interface {}", &interface.name);
     // Allow all senders
     bpf_controls.allow_src_ip(Ipv4Addr::UNSPECIFIED)?;

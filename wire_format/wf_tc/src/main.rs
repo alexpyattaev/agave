@@ -3,10 +3,10 @@
 
 use {
     aya_ebpf::{
-        bindings::xdp_action,
-        macros::{map, xdp},
+        bindings::{TC_ACT_PIPE, TC_ACT_SHOT},
+        macros::{classifier, map},
         maps::{Array, RingBuf},
-        programs::XdpContext,
+        programs::TcContext,
     },
     aya_log_ebpf::{debug, error},
     core::{mem, net::Ipv4Addr, ptr},
@@ -29,20 +29,16 @@ static RING_BUF: RingBuf = RingBuf::with_byte_size(16 * 1024 * 1024u32, 0);
 #[map]
 static FLAGS: Array<Flags> = Array::with_max_entries(1, 0);
 
-#[xdp]
-pub fn wf_ebpf(ctx: XdpContext) -> u32 {
-    match try_xdpdump(&ctx) {
+#[classifier]
+pub fn wf_tc(ctx: TcContext) -> i32 {
+    match try_tc_egress(ctx) {
         Ok(ret) => ret,
-        Err(_) => {
-            error!(&ctx, "got error in XDP program!");
-            xdp_action::XDP_ABORTED
-        }
+        Err(_) => TC_ACT_SHOT,
     }
 }
 
-fn try_xdpdump(ctx: &XdpContext) -> Result<u32, ()> {
+fn try_tc_egress(ctx: TcContext) -> Result<i32, ()> {
     let flags = FLAGS.get(0).cloned().unwrap_or_default();
-
     let Ok((ip_header_offset, src_ip, dst_ip, src_port, dst_port)) = extract_headers(
         &ContextRef {
             data: ctx.data(),
@@ -50,15 +46,15 @@ fn try_xdpdump(ctx: &XdpContext) -> Result<u32, ()> {
         },
         flags,
     ) else {
-        return Ok(xdp_action::XDP_PASS);
+        return Ok(TC_ACT_PIPE);
     };
 
     if !should_capture(src_ip, dst_ip, src_port, dst_port) {
-        return Ok(xdp_action::XDP_PASS);
+        return Ok(TC_ACT_PIPE);
     }
 
     debug!(
-        ctx,
+        &ctx,
         "captured UDP packet {}:{}->{}:{}",
         src_ip.to_bits(),
         src_port,
@@ -76,7 +72,7 @@ fn try_xdpdump(ctx: &XdpContext) -> Result<u32, ()> {
             // We check if packet len is greater than our reserved buffer size
             if aya_ebpf::check_bounds_signed(len as i64, 1, 1500) == false {
                 event.discard(0);
-                return Ok(xdp_action::XDP_PASS);
+                return Ok(TC_ACT_PIPE);
             }
 
             unsafe {
@@ -102,16 +98,17 @@ fn try_xdpdump(ctx: &XdpContext) -> Result<u32, ()> {
             }
         }
         None => {
-            error!(ctx, "Cannot reserve space in ring buffer.");
+            error!(&ctx, "Cannot reserve space in ring buffer.");
         }
     };
 
-    Ok(xdp_action::XDP_PASS)
+    Ok(TC_ACT_PIPE)
 }
 
+#[cfg(not(test))]
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
-    unsafe { core::hint::unreachable_unchecked() }
+    loop {}
 }
 
 fn should_capture(src_ip: Ipv4Addr, dst_ip: Ipv4Addr, src_port: u16, dst_port: u16) -> bool {

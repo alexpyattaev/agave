@@ -1,5 +1,5 @@
 [package]
-name = "wf-ebpf"
+name = "wf-tc"
 version = "0.1.0"
 edition = "2021"
 
@@ -7,10 +7,10 @@ edition = "2021"
 aya-ebpf = "0.1"
 aya-log-ebpf = "0.1"
 network-types = "0.0.7"
-wf-common = { path = "../wf_common"  , features = ["bpf"] }
+wf-common = { path = "../wf_common" , features = ["bpf"] }
 
 [[bin]]
-name = "wf-ebpf"
+name = "wf-tc"
 path = "src/main.rs"
 
 [profile.dev]

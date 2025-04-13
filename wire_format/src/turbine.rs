@@ -1,15 +1,12 @@
 #![allow(dead_code)]
 use std::{
     ffi::CStr,
-    io::Write,
     net::{Ipv4Addr, SocketAddrV4},
-    ops::ControlFlow,
     path::PathBuf,
     time::{Duration, Instant},
 };
 
 use crate::{
-    monitor::PacketLogger,
     storage::{fetch_dest, hexdump, DumbStorage, WritePackets},
     Stats,
 };
@@ -19,15 +16,11 @@ use pcap_file::pcapng::PcapNgReader;
 use pcap_file::pcapng::PcapNgWriter;
 use solana_ledger::shred::{wire::get_shred_size, ShredVariant};
 use solana_ledger::shred::{CodingShredHeader, Shred};
-use tokio::{
-    fs::File,
-    io::{AsyncWriteExt, BufWriter},
-    sync::mpsc::Receiver,
-    sync::mpsc::Sender,
-};
 
 mod speed_meter;
 pub use speed_meter::*;
+mod logger;
+pub use logger::*;
 
 #[derive(Default)]
 struct TurbineInventory {
@@ -274,64 +267,6 @@ pub fn validate_turbine(filename: PathBuf) -> anyhow::Result<Stats> {
     Ok(stats)
 }
 
-pub struct TurbineLogger {
-    turbine_port: u16,
-    repair_port: u16,
-    num_captured: usize,
-    chan: Option<Sender<Vec<u8>>>,
-    writer: Option<tokio::task::JoinHandle<anyhow::Result<()>>>,
-}
-
-impl TurbineLogger {
-    pub async fn new_with_file_writer(
-        mut output: PathBuf,
-        turbine_port: u16,
-        repair_port: u16,
-    ) -> anyhow::Result<Self> {
-        output.push("time_log.csv");
-        let (tx, rx) = tokio::sync::mpsc::channel(1024 * 1024);
-        let mut writer = BufWriter::with_capacity(64 * 1024 * 1024, File::create(&output).await?);
-        writer
-            .write(b"event_type:slot_number:index:fec_index:shreds_in_batch:us_since_epoch\n")
-            .await?;
-        async fn write_worker(
-            mut writer: BufWriter<File>,
-            mut rx: Receiver<Vec<u8>>,
-        ) -> anyhow::Result<()> {
-            while let Some(pkt) = rx.recv().await {
-                writer.write(pkt.as_ref()).await?;
-            }
-            writer.flush().await?;
-            Ok(())
-        }
-        let jh = tokio::spawn(write_worker(writer, rx));
-        info!("Logging arrival pattern into {output:?}");
-        Ok(TurbineLogger {
-            turbine_port,
-            repair_port,
-            num_captured: 0,
-            chan: Some(tx),
-            writer: Some(jh),
-        })
-    }
-    pub fn new_with_channel(
-        turbine_port: u16,
-        repair_port: u16,
-    ) -> anyhow::Result<(Self, Receiver<Vec<u8>>)> {
-        let (tx, rx) = tokio::sync::mpsc::channel(1024 * 1024);
-        Ok((
-            TurbineLogger {
-                turbine_port,
-                repair_port,
-                num_captured: 0,
-                chan: Some(tx),
-                writer: None,
-            },
-            rx,
-        ))
-    }
-}
-
 fn detect_repair_nonce(data: &[u8]) -> Option<(&[u8], Option<u32>)> {
     let shred_end = get_shred_size(data)?;
     let shred = data.get(..shred_end)?;
@@ -342,68 +277,4 @@ fn detect_repair_nonce(data: &[u8]) -> Option<(&[u8], Option<u32>)> {
     let nonce = <[u8; 4]>::try_from(data.get(offset..)?).ok()?;
     let nonce = u32::from_le_bytes(nonce);
     Some((shred, Some(nonce)))
-}
-
-impl PacketLogger for TurbineLogger {
-    fn handle_pkt(&mut self, wire_bytes: &[u8]) -> std::ops::ControlFlow<()> {
-        // let udp_hdr = &wire_bytes[20..(20 + 8)];
-        // let dst_port = u16::from_be_bytes(udp_hdr[2..4].try_into().unwrap());
-        // TODO: validate that repair packets are coming over repair port
-        let data_slice = &wire_bytes[20 + 8..];
-        let Some((data_slice, nonce)) = detect_repair_nonce(data_slice) else {
-            return ControlFlow::Continue(());
-        };
-        let event_type = if nonce.is_none() {
-            "SHRED_RX"
-        } else {
-            "REPAIR_RX"
-        };
-
-        let pkt = match parse_turbine(data_slice) {
-            Ok(pkt) => pkt,
-            Err(_) => {
-                return ControlFlow::Continue(());
-            }
-        };
-        if pkt.sanitize().is_err() {
-            return ControlFlow::Continue(());
-        }
-        let coding_header = get_coding_header(&pkt);
-        let shreds_in_batch = match coding_header {
-            Some(ch) => ch.num_coding_shreds + ch.num_data_shreds,
-            None => 0,
-        };
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_micros();
-        let mut buf = Vec::with_capacity(128);
-        write!(
-            &mut buf,
-            "{event_type}:{slot}:{idx}:{fecidx}:{shreds_in_batch}:{timestamp}\n",
-            slot = pkt.slot(),
-            idx = pkt.index(),
-            fecidx = pkt.fec_set_index(),
-        )
-        .unwrap();
-
-        self.num_captured += 1;
-        if self.num_captured % 10000 == 0 {
-            info!("Logged {} packets", self.num_captured);
-        }
-        if let Err(_e) = self.chan.as_mut().unwrap().try_send(buf) {
-            return ControlFlow::Break(());
-        };
-        ControlFlow::Continue(())
-    }
-
-    async fn finalize(&mut self) -> anyhow::Result<()> {
-        // signal the writer that no more packets are coming
-        drop(self.chan.take());
-        if let Some(writer) = self.writer.take() {
-            info!("Flushing file to disk...");
-            writer.await.expect("Writer should not panic!")?;
-        }
-        Ok(())
-    }
 }
