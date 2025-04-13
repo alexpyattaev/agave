@@ -104,34 +104,31 @@ impl BitrateMonitor {
                 (self.$x.rate_bps().unwrap_or_default() as f64)
             };
         }
-        solana_metrics::datapoint_info!(
-            metrics_category,
-            ("crds_contact_info", bps!(crds_contact_info), f64),
-            ("crds_epoch_slots", bps!(crds_epoch_slots), f64),
-            ("crds_node_instance", bps!(crds_node_instance), f64),
-            ("crds_other", bps!(crds_other), f64),
-            ("crds_vote", bps!(crds_vote), f64),
-            ("junk", bps!(invalid), f64),
-            ("pingpong", bps!(pingpong), f64),
-            ("prune", bps!(prune), f64),
-            ("valid", bps!(valid), f64),
-        );
         macro_rules! pps {
             ($x:ident) => {
                 (self.$x.rate_pps().unwrap_or_default() as f64)
             };
         }
         solana_metrics::datapoint_info!(
-            "gossip_packet_rates",
-            ("crds_contact_info", pps!(crds_contact_info), f64),
-            ("crds_epoch_slots", pps!(crds_epoch_slots), f64),
-            ("crds_node_instance", pps!(crds_node_instance), f64),
-            ("crds_other", pps!(crds_other), f64),
-            ("crds_vote", pps!(crds_vote), f64),
-            ("junk", pps!(invalid), f64),
-            ("pingpong", pps!(pingpong), f64),
-            ("prune", pps!(prune), f64),
-            ("valid", pps!(valid), f64),
+            metrics_category,
+            ("crds_contact_info", bps!(crds_contact_info), f64),
+            ("crds_contact_info_pps", pps!(crds_contact_info), f64),
+            ("crds_epoch_slots", bps!(crds_epoch_slots), f64),
+            ("crds_epoch_slots_pps", pps!(crds_epoch_slots), f64),
+            ("crds_node_instance", bps!(crds_node_instance), f64),
+            ("crds_node_instance_pps", pps!(crds_node_instance), f64),
+            ("crds_other", bps!(crds_other), f64),
+            ("crds_other_pps", pps!(crds_other), f64),
+            ("crds_vote", bps!(crds_vote), f64),
+            ("crds_vote_pps", pps!(crds_vote), f64),
+            ("junk", bps!(invalid), f64),
+            ("junk_pps", pps!(invalid), f64),
+            ("pingpong", bps!(pingpong), f64),
+            ("pingpong_pps", pps!(pingpong), f64),
+            ("prune", bps!(prune), f64),
+            ("prune_pps", pps!(prune), f64),
+            ("valid", bps!(valid), f64),
+            ("valid_pps", pps!(valid), f64),
         );
     }
     fn feed_gui(&mut self) -> Vec<(String, f32)> {

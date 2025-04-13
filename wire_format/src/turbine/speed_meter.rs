@@ -68,27 +68,24 @@ impl BitrateMonitor {
                 (self.$x.rate_bps().unwrap_or_default() as f64)
             };
         }
-        solana_metrics::datapoint_info!(
-            metrics_category,
-            ("everything", bps!(turbine), f64),
-            ("junk", bps!(invalid), f64),
-            ("repairs", bps!(repairs), f64),
-            ("coding", bps!(coding_shreds), f64),
-            ("data", bps!(data_shreds), f64),
-            ("zero_bytes", bps!(zero_bytes), f64),
-        );
         macro_rules! pps {
             ($x:ident) => {
                 (self.$x.rate_pps().unwrap_or_default() as f64)
             };
         }
         solana_metrics::datapoint_info!(
-            "turbine_packet_rates",
-            ("everything", pps!(turbine), f64),
-            ("junk", pps!(invalid), f64),
-            ("repairs", pps!(repairs), f64),
-            ("coding", pps!(coding_shreds), f64),
-            ("data", pps!(data_shreds), f64),
+            metrics_category,
+            ("everything", bps!(turbine), f64),
+            ("everything_pps", pps!(turbine), f64),
+            ("junk", bps!(invalid), f64),
+            ("junk_pps", pps!(invalid), f64),
+            ("repairs", bps!(repairs), f64),
+            ("repairs_pps", pps!(repairs), f64),
+            ("coding", bps!(coding_shreds), f64),
+            ("coding_pps", pps!(coding_shreds), f64),
+            ("data", bps!(data_shreds), f64),
+            ("data_pps", pps!(data_shreds), f64),
+            ("zero_bytes", bps!(zero_bytes), f64),
         );
     }
 }
