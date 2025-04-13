@@ -67,6 +67,9 @@ pub struct BitrateMonitor {
     crds_contact_info: Monitor,
     crds_epoch_slots: Monitor,
     crds_node_instance: Monitor,
+    crds_duplicate_shred: Monitor,
+    crds_snapshot_hashes: Monitor,
+    crds_version: Monitor,
     crds_other: Monitor,
     crds_vote: Monitor,
 
@@ -121,6 +124,12 @@ impl BitrateMonitor {
             ("crds_other_pps", pps!(crds_other), f64),
             ("crds_vote", bps!(crds_vote), f64),
             ("crds_vote_pps", pps!(crds_vote), f64),
+            ("crds_snapshot_hashes", bps!(crds_snapshot_hashes), f64),
+            ("crds_snapshot_hashes_pps", pps!(crds_snapshot_hashes), f64),
+            ("crds_version", bps!(crds_version), f64),
+            ("crds_version_pps", pps!(crds_version), f64),
+            ("crds_dup_shred", bps!(crds_duplicate_shred), f64),
+            ("crds_dup_shred_pps", pps!(crds_duplicate_shred), f64),
             ("junk", bps!(invalid), f64),
             ("junk_pps", pps!(invalid), f64),
             ("pingpong", bps!(pingpong), f64),
@@ -144,6 +153,9 @@ impl BitrateMonitor {
             row("CRDS: Vote", &mut self.crds_vote),
             row("CRDS: EpochSlots", &mut self.crds_epoch_slots),
             row("CRDS: NodeInstance", &mut self.crds_node_instance),
+            row("CRDS: DuplicateShred", &mut self.crds_duplicate_shred),
+            row("CRDS: SnapshotHashes", &mut self.crds_snapshot_hashes),
+            row("CRDS: Version", &mut self.crds_version),
             row("CRDS: Other", &mut self.crds_other),
         ]
     }
@@ -187,6 +199,15 @@ impl BitrateMonitor {
             }
             CrdsData::NodeInstance(_) => {
                 self.crds_node_instance.push(ser.len());
+            }
+            CrdsData::DuplicateShred(_, _) => {
+                self.crds_duplicate_shred.push(ser.len());
+            }
+            CrdsData::SnapshotHashes(_) => {
+                self.crds_snapshot_hashes.push(ser.len());
+            }
+            CrdsData::Version(_) | CrdsData::LegacyVersion(_) => {
+                self.crds_version.push(ser.len());
             }
             _ => {
                 self.crds_other.push(ser.len());
