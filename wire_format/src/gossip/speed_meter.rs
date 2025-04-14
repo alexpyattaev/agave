@@ -1,5 +1,4 @@
 use std::{
-    f32,
     ops::ControlFlow,
     time::{Duration, Instant},
 };
@@ -140,8 +139,8 @@ impl BitrateMonitor {
             ("valid_pps", pps!(valid), f64),
         );
     }
-    fn feed_gui(&mut self) -> Vec<(String, f32)> {
-        fn row(l: &str, m: &mut Monitor) -> (String, f32) {
+    fn feed_gui(&mut self) -> Vec<(String, f64)> {
+        fn row(l: &str, m: &mut Monitor) -> (String, f64) {
             (l.to_owned(), m.rate_bps().unwrap_or(0.0) / 1e6)
         }
         vec![

@@ -6,7 +6,7 @@ use iocraft::prelude::*;
 #[derive(Debug, Props)]
 pub struct BarProps<T>
 where
-    T: Into<f32>,
+    T: Into<f64>,
     T: Send + Default + Sync + Clone,
 {
     pub max_val: T,
@@ -18,7 +18,7 @@ where
 impl<T> Default for BarProps<T>
 where
     T: From<u8>,
-    T: Into<f32>,
+    T: Into<f64>,
     T: Send + Default + Sync + Clone,
 {
     fn default() -> Self {
@@ -35,12 +35,12 @@ where
 #[component]
 pub fn BarIndicator<T>(props: &BarProps<T>) -> impl Into<AnyElement<'static>>
 where
-    T: Into<f32>,
+    T: Into<f64>,
     T: Send + Default + Sync + Clone,
     T: 'static,
 {
-    let pos: f32 = props.val.clone().into();
-    let max: f32 = props.max_val.clone().into();
+    let pos: f64 = props.val.clone().into();
+    let max: f64 = props.max_val.clone().into();
     let color = if pos < max { Color::Green } else { Color::Red };
     element! {
         View {
@@ -48,7 +48,7 @@ where
                             Text(content: format!("{}", props.label))
                         }
             View(border_style: BorderStyle::Round, border_color: Color::Blue, width: 60) {
-                View(width: Percent(pos.min(max)/max*100.0), height: 1, background_color: color )
+                View(width: Percent((pos.min(max)/max*100.0) as f32), height: 1, background_color: color )
             }
             View(padding: 1) {
                 Text(content: format!("{:.0} {}", pos, props.units))
@@ -59,9 +59,9 @@ where
 
 #[derive(Debug, Props)]
 pub struct RateDisplayProps {
-    pub rates: Vec<(String, f32)>,
+    pub rates: Vec<(String, f64)>,
     pub units: &'static str,
-    pub max_val: f32,
+    pub max_val: f64,
 }
 impl Default for RateDisplayProps {
     fn default() -> Self {
@@ -82,7 +82,7 @@ pub fn RateDisplay(props: &RateDisplayProps) -> impl Into<AnyElement<'static>> {
         )
         {
             #(rates.into_iter().enumerate().map(|(id,(n,r))|element!{
-            BarIndicator<f32>(
+            BarIndicator<f64>(
                 key: id,
                 label_width: max_label_chars+2,
                 label:n, max_val:props.max_val, units:props.units,
@@ -179,7 +179,7 @@ pub fn HlButton(props: &mut HlButtonProps, mut hooks: Hooks) -> impl Into<AnyEle
 #[component]
 fn Menu(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let mut speeds =
-        hooks.use_state::<Vec<(String, f32)>, _>(|| vec![("Speed".to_owned(), 0.0); 2]);
+        hooks.use_state::<Vec<(String, f64)>, _>(|| vec![("Speed".to_owned(), 0.0); 2]);
     hooks.use_future(async move {
         loop {
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -242,13 +242,13 @@ async fn MainMenu(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     }
 }
 
-pub type RateDisplayItems = Vec<(String, f32)>;
+pub type RateDisplayItems = Vec<(String, f64)>;
 pub struct RatesMonitorChannel(pub crossbeam_channel::Receiver<RateDisplayItems>);
 
 #[component]
 pub fn RatesMonitorMenu(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let mut rates =
-        hooks.use_state::<Vec<(String, f32)>, _>(|| vec![("Waiting for data".to_owned(), 0.0)]);
+        hooks.use_state::<Vec<(String, f64)>, _>(|| vec![("Waiting for data".to_owned(), 0.0)]);
     let mut should_exit = hooks.use_state(|| false);
     let mut max_val = hooks.use_state(|| {
         let mut vv = VecDeque::<u32>::new();
@@ -292,6 +292,6 @@ pub fn RatesMonitorMenu(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     };
 
     element! {
-        RateDisplay(rates:rates.read().clone(), units:"Mbps", max_val:smooth_max as f32)
+        RateDisplay(rates:rates.read().clone(), units:"Mbps", max_val:smooth_max as f64)
     }
 }

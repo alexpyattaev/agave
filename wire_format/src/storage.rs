@@ -75,17 +75,14 @@ impl<const WINDOW_MS: u64> Monitor<WINDOW_MS> {
         self.bytes_stored += bytes;
     }
 
-    pub fn rate_bps(&mut self) -> Option<f32> {
+    pub fn rate_bps(&mut self) -> Option<f64> {
         self.evict();
-        let oldest = self.packets.front()?;
-        let newest = self.packets.back()?;
-        if oldest == newest {
+        let num = self.packets.len();
+        if num == 0 {
             return None;
-        }
-        let dt = newest.0 - oldest.0;
-
-        let dt_secs = dt.as_secs_f32();
-        Some((self.bytes_stored * 8) as f32 / dt_secs)
+        };
+        let dt = Duration::from_millis(WINDOW_MS).as_secs_f64();
+        Some((self.bytes_stored * 8) as f64 / dt)
     }
     pub fn evict(&mut self) {
         loop {
@@ -100,17 +97,14 @@ impl<const WINDOW_MS: u64> Monitor<WINDOW_MS> {
             }
         }
     }
-    pub fn rate_pps(&mut self) -> Option<f32> {
+    pub fn rate_pps(&mut self) -> Option<f64> {
         self.evict();
-        let oldest = self.packets.front()?;
-        let newest = self.packets.back()?;
-        if oldest == newest {
+        let num = self.packets.len();
+        if num == 0 {
             return None;
-        }
-        let dt = newest.0 - oldest.0;
-        let num = self.packets.len() as f32;
-        let dt_secs = dt.as_secs_f32();
-        Some(num / dt_secs)
+        };
+        let dt = Duration::from_millis(WINDOW_MS).as_secs_f64();
+        Some(num as f64 / dt)
     }
 }
 
