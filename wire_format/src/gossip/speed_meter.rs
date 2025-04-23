@@ -55,12 +55,14 @@ pub struct BitrateMonitor {
     valid: Monitor,
     // All push packets
     push: Monitor,
+    // All pull request packets
+    pull_request: Monitor,
+    // All pull responses
+    pull_response: Monitor,
     // All prune packets
     prune: Monitor,
     // Ping and Pong
     pingpong: Monitor,
-    // Whatever is not covered above
-    others: Monitor,
     // CRDS stats
     //  ContactInfo and LegacyContactInfo packets (i.e. the whole point of gossip)
     crds_contact_info: Monitor,
@@ -133,6 +135,10 @@ impl BitrateMonitor {
             ("junk_pps", pps!(invalid), f64),
             ("pingpong", bps!(pingpong), f64),
             ("pingpong_pps", pps!(pingpong), f64),
+            ("pull_request", bps!(pull_request), f64),
+            ("pull_request", pps!(pull_request), f64),
+            ("pull_response", bps!(pull_response), f64),
+            ("pull_response", pps!(pull_response), f64),
             ("prune", bps!(prune), f64),
             ("prune_pps", pps!(prune), f64),
             ("valid", bps!(valid), f64),
@@ -147,6 +153,8 @@ impl BitrateMonitor {
             row("All Gossip", &mut self.valid),
             row("Junk", &mut self.invalid),
             row("Prune", &mut self.prune),
+            row("Pull Request", &mut self.pull_request),
+            row("Pull Response", &mut self.pull_response),
             row("Ping & Pong", &mut self.pingpong),
             row("CRDS: ContactInfo", &mut self.crds_contact_info),
             row("CRDS: Vote", &mut self.crds_vote),
@@ -167,6 +175,7 @@ impl BitrateMonitor {
                 self.push.push(bytes.len());
             }
             Protocol::PullResponse(_pubkey, crds_values) => {
+                self.pull_response.push(bytes.len());
                 for cv in crds_values {
                     self.try_retain_crds(cv);
                 }
@@ -177,8 +186,9 @@ impl BitrateMonitor {
             Protocol::PingMessage(_) | Protocol::PongMessage(_) => {
                 self.pingpong.push(bytes.len());
             }
-            _ => {
-                self.others.push(bytes.len());
+            Protocol::PullRequest(_, value) => {
+                self.pull_request.push(bytes.len());
+                self.try_retain_crds(value);
             }
         }
         self.valid.push(bytes.len());

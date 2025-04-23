@@ -20,7 +20,7 @@ use {
         geyser_plugin_manager::GeyserPluginManager, GeyserPluginManagerRequest,
     },
     solana_gossip::{
-        cluster_info::{ClusterInfo, Node},
+        cluster_info::{ClusterInfo, Node, NodeConfig},
         contact_info::Protocol,
         socketaddr,
     },
@@ -62,6 +62,7 @@ use {
         fs::{self, remove_dir_all, File},
         io::Read,
         net::{IpAddr, Ipv4Addr, SocketAddr},
+        num::NonZero,
         path::{Path, PathBuf},
         str::FromStr,
         sync::{Arc, RwLock},
@@ -946,12 +947,16 @@ impl TestValidator {
                 .unwrap(),
         )?;
 
-        let mut node = Node::new_single_bind(
-            &validator_identity.pubkey(),
-            &config.node_config.gossip_addr,
-            config.node_config.port_range,
-            config.node_config.bind_ip_addr,
-        );
+        let node_config = NodeConfig {
+            gossip_addr: config.node_config.gossip_addr.clone(),
+            port_range: config.node_config.port_range.clone(),
+            bind_ip_addr: config.node_config.bind_ip_addr.clone(),
+            num_tvu_sockets: NonZero::new(1).unwrap(),
+            public_tpu_addr: None,
+            public_tpu_forwards_addr: None,
+            num_quic_endpoints: NonZero::new(16).unwrap(),
+        };
+        let mut node = Node::new_with_external_ip(&validator_identity.pubkey(), node_config);
         if let Some((rpc, rpc_pubsub)) = config.rpc_ports {
             let addr = node.info.gossip().unwrap().ip();
             node.info.set_rpc((addr, rpc)).unwrap();

@@ -2403,9 +2403,11 @@ impl Node {
     }
 
     pub fn new_localhost_with_pubkey(pubkey: &Pubkey) -> Self {
+        #[allow(deprecated)]
         Self::new_localhost_with_pubkey_and_quic_endpoints(pubkey, DEFAULT_QUIC_ENDPOINTS)
     }
 
+    #[deprecated(since = "2.3", note = "does not need to be public")]
     pub fn new_localhost_with_pubkey_and_quic_endpoints(
         pubkey: &Pubkey,
         num_quic_endpoints: usize,
@@ -2451,12 +2453,12 @@ impl Node {
             find_available_ports_in_range(localhost_ip_addr, port_range).unwrap();
         let rpc_addr = SocketAddr::new(localhost_ip_addr, rpc_port);
         let rpc_pubsub_addr = SocketAddr::new(localhost_ip_addr, rpc_pubsub_port);
-        let broadcast = vec![bind_to_unspecified().unwrap()];
-        let retransmit_socket = bind_to_unspecified().unwrap();
+        let broadcast = vec![bind_to_localhost().unwrap()];
+        let retransmit_socket = bind_to_localhost().unwrap();
         let serve_repair = bind_to_localhost().unwrap();
         let serve_repair_quic = bind_to_localhost().unwrap();
-        let ancestor_hashes_requests = bind_to_unspecified().unwrap();
-        let ancestor_hashes_requests_quic = bind_to_unspecified().unwrap();
+        let ancestor_hashes_requests = bind_to_localhost().unwrap();
+        let ancestor_hashes_requests_quic = bind_to_localhost().unwrap();
 
         let tpu_vote_forwards_client = bind_to_localhost().unwrap();
         let quic_forwards_client = bind_to_localhost().unwrap();
