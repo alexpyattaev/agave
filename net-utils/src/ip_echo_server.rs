@@ -92,16 +92,14 @@ async fn process_connection(
             .await??;
             return Ok(());
         }
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            format!("Bad request header: {request_header}"),
-        ));
+        return Err(io::Error::other(format!(
+            "Bad request header: {request_header}"
+        )));
     }
 
     let msg =
         bincode::deserialize::<IpEchoServerMessage>(&data[HEADER_LENGTH..]).map_err(|err| {
-            io::Error::new(
-                io::ErrorKind::Other,
+            io::Error::other(
                 format!("Failed to deserialize IpEchoServerMessage: {err:?}"),
             )
         })?;

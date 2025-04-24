@@ -41,6 +41,9 @@ dev-context-only-utils = ["dep:pcap-file", "dep:hxdmp"]
 [lib]
 name = "solana_net_utils"
 
+[lints]
+workspace = true
+
 [[bin]]
 name = "solana-ip-address"
 path = "src/bin/ip_address.rs"
