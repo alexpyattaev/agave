@@ -71,12 +71,12 @@ pub struct Monitor<const WINDOW_MS: u64 = 1000> {
 }
 impl<const WINDOW_MS: u64> Monitor<WINDOW_MS> {
     pub fn push(&mut self, bytes: usize) {
+        self.evict();
         self.packets.push_back((Instant::now(), bytes));
         self.bytes_stored += bytes;
     }
 
     pub fn rate_bps(&mut self) -> Option<f64> {
-        self.evict();
         let num = self.packets.len();
         if num == 0 {
             return None;
@@ -98,7 +98,6 @@ impl<const WINDOW_MS: u64> Monitor<WINDOW_MS> {
         }
     }
     pub fn rate_pps(&mut self) -> Option<f64> {
-        self.evict();
         let num = self.packets.len();
         if num == 0 {
             return None;
