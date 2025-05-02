@@ -91,7 +91,9 @@ impl BitrateMonitor {
 
 impl PacketLogger for BitrateMonitor {
     fn handle_pkt(&mut self, wire_bytes: &[u8]) -> std::ops::ControlFlow<()> {
-        let data_slice = &wire_bytes[20 + 8..];
+        //let udp_dport = u16::from_be_bytes(wire_bytes[20 + 2..20 + 4].try_into().unwrap());
+        let udp_len = u16::from_be_bytes(wire_bytes[20 + 4..20 + 6].try_into().unwrap()) as usize;
+        let data_slice = &wire_bytes[20 + 8..20 + udp_len];
         let Some((data_slice, nonce)) = detect_repair_nonce(data_slice) else {
             return ControlFlow::Continue(());
         };
@@ -107,6 +109,7 @@ impl PacketLogger for BitrateMonitor {
             self.invalid.push(data_bytes);
             return ControlFlow::Continue(());
         }
+        //if udp_dport != 8002 {
         if nonce.is_some() {
             self.repairs.push(data_bytes);
         } else {

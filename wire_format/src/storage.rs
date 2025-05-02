@@ -77,6 +77,7 @@ impl<const WINDOW_MS: u64> Monitor<WINDOW_MS> {
     }
 
     pub fn rate_bps(&mut self) -> Option<f64> {
+        self.evict();
         let num = self.packets.len();
         if num == 0 {
             return None;
@@ -98,6 +99,7 @@ impl<const WINDOW_MS: u64> Monitor<WINDOW_MS> {
         }
     }
     pub fn rate_pps(&mut self) -> Option<f64> {
+        self.evict();
         let num = self.packets.len();
         if num == 0 {
             return None;

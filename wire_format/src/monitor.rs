@@ -175,6 +175,7 @@ pub async fn start_monitor(
                         Direction::Inbound => {
                             let repair_port =
                                 ports.repair.context("Repair port is required")?.port();
+                            println!("Opening ingress ports {turbine_port} and {repair_port}");
                             bpf_controls.allow_dst_port(turbine_port)?;
                             bpf_controls.allow_dst_port(repair_port)?;
                         }
