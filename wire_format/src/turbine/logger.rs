@@ -31,7 +31,7 @@ impl TurbineLogger {
         let (tx, rx) = tokio::sync::mpsc::channel(1024 * 1024);
         let mut writer = BufWriter::with_capacity(64 * 1024 * 1024, File::create(&output).await?);
         writer
-            .write(b"event_type:slot_number:index:fec_index:shreds_in_batch:us_since_epoch\n")
+            .write(b"event_type:slot_number:index:fec_index:data_shreds_in_set:code_shreds_in_set:us_since_epoch\n")
             .await?;
         async fn write_worker(
             mut writer: BufWriter<File>,
@@ -92,9 +92,9 @@ impl PacketLogger for TurbineLogger {
             return ControlFlow::Continue(());
         }
         let coding_header = get_coding_header(&pkt);
-        let shreds_in_batch = match coding_header {
-            Some(ch) => ch.num_coding_shreds + ch.num_data_shreds,
-            None => 0,
+        let (coding_shreds, data_shreds) = match coding_header {
+            Some(ch) => (ch.num_coding_shreds, ch.num_data_shreds),
+            None => (0, 0),
         };
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -103,7 +103,7 @@ impl PacketLogger for TurbineLogger {
         let mut buf = Vec::with_capacity(128);
         write!(
             &mut buf,
-            "{event_type}:{slot}:{idx}:{fecidx}:{shreds_in_batch}:{timestamp}\n",
+            "{event_type}:{slot}:{idx}:{fecidx}:{data_shreds}:{coding_shreds}:{timestamp}\n",
             slot = pkt.slot(),
             idx = pkt.index(),
             fecidx = pkt.fec_set_index(),

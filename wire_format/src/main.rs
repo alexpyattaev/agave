@@ -78,7 +78,7 @@ enum Commands {
         #[arg(short, long)]
         /// Gossip socket of the local validator (to fetch metadata and for interface bind)
         gossip_addr: SocketAddr,
-        #[arg(short, long, default_value = "120")]
+        #[arg(short, long, default_value = "300")]
         /// Timeout for discovery of turbine and repair ports. set to 0 to ony work with gossip
         discovery_timeout_sec: u64,
 
