@@ -47,11 +47,8 @@ pub async fn find_validator_ports(
     gossip_address: SocketAddr,
     timeout: Duration,
 ) -> anyhow::Result<Ports> {
-    let info = solana_net_utils::get_echo_server_info(&gossip_address).await?;
+    let shred_version = solana_net_utils::get_shred_version_async(&gossip_address).await?;
 
-    let shred_version = info
-        .shred_version
-        .context("Shred version not provided by entrypoint!")?;
     if timeout.is_zero() {
         let ports = Ports {
             pubkey: Pubkey::default(),

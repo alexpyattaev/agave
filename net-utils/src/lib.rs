@@ -8,6 +8,7 @@ pub mod sockets;
 #[cfg(feature = "dev-context-only-utils")]
 pub mod tooling_for_tests;
 
+use anyhow::Context as _;
 use ip_echo_server::IpEchoServerResponse;
 pub use ip_echo_server::{
     ip_echo_server, IpEchoServer, DEFAULT_IP_ECHO_SERVER_THREADS, MAX_PORT_COUNT_PER_MESSAGE,
@@ -55,10 +56,11 @@ pub fn get_public_ip_addr(ip_echo_server_addr: &SocketAddr) -> Result<IpAddr, St
     Ok(resp.address)
 }
 
-pub async fn get_echo_server_info(
-    ip_echo_server_addr: &SocketAddr,
-) -> anyhow::Result<IpEchoServerResponse> {
-    ip_echo_server_request(*ip_echo_server_addr, IpEchoServerMessage::default()).await
+pub async fn get_shred_version_async(ip_echo_server_addr: &SocketAddr) -> anyhow::Result<u16> {
+    ip_echo_server_request(*ip_echo_server_addr, IpEchoServerMessage::default())
+        .await?
+        .shred_version
+        .context("no shred version")
 }
 
 /// Determine the public IP address of this machine by asking an ip_echo_server at the given

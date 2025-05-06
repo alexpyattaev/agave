@@ -39,10 +39,10 @@ pub(crate) struct IpEchoServerMessage {
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IpEchoServerResponse {
     // Public IP address of request echoed back to the node.
-    pub address: IpAddr,
+    pub(crate) address: IpAddr,
     // Cluster shred-version of the node running the server.
     #[serde(deserialize_with = "default_on_eof")]
-    pub shred_version: Option<u16>,
+    pub(crate) shred_version: Option<u16>,
 }
 
 impl IpEchoServerMessage {
