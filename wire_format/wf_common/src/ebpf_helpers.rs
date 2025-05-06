@@ -55,7 +55,7 @@ fn parse_ip_header(ipv4hdr: *const Ipv4Hdr) -> (Ipv4Addr, Ipv4Addr, IpProto) {
 pub fn extract_headers(
     ctx: &ContextRef,
     flags: Flags,
-) -> Result<(usize, Ipv4Addr, Ipv4Addr, u16, u16), ()> {
+) -> Result<(usize, Ipv4Addr, Ipv4Addr, u16, u16, usize), ()> {
     let ethhdr: *const EthHdr = unsafe { ptr_at(&ctx, 0)? };
     match unsafe { (*ethhdr).ether_type } {
         EtherType::Ipv4 => {}
@@ -93,5 +93,7 @@ pub fn extract_headers(
     let udphdr: *const UdpHdr = unsafe { ptr_at(&ctx, ip_header_offset + Ipv4Hdr::LEN)? };
     let src_port = unsafe { u16::from_be((*udphdr).source) };
     let dst_port = unsafe { u16::from_be((*udphdr).dest) };
-    Ok((ip_header_offset, src_ip, dst_ip, src_port, dst_port))
+    let len = unsafe { (u16::from_be((*udphdr).len) as usize) + 20 };
+
+    Ok((ip_header_offset, src_ip, dst_ip, src_port, dst_port, len))
 }

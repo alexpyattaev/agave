@@ -39,7 +39,7 @@ pub fn wf_tc(ctx: TcContext) -> i32 {
 
 fn try_tc_egress(ctx: TcContext) -> Result<i32, ()> {
     let flags = FLAGS.get(0).cloned().unwrap_or_default();
-    let Ok((ip_header_offset, src_ip, dst_ip, src_port, dst_port)) = extract_headers(
+    let Ok((ip_header_offset, src_ip, dst_ip, src_port, dst_port, len)) = extract_headers(
         &ContextRef {
             data: ctx.data(),
             data_end: ctx.data_end(),
@@ -48,6 +48,10 @@ fn try_tc_egress(ctx: TcContext) -> Result<i32, ()> {
     ) else {
         return Ok(TC_ACT_PIPE);
     };
+
+    if len > ctx.data_end() - ctx.data() {
+        return Ok(TC_ACT_PIPE);
+    }
 
     if !should_capture(src_ip, dst_ip, src_port, dst_port) {
         return Ok(TC_ACT_PIPE);
@@ -67,8 +71,6 @@ fn try_tc_egress(ctx: TcContext) -> Result<i32, ()> {
 
     match RING_BUF.reserve::<[u8; SIZE]>(0) {
         Some(mut event) => {
-            let len = ctx.data_end() - ctx.data();
-
             // We check if packet len is greater than our reserved buffer size
             if aya_ebpf::check_bounds_signed(len as i64, 1, 1500) == false {
                 event.discard(0);
