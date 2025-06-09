@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     ops::ControlFlow,
     time::{Duration, Instant},
 };
@@ -7,7 +8,9 @@ use crate::{monitor::PacketLogger, storage::Monitor, ui::*};
 use crossbeam_channel::Sender;
 use iocraft::prelude::*;
 use solana_gossip::{crds_data::CrdsData, crds_value::CrdsValue, protocol::Protocol};
+use solana_pubkey::Pubkey;
 use solana_sanitize::Sanitize;
+use tokio::io::AsyncWriteExt;
 
 use super::parse_gossip;
 impl PacketLogger for BitrateMonitor {
@@ -41,6 +44,20 @@ impl PacketLogger for BitrateMonitor {
 
     async fn finalize(&mut self) -> anyhow::Result<()> {
         drop(self.channel.take());
+        let mut f = tokio::fs::File::create("got_epoch_slots.txt").await?;
+        f.write_all("{\n".as_bytes()).await?;
+        for (pk, num) in self.all_epoch_slots.iter() {
+            f.write_all(
+                format!(
+                    r#""{pk}":{num},
+        "#
+                )
+                .as_bytes(),
+            )
+            .await?;
+        }
+        f.write_all("}\n".as_bytes()).await?;
+        f.flush().await?;
         // allow UI to kill itself
         tokio::time::sleep(Duration::from_millis(200)).await;
         Ok(())
@@ -77,6 +94,7 @@ pub struct BitrateMonitor {
     channel: Option<Sender<RateDisplayItems>>,
     last_report: Option<Instant>,
     metrics_category: Option<&'static str>,
+    all_epoch_slots: HashMap<Pubkey, usize>,
 }
 
 impl BitrateMonitor {
@@ -202,6 +220,7 @@ impl BitrateMonitor {
         match cv.data() {
             CrdsData::EpochSlots(_esi, _es) => {
                 self.crds_epoch_slots.push(ser.len());
+                *self.all_epoch_slots.entry(cv.label().pubkey()).or_default() += 1;
             }
             CrdsData::Vote(_, _) => {
                 self.crds_vote.push(ser.len());

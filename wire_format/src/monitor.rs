@@ -2,7 +2,7 @@ use {
     crate::{
         bpf_controls::*,
         cluster_probes::Ports,
-        gossip,
+        gossip, repair,
         turbine::{self, TurbineLogger},
         Direction, WireProtocol,
     },
@@ -191,7 +191,38 @@ pub async fn start_monitor(
                     };
                     process_packet_flow(&mut bpf_controls, &mut monitor).await?;
                 }
-                WireProtocol::Repair => todo!("Repair not yet supported"),
+                WireProtocol::Repair => {
+                    let metrics = if report_metrics {
+                        Some(match direction {
+                            Direction::Inbound => "repair_rates_inbound",
+                            Direction::Outbound => "repair_rates_outbound",
+                            Direction::Both => todo!(),
+                        })
+                    } else {
+                        None
+                    };
+                    let mut monitor = repair::BitrateMonitor::new(metrics);
+                    let repair_requests_port =
+                        ports.repair.context("Repair port is required")?.port();
+                    let serve_repair_port = ports
+                        .serve_repair
+                        .context("Serve repair port is required")?
+                        .port();
+                    match direction {
+                        Direction::Inbound => {
+                            bpf_controls.allow_dst_port(serve_repair_port)?;
+                        }
+                        Direction::Outbound => {
+                            println!("Opening egress ports {serve_repair_port} and {repair_requests_port}");
+                            bpf_controls.allow_src_port(serve_repair_port)?;
+                            bpf_controls.allow_src_port(serve_repair_port + 1)?;
+                            bpf_controls.allow_src_port(serve_repair_port + 2)?;
+                            bpf_controls.allow_src_port(repair_requests_port)?;
+                        }
+                        Direction::Both => todo!(),
+                    };
+                    process_packet_flow(&mut bpf_controls, &mut monitor).await?;
+                }
             }
         }
         MonitorCommand::Capture {

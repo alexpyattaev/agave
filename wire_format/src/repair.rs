@@ -10,6 +10,9 @@ use crate::{
     storage::{fetch_dest, hexdump, DumbStorage, Monitor, WritePackets},
     Stats,
 };
+pub mod speed_meter;
+pub use speed_meter::*;
+
 use anyhow::Context;
 use bincode::Options;
 use log::{debug, error, info};
