@@ -6,6 +6,7 @@ use std::{
 use crate::{monitor::PacketLogger, storage::Monitor, ui::*};
 use crossbeam_channel::Sender;
 use iocraft::prelude::*;
+use solana_ledger::shred::wire;
 
 use super::{detect_repair_nonce, parse_turbine};
 
@@ -20,6 +21,8 @@ pub struct BitrateMonitor {
     coding_shreds: Monitor,
     data_shreds: Monitor,
     zero_bytes: Monitor,
+    // resigned shreds
+    resigned: Monitor,
     total_bytes: Monitor,
 
     channel: Option<Sender<RateDisplayItems>>,
@@ -59,6 +62,7 @@ impl BitrateMonitor {
             row("Coding shreds", &mut self.coding_shreds),
             row("Data shreds", &mut self.data_shreds),
             row("Zero bytes", &mut self.zero_bytes),
+            row("Resigned bytes", &mut self.resigned),
         ]
     }
     fn send_metrics(&mut self, metrics_category: &'static str) {
@@ -84,6 +88,8 @@ impl BitrateMonitor {
             ("coding_pps", pps!(coding_shreds), f64),
             ("data", bps!(data_shreds), f64),
             ("data_pps", pps!(data_shreds), f64),
+            ("resigned", bps!(resigned), f64),
+            ("resigned_pps", pps!(resigned), f64),
             ("zero_bytes", bps!(zero_bytes), f64),
         );
     }
@@ -117,6 +123,9 @@ impl PacketLogger for BitrateMonitor {
             self.coding_shreds.push(data_bytes);
         } else {
             self.data_shreds.push(data_bytes);
+        }
+        if wire::get_retransmitter_signature(&data_slice).is_ok() {
+            self.resigned.push(data_bytes);
         }
         self.zero_bytes
             .push(data_slice.iter().filter(|&e| *e == 0).count());
