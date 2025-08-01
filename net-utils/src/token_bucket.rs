@@ -1,13 +1,16 @@
 use {
+    cfg_if::cfg_if,
     dashmap::{mapref::entry::Entry, DashMap},
-    std::{
-        borrow::Borrow,
-        cmp::Reverse,
-        hash::Hash,
-        sync::atomic::{AtomicU64, AtomicUsize, Ordering},
-        time::Instant,
-    },
+    std::{borrow::Borrow, cmp::Reverse, hash::Hash, time::Instant},
 };
+
+cfg_if! {
+    if #[cfg(feature="shuttle-test")] {
+        use shuttle::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    } else {
+        use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    }
+}
 
 /// Enforces a rate limit on the volume of requests per unit time.
 ///
@@ -36,6 +39,9 @@ impl Clone for TokenBucket {
         }
     }
 }
+
+#[cfg(feature = "shuttle-test")]
+static TIME_US: std::sync::OnceLock<AtomicU64> = std::sync::OnceLock::new(); //used to override Instant::now()
 
 impl TokenBucket {
     /// Allocate a new TokenBucket
@@ -90,9 +96,15 @@ impl TokenBucket {
 
     /// Retrieves monotonic time since bucket creation.
     fn time_us(&self) -> u64 {
-        let now = Instant::now();
-        let elapsed = now.saturating_duration_since(self.base_time);
-        elapsed.as_micros() as u64
+        cfg_if! {
+            if #[cfg(feature="shuttle-test")] {
+                TIME_US.get().unwrap().load(Ordering::Relaxed)
+            } else {
+                let now = Instant::now();
+                let elapsed = now.saturating_duration_since(self.base_time);
+                elapsed.as_micros() as u64
+            }
+        }
     }
 
     /// Updates internal state of the bucket by
@@ -324,6 +336,50 @@ pub mod test {
         std::thread::sleep(Duration::from_millis(120));
         assert_eq!(tb.current_tokens(), 100, "Bucket should not overfill");
     }
+
+    #[cfg(feature = "shuttle-test")]
+    #[test]
+    fn shuttle_test_token_bucket_race() {
+        use shuttle::thread;
+        use std::sync::atomic::AtomicBool;
+        shuttle::check_random(
+            || {
+                if TIME_US.set(AtomicU64::new(0)).is_err() {
+                    TIME_US.get().unwrap().store(0, Ordering::Relaxed);
+                }
+                let test_duration_us = 2000;
+                let run: &AtomicBool = Box::leak(Box::new(AtomicBool::new(true)));
+                let tb: &TokenBucket = Box::leak(Box::new(TokenBucket::new(10, 10, 1000.0)));
+                let mut threads = vec![];
+                for idx in [1, 2] {
+                    let jh = thread::spawn(move || {
+                        let mut total = 0;
+                        while run.load(Ordering::Relaxed) {
+                            shuttle::thread::yield_now();
+                            if tb.consume_tokens(10).is_ok() {
+                                total += 1;
+                                shuttle::thread::yield_now();
+                                if idx == 1 {
+                                    let old =
+                                        TIME_US.get().unwrap().fetch_add(200, Ordering::Relaxed);
+                                    if old == test_duration_us {
+                                        run.store(false, Ordering::Relaxed);
+                                    }
+                                }
+                            }
+                        }
+                        total
+                    });
+                    threads.push(jh);
+                }
+                let received = threads.into_iter().map(|t| t.join().unwrap()).sum();
+
+                assert_eq!(1 + test_duration_us / 1000, received);
+            },
+            100,
+        );
+    }
+
     #[test]
     fn test_keyed_rate_limiter() {
         let prototype_bucket = TokenBucket::new(100, 100, 1000.0);

@@ -18,6 +18,7 @@ name = "solana_net_utils"
 [features]
 default = []
 dev-context-only-utils = ["dep:pcap-file", "dep:hxdmp"]
+shuttle-test=["dep:shuttle"]
 
 [dependencies]
 anyhow = { workspace = true }
@@ -36,6 +37,8 @@ socket2 = { workspace = true }
 solana-serde = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 url = { workspace = true }
+shuttle = { workspace = true, optional=true }
+cfg-if.workspace = true
 
 [dev-dependencies]
 solana-logger = { workspace = true }
