@@ -14211,6 +14211,7 @@ dependencies = [
  "libc",
  "log",
  "network-interface",
+ "network-types",
  "pcap-file",
  "pcap-file-tokio",
  "pkts",

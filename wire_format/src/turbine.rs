@@ -14,8 +14,8 @@ use anyhow::Context;
 use log::{debug, error, info};
 use pcap_file::pcapng::PcapNgReader;
 use pcap_file::pcapng::PcapNgWriter;
+use solana_ledger::shred::Shred;
 use solana_ledger::shred::{wire::get_shred_size, ShredVariant};
-use solana_ledger::shred::{CodingShredHeader, Shred};
 
 mod speed_meter;
 pub use speed_meter::*;
@@ -102,18 +102,6 @@ fn parse_turbine(bytes: &[u8]) -> anyhow::Result<Shred> {
 
 fn serialize(pkt: &Shred) -> Vec<u8> {
     pkt.payload().to_vec()
-}
-
-fn get_coding_header(pkt: &Shred) -> Option<CodingShredHeader> {
-    match pkt {
-        Shred::ShredCode(shred_code) => match shred_code {
-            solana_ledger::shred::shred_code::ShredCode::Merkle(shred_code) => {
-                Some(shred_code.coding_header.clone())
-            }
-            _ => None,
-        },
-        _ => None,
-    }
 }
 
 pub fn capture_turbine(

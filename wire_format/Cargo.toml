@@ -11,9 +11,10 @@ edition.workspace = true
 anyhow.workspace = true
 bincode.workspace = true
 
-clap = {version="4.5.28", features=["derive"]}
+clap = { version = "4.5.28", features = ["derive"] }
 hxdmp = "0.2.1"
 log.workspace = true
+network-types = "0.0.7"
 pcap-file = "2.0.0"
 pkts = "0.2.1"
 rayon.workspace = true
@@ -35,7 +36,15 @@ aya = "0.13"
 aya-log = "0.2"
 wf-common = { path = "wf_common", features = ["user"] }
 libc = "0.2"
-tokio = { workspace=true, features = ["macros", "rt", "rt-multi-thread", "net", "signal", "fs", "sync"] }
+tokio = { workspace = true, features = [
+    "macros",
+    "rt",
+    "rt-multi-thread",
+    "net",
+    "signal",
+    "fs",
+    "sync",
+] }
 pcap-file-tokio = "0.1.0"
 network-interface = "2.0.0"
 rustyline = "15.0.0"

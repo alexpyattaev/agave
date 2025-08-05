@@ -1,5 +1,5 @@
 use {
-    crate::{Flags, FILTER_LEN},
+    crate::{parse_ip_header, Flags, FILTER_LEN},
     aya_ebpf::maps::Array,
     core::{mem, net::Ipv4Addr},
     network_types::{
@@ -43,13 +43,6 @@ pub fn has_entry<T: Eq>(haystack: &Array<Option<T>>, needle: T, wildcard: T) -> 
         }
     }
     false
-}
-
-fn parse_ip_header(ipv4hdr: *const Ipv4Hdr) -> (Ipv4Addr, Ipv4Addr, IpProto) {
-    let src_ip = Ipv4Addr::from_bits(unsafe { u32::from_be((*ipv4hdr).src_addr) });
-    let dst_ip = Ipv4Addr::from_bits(unsafe { u32::from_be((*ipv4hdr).dst_addr) });
-    let ip_proto = unsafe { (*ipv4hdr).proto };
-    (src_ip, dst_ip, ip_proto)
 }
 
 pub fn extract_headers(

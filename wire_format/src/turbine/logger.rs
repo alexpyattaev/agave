@@ -4,6 +4,7 @@ use std::{io::Write, ops::ControlFlow, path::PathBuf};
 use crate::monitor::PacketLogger;
 use anyhow::Context;
 use log::info;
+use network_types::ip::Ipv4Hdr;
 use tokio::{
     fs::File,
     io::{AsyncWriteExt, BufWriter},
@@ -11,7 +12,7 @@ use tokio::{
     sync::mpsc::Sender,
 };
 
-use super::{detect_repair_nonce, get_coding_header, parse_turbine};
+use super::{detect_repair_nonce, parse_turbine};
 
 pub struct TurbineLogger {
     turbine_port: u16,
@@ -31,7 +32,7 @@ impl TurbineLogger {
         let (tx, rx) = tokio::sync::mpsc::channel(1024 * 1024);
         let mut writer = BufWriter::with_capacity(64 * 1024 * 1024, File::create(&output).await?);
         writer
-            .write(b"event_type:slot_number:index:fec_index:data_shreds_in_set:code_shreds_in_set:us_since_epoch\n")
+            .write(b"event_type:slot_number:index:fec_index:sender_ip:us_since_epoch\n")
             .await?;
         async fn write_worker(
             mut writer: BufWriter<File>,
@@ -73,6 +74,9 @@ impl TurbineLogger {
 
 impl PacketLogger for TurbineLogger {
     fn handle_pkt(&mut self, wire_bytes: &[u8]) -> std::ops::ControlFlow<()> {
+        let ip_hdr = &wire_bytes[0..20];
+        let ip_hdr_ptr = ip_hdr.as_ptr() as *const Ipv4Hdr;
+        let (src_ip, _dst_ip, _ip_proto) = wf_common::parse_ip_header(ip_hdr_ptr);
         // let udp_hdr = &wire_bytes[20..(20 + 8)];
         // let dst_port = u16::from_be_bytes(udp_hdr[2..4].try_into().unwrap());
         // TODO: validate that repair packets are coming over repair port
@@ -91,11 +95,6 @@ impl PacketLogger for TurbineLogger {
         if pkt.sanitize().is_err() {
             return ControlFlow::Continue(());
         }
-        let coding_header = get_coding_header(&pkt);
-        let (coding_shreds, data_shreds) = match coding_header {
-            Some(ch) => (ch.num_coding_shreds, ch.num_data_shreds),
-            None => (0, 0),
-        };
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -103,7 +102,7 @@ impl PacketLogger for TurbineLogger {
         let mut buf = Vec::with_capacity(128);
         write!(
             &mut buf,
-            "{event_type}:{slot}:{idx}:{fecidx}:{data_shreds}:{coding_shreds}:{timestamp}\n",
+            "{event_type}:{slot}:{idx}:{fecidx}:{src_ip}:{timestamp}\n",
             slot = pkt.slot(),
             idx = pkt.index(),
             fecidx = pkt.fec_set_index(),
