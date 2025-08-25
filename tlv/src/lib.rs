@@ -6,7 +6,7 @@ pub use tlv_record::{tlv_bincode_options, TlvDecodeError, TlvEncodeError, TlvRec
 
 const MAX_VALUE_LENGTH: usize = 1500;
 
-/// Macro that provides a quick and easy way to define TLV compatible enums
+/// Macro that provides a quick and easy way to define TLV compatible enums.
 ///
 /// ```
 /// use solana_tlv::{define_tlv_enum, signature::Signature};
@@ -117,7 +117,7 @@ pub trait TlvSerialize {
     fn serialize(&self, buffer: &mut BytesMut) -> Result<(), TlvEncodeError>;
 }
 
-/// Walk TLV records in a buffer without parsing them
+/// Walk TLV records in a buffer without parsing them.
 pub struct TlvIter {
     entries: Bytes,
 }
@@ -135,8 +135,8 @@ impl Iterator for TlvIter {
     }
 }
 
-/// Serialize all entries into given buffer
-/// Buffer must have preallocated memory
+/// Serialize all entries into given buffer.
+/// Buffer must have preallocated memory.
 pub fn serialize_into_buffer<'a, T: 'a + TlvSerialize>(
     entries: &'a [T],
     buffer: &mut BytesMut,

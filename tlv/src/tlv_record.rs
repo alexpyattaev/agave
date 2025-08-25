@@ -13,7 +13,7 @@ pub fn tlv_bincode_options() -> impl Options {
         .with_fixint_encoding()
 }
 
-/// Type-Length-Value encoded entry
+/// Type-Length-Value encoded entry.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TlvRecord {
     // type
@@ -46,7 +46,7 @@ impl TlvRecord {
     }
 }
 
-/// Helper to allow serialization into BytesMut
+/// Helper to allow serialization into BytesMut.
 struct BytesMutWriter<'a>(&'a mut BytesMut);
 
 impl Write for BytesMutWriter<'_> {

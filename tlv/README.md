@@ -6,7 +6,7 @@ TLV is a well-established format to encode binary data on the wire, offering maj
 
 ## Wire format
 
-Packet consists of sequence of byte-aligned records. Each record contains:
+A packet consists of a sequence of byte-aligned records. Each record contains:
 * type:u8 - 1 byte
 * length:u16 - 1-3 bytes on the wire (1 byte if less than 127 bytes, uses solana-short-vec impl)
 * value - 1..MTU bytes
@@ -42,14 +42,14 @@ let tlv_data = vec![
 ];
 let mut buffer = BytesMut::with_capacity(2000);
 serialize_into_buffer(&tlv_data, &mut buffer).unwrap();
-//send buffer over the wire
+// send buffer over the wire
 let recovered_data: Vec<ExtensionNew> = deserialize_from_buffer(buffer.freeze()).collect();
 ```
 
 ## Signatures
 
-You can attach `signature::Signature` TLV to the end of a message to sign the whole message.
+A `signature::Signature` TLV can be attached to the end of a message to sign the whole message.
 
 ## Performance
 
-This crate was not heavily optimized yet, so it is likely one could optimize it a lot
+This crate was not heavily optimized yet, so it is likely one could optimize it a lot.
