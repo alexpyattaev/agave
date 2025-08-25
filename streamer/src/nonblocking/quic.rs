@@ -648,7 +648,7 @@ fn compute_recieve_window_base(max_stake: u64, peer_type: ConnectionPeerType) ->
     let min_ratio = QUIC_UNSTAKED_RECEIVE_WINDOW_RATIO;
     // Linear interpolation between min_ratio and max_ratio as stake approaches
     // max_stake
-    min_ratio + (stake * (max_ratio - min_ratio) + max_stake / 2) / max_stake;
+    min_ratio + (stake * (max_ratio - min_ratio) + max_stake / 2) / max_stake
 }
 
 /// Target bitrate for an unstaked connection
@@ -659,7 +659,8 @@ const MAX_ALLOWED_RTT: Duration = Duration::from_millis(200);
 
 fn compute_receive_window_bdp(window_base: u64, rtt: Duration) -> VarInt {
     let millis = rtt.as_millis().min(MAX_ALLOWED_RTT.as_millis()) as u64;
-    let receive_window = millis * TARGET_UNSTAKED_KBPS;
+    let receive_window =
+        (window_base * millis * TARGET_UNSTAKED_KBPS) / QUIC_UNSTAKED_RECEIVE_WINDOW_RATIO;
     VarInt::from_u64(receive_window).unwrap_or(VarInt::MAX)
 }
 
@@ -1191,7 +1192,8 @@ async fn handle_connection(
         stream_load_ema.update_ema_if_needed();
 
         let new_window = compute_receive_window_bdp(receive_window_base, connection.rtt());
-        debug!("Updating receive window for {remote_addr:?} to {new_window:?}");
+        debug!("Updating receive window for {remote_addr:?} to {new_window:?} based on rtt {:?} and base of {}",
+            connection.rtt(), receive_window_base);
         connection.set_receive_window(new_window);
     }
 
