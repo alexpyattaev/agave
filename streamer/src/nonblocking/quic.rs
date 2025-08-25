@@ -650,7 +650,8 @@ fn compute_max_receive_rate_kbps(max_stake: u64, peer: ConnectionPeerType) -> u6
 
 /// Compute the RX window based on bandwidth-delay-product
 fn compute_receive_window_bdp(max_receive_rate_kbps: u64, rtt: Duration) -> VarInt {
-    let millis = rtt.as_millis().min(MAX_ALLOWED_RTT.as_millis()) as u64;
+    // max(1) is needed on localhost to avoid zero result
+    let millis = rtt.as_millis().max(1).min(MAX_ALLOWED_RTT.as_millis()) as u64;
     let receive_window = (max_receive_rate_kbps * millis) / 8;
     VarInt::from_u64(receive_window).unwrap_or(VarInt::MAX)
 }
