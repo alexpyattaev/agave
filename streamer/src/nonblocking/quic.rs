@@ -487,6 +487,7 @@ fn compute_max_allowed_uni_streams(peer_type: ConnectionPeerType, total_stake: u
         }
         ConnectionPeerType::Unstaked => QUIC_MAX_UNSTAKED_CONCURRENT_STREAMS,
     }
+    *4
 }
 
 enum ConnectionHandlerError {
