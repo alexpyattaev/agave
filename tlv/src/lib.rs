@@ -114,7 +114,7 @@ macro_rules! define_tlv_enum {
 }
 
 /// This function is for use by define_tlv_enum! macro, do not use directly
-pub fn deseriazlie_tagged_value_with_bincode<'a, INNER: Deserialize<'a>>(
+pub fn deserialize_tagged_value_with_bincode<'a, INNER: Deserialize<'a>>(
     record: &'a TlvRecord,
 ) -> Result<INNER, TlvDecodeError> {
     let opts = tlv_bincode_options();
@@ -147,7 +147,7 @@ pub struct TlvIter {
 }
 
 impl TlvIter {
-    /// Construct an iterator over Bytes object holding seriazlied TlvRecords
+    /// Construct an iterator over Bytes object holding serialized TlvRecords
     ///
     /// This iterator is not guaranteed to walk the entirety of the provided
     /// buffer, and will instead stop on the first invalid entry.

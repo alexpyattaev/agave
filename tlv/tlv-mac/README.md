@@ -14,4 +14,4 @@ Example of the usage for alpenglow voting is available in `tests/vote.rs`
 
 ## Performance
 
-This crate was not heavily optimized yet, so it is likely one could optimize it a lot.
+This crate has not been heavily optimized and likely has room for further improvement
