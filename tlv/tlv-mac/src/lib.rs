@@ -10,16 +10,33 @@ use {
     std::{net::SocketAddr, ops::Deref},
 };
 
+/// marker trait for valid signature sizes
+pub trait _ValidSigSize {} //TODO: turn this into a const generic assert once it stabilizes
+// can be anything from 1 to 16 bytes in practice, feel free to expand
+impl _ValidSigSize for _ConstUsize<2> {}
+impl _ValidSigSize for _ConstUsize<4> {}
+impl _ValidSigSize for _ConstUsize<8> {}
+impl _ValidSigSize for _ConstUsize<16> {}
+
+pub struct _ConstUsize<const N: usize>;
+impl<const N: usize> _ConstUsize<N> {}
+
 /// Poly 1305 signature for a packet.
 /// Can be truncated from default of 16 bytes down as needed.
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Clone, Copy)]
-pub struct Signature<const N: usize = 16> {
+pub struct Signature<const N: usize = 16>
+where
+    _ConstUsize<N>: _ValidSigSize, // Signature exists only when N implements ValidSigSize
+{
     #[serde_as(as = "[_; N]")]
     signature: [u8; N],
 }
 
-impl<const N: usize> Signature<N> {
+impl<const N: usize> Signature<N>
+where
+    _ConstUsize<N>: _ValidSigSize,
+{
     /// Fill UDP pseudoheader based on packet contents.
     /// Panics if given incompatible address family addresses.
     fn fill_udp_pseudoheader(
@@ -63,18 +80,20 @@ impl<const N: usize> Signature<N> {
         nonce: &[u8; 12],
         msg: &[u8],
     ) -> Self {
-        debug_assert!(N <= 16, "Can not use >16 bytes signature");
         let mut pseudoheader = [0u8; 36]; // fit both v6 and v4
         let pseudoheader = Self::fill_udp_pseudoheader(src, dst, &mut pseudoheader);
         Self {
-            signature: chacha20_poly1305_mac(key, nonce, &[pseudoheader, msg])[0..N]
-                .try_into()
-                .unwrap_or([0u8; N]),
+            signature: *chacha20_poly1305_mac(key, nonce, &[pseudoheader, msg])
+                .first_chunk()
+                .expect("This operation is infallible for any N<=16 as enforced by type system"),
         }
     }
 }
 
-impl<const N: usize> Deref for Signature<N> {
+impl<const N: usize> Deref for Signature<N>
+where
+    _ConstUsize<N>: _ValidSigSize,
+{
     type Target = [u8; N];
 
     fn deref(&self) -> &Self::Target {

@@ -96,7 +96,7 @@ macro_rules! define_tlv_enum {
 
     // Helper to deserialize with bincode
     (@decode [] $record:ident $variant:path, $inner:ty) => {
-        Ok($variant($crate::deseriazlie_tagged_value_with_bincode($record)?))
+        Ok($variant($crate::deserialize_tagged_value_with_bincode($record)?))
     };
 
     // Helper to be able to serialize #[raw] variants

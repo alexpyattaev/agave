@@ -74,7 +74,11 @@ fn main() {
 
     // try replaying a valid message to a wrong address
     let dst2: SocketAddr = "1.2.5.4:8888".parse().unwrap();
-    decode_and_verify_signature(src, dst2, key, buffer).unwrap_err();
+
+    assert_eq!(
+        decode_and_verify_signature(src, dst2, key, buffer).unwrap_err(),
+        "Invalid packet!"
+    );
 }
 
 fn decode_and_verify_signature(
