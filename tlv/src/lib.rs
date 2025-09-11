@@ -191,6 +191,7 @@ mod tests {
     use {
         crate::{define_tlv_enum, deserialize_from_buffer, serialize_into_buffer},
         bytes::{Bytes, BytesMut},
+        serde::Serialize,
         solana_short_vec::decode_shortu16_len,
     };
 
@@ -293,5 +294,26 @@ mod tests {
 
         let recovered_data: Vec<ExtensionNew> = deserialize_from_buffer(buffer.freeze()).collect();
         assert_eq!(recovered_data, tlv_data)
+    }
+
+    // checks that we are wire-compatible with gossip TLV impl
+    #[test]
+    fn test_abi_wire_compat_gossip() {
+        use solana_short_vec as short_vec;
+        #[derive(Serialize)]
+        struct TlvRecord {
+            typ: u8, // type
+            #[serde(with = "short_vec")]
+            bytes: Vec<u8>, // length and value
+        }
+        let tlv_data = vec![ExtensionNew::Test(u64::MAX)];
+        let mut buffer = BytesMut::with_capacity(50);
+        serialize_into_buffer(&tlv_data, &mut buffer).unwrap();
+        let rec = TlvRecord {
+            typ: 1,
+            bytes: vec![255, 255, 255, 255, 255, 255, 255, 255],
+        };
+        let bincode_vec = bincode::serialize(&rec).unwrap();
+        assert_eq!(bincode_vec, buffer.as_ref());
     }
 }
