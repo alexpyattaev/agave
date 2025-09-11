@@ -50,7 +50,7 @@ where
                 pseudoheader[4..6].copy_from_slice(&src.port().to_be_bytes());
                 pseudoheader[6..10].copy_from_slice(&dst.ip().octets());
                 pseudoheader[10..12].copy_from_slice(&dst.port().to_be_bytes());
-                &pseudoheader[0..14]
+                &pseudoheader[0..12]
             }
             (SocketAddr::V6(src), SocketAddr::V6(dst)) => {
                 pseudoheader[0..16].copy_from_slice(&src.ip().octets());
@@ -143,5 +143,24 @@ mod tests {
         key[2] ^= 1;
         let bad = chacha20_poly1305_mac(&key, &nonce, &[&msg]);
         assert_ne!(bad, tag);
+    }
+    #[test]
+    fn mac_udp_roundtrip() {
+        let key = &[0x11u8; 32];
+        let nonce = &[0x22u8; 12];
+        let msg = &mut [1u8; 42];
+        let src1 = "1.2.3.4:8833".parse().unwrap();
+        let src2 = "1.2.3.4:8822".parse().unwrap();
+        let dst1 = "1.2.3.4:8833".parse().unwrap();
+        let signature1: Signature<8> = Signature::new_poly1305_for_udp(src1, dst1, key, nonce, msg);
+        let signature2 = Signature::new_poly1305_for_udp(src1, dst1, key, nonce, msg);
+        assert_eq!(signature1, signature2);
+
+        // negative tests
+        let signature2 = Signature::new_poly1305_for_udp(src2, dst1, key, nonce, msg);
+        assert_ne!(signature1, signature2);
+        msg[2] ^= 1;
+        let signature2 = Signature::new_poly1305_for_udp(src1, dst1, key, nonce, msg);
+        assert_ne!(signature1, signature2);
     }
 }
