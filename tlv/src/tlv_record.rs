@@ -84,7 +84,7 @@ impl TlvSerialize for TlvRecord {
         let opts = tlv_bincode_options();
         let len = ShortU16(self.value.len() as u16);
         #[allow(clippy::arithmetic_side_effects)] // this has no chance to overflow u64
-        let total_len = 1 + opts.serialized_size(&len).unwrap_or(3) + self.value.len() as u64;
+        let total_len = 1 + opts.serialized_size(&len)? + self.value.len() as u64;
         if total_len > buffer.spare_capacity_mut().len() as u64 {
             return Err(TlvEncodeError::NotEnoughSpace);
         }
