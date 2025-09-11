@@ -56,7 +56,7 @@ A `solana_tlv_mac::Signature` entry can be attached to the end of a message to s
 
 ## Performance
 
-This crate has not been heavily optimized and likely has room for further improvement  
+This crate has not been heavily optimized and likely has room for further improvement
 
 ## Caveats
 
