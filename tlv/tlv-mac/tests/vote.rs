@@ -86,13 +86,17 @@ fn decode_and_verify_signature(
     dst: SocketAddr,
     key: [u8; 32],
     buffer: Bytes,
-) -> Result<Vec<AlepnglowVotor>, &'static str> {
+) -> Result<Vec<AlepnglowVotor>, String> {
     // decode and verify the signature
     let mut recovered = Vec::new();
     let mut signed_portion = 0;
     let mut nonce = [0u8; 12];
-    for (size, record) in TlvIter::new(buffer.clone()) {
-        let record: AlepnglowVotor = record.try_into().map_err(|_| "Parse error")?;
+    for (size, maybe_record) in TlvIter::new(buffer.clone()) {
+        let maybe_record: Result<AlepnglowVotor, _> = maybe_record.try_into();
+        let record = match maybe_record {
+            Ok(record) => record,
+            Err(e) => Err(e.to_string())?,
+        };
 
         match record {
             AlepnglowVotor::Mac(signature) => {
@@ -104,7 +108,7 @@ fn decode_and_verify_signature(
                     &buffer[..signed_portion],
                 );
                 if signature != correct_signature {
-                    return Err("Invalid packet!");
+                    return Err("Invalid packet!".to_owned());
                 }
                 recovered.push(record);
                 break; // do not read past signed portion!
