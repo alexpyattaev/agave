@@ -435,7 +435,7 @@ pub mod test {
         shuttle::check_random(
             || {
                 TIME_US.store(0, Ordering::SeqCst);
-                let test_duration_us = 2000;
+                let test_duration_us = 2500;
                 let run: &AtomicBool = Box::leak(Box::new(AtomicBool::new(true)));
                 let tb: &TokenBucket = Box::leak(Box::new(TokenBucket::new(10, 20, 5000.0)));
 
