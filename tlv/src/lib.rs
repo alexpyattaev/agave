@@ -113,7 +113,7 @@ macro_rules! define_tlv_enum {
     };
 }
 
-/// This function is for use by define_tlv_enum! macro, do not use directly
+/// To be used by define_tlv_enum! macro, do not use directly
 pub fn deserialize_tagged_value_with_bincode<'a, INNER: Deserialize<'a>>(
     record: &'a TlvRecord,
 ) -> Result<INNER, TlvDecodeError> {
@@ -121,7 +121,7 @@ pub fn deserialize_tagged_value_with_bincode<'a, INNER: Deserialize<'a>>(
     Ok(opts.deserialize::<INNER>(record.value())?)
 }
 
-/// This function is for use by define_tlv_enum! macro, do not use directly
+/// To be used by define_tlv_enum! macro, do not use directly
 pub fn serialize_tagged_value_with_bincode<T: Serialize>(
     inner: &T,
     tag: u8,
@@ -131,9 +131,9 @@ pub fn serialize_tagged_value_with_bincode<T: Serialize>(
     TlvRecord::new(tag, Bytes::from_owner(data))
 }
 
-/// Trait that marks objects that can be serialized using TLV.
-/// This trait should be implemented by define_tlv_enum macro.
-/// Do not implement this manually for your types.
+/// Marks types that can be serialized using TLV.
+/// Implemented by the define_tlv_enum macro.
+/// Do not implement this trait for your types.
 pub trait TlvSerialize {
     fn serialize(&self, buffer: &mut BytesMut) -> Result<(), TlvEncodeError>;
 }
