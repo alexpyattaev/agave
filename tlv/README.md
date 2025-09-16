@@ -1,6 +1,6 @@
 ## Tag-Length-Value data support for Solana
 
-TLV (aka Type Length Value) is a well-established format to encode binary data on the wire, offering major advantages compared to most alternatives:
+TLV (Type Length Value) is a well-established format to encode binary data on the wire, offering major advantages compared to most alternatives:
 1. Ability to evolve existing protocols without hard version switch
 2. Efficient parsing and serialization
 3. Perfect forward compatibility
@@ -34,7 +34,7 @@ define_tlv_enum! (pub(crate) enum Extension {
 });
 ```
 
-It is critically important to never reuse tags associated with variants, as that will lead to parsing errors.
+Variant tags must be unique. Reusing them causes parsing errors.
 
 Intended workflow:
 ```rust
@@ -61,4 +61,4 @@ This crate has not been heavily optimized and likely has room for further improv
 ## Caveats
 
 Since the `define_tlv_enum` is a macro, you need to include serde into dependencies of any crate using the
-macro to allow it to compile.
+macro.
