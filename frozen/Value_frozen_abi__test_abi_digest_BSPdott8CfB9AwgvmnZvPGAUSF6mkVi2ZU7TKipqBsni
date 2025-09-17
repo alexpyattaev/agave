@@ -1,0 +1,11 @@
+struct Value (fields = 3)
+    field signature: u8
+        primitive u8
+    field data: u16
+        primitive u16
+    field hash: (u16, u16)
+        tuple (elements = 2)
+            element u16
+                primitive u16
+            element u16
+                primitive u16

@@ -1,0 +1,15 @@
+struct Value (fields = 4)
+    field signature: u8
+        primitive u8
+    field data: u16
+        primitive u16
+    field things: alloc::vec::Vec<u8>
+        seq (elements = 1)
+            element u8
+                primitive u8
+    field hash: (u16, u16)
+        tuple (elements = 2)
+            element u16
+                primitive u16
+            element u16
+                primitive u16
