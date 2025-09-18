@@ -17,7 +17,7 @@ pub struct Options {
 
 /// Build the project
 fn build_project(opts: &Options) -> Result<(), anyhow::Error> {
-    let mut args = vec!["build"];
+    let mut args = vec!["build", "-j8"];
     if !opts.debug {
         args.push("--release")
     }

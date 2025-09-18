@@ -109,7 +109,7 @@ impl PacketLogger for TurbineLogger {
             }
             else {
                 pkt.index()
-            };
+            },
             fecidx = pkt.fec_set_index(),
         )
         .unwrap();
