@@ -16,7 +16,7 @@ def index_slots_by_byte_ranges(file_path):
             next_pos = f.tell()
             decoded = line.decode(errors='ignore').strip()
             #print(f"Processing line at byte position {current_pos} to {next_pos}: {decoded}")
-            
+
             if not decoded or ":" not in decoded:
                 line = f.readline()
                 current_pos = next_pos
@@ -48,7 +48,7 @@ def read_slot_data_by_bytes(file_path, byte_range, target):
         chunk = f.read(byte_range[1] - byte_range[0]).decode(errors='ignore')
         columns = ["type", "slot ID", "Shred ID", "FEC ID", "Sender", "time_stamp"]
         df = pd.read_csv(io.StringIO(chunk), sep=":", names=columns,
-                         dtype={"type": str, "slot ID": int, "Shred ID": int, "FEC ID":int, 
+                         dtype={"type": str, "slot ID": int, "Shred ID": int, "FEC ID":int,
                                 "Sender":str , "time_stamp": int})
         df["time_stamp"] = pd.to_datetime(pd.to_numeric(df["time_stamp"], errors="coerce"), unit="us", utc=True)
         filtered_df = df[df["slot ID"] == target]
@@ -72,14 +72,13 @@ def when_batch_done(block_df):
 
         for fec_id, group in grouped:
             group = group.sort_values("time_stamp")
-            
+
             if not batch_size:
                 continue
-            
+
             total_shreds_received = group.shape[0]
             block_total_shreds += total_shreds_received
             block_batches += 1
-
             first_arrival = group.groupby("Shred ID")["time_stamp"].first()
             time_stamps = first_arrival.sort_values().tolist()
             block_unique_shreds += len(time_stamps)
@@ -118,7 +117,7 @@ def extract_block(block_df):
     grouped_by_fec = block_df.groupby("FEC ID")
 
     for fec_id, group in grouped_by_fec:
-        group = group.sort_values("time_stamp") 
+        group = group.sort_values("time_stamp")
         rcv_data = {}
         total = 0
 
@@ -160,7 +159,7 @@ def plot_shreds(df, ax, shreds_dict, duplicate, ready_indicators, show_repair=Tr
     try:
         zero_time = min(min(times.keys()) for times in shreds_dict.values())
     except ValueError:
-        return 
+        return
 
     # plot FEC set
     for i, (fec_set_num, time_data) in enumerate(shreds_dict.items()):
@@ -175,7 +174,7 @@ def plot_shreds(df, ax, shreds_dict, duplicate, ready_indicators, show_repair=Tr
     if ready_indicators:
         done_times = [(ts - zero_time).total_seconds() * 1000 for ts in ready_indicators.keys()]
         done_counts = list(ready_indicators.values())
-        shred_done = ax.scatter(done_times, done_counts, color='green', alpha=1, s=80, marker='X', label="Batch Done")
+        ax.scatter(done_times, done_counts, color='green', alpha=1, s=80, marker='X', label="Batch Done")
 
     # plot repair shreds
     if show_repair:
@@ -186,15 +185,15 @@ def plot_shreds(df, ax, shreds_dict, duplicate, ready_indicators, show_repair=Tr
             y = shreds_dict.get(row["FEC ID"], {}).get(t, None)
             if y is not None:
                 label = "Repair Shred" if i == 0 else "_nolegend_"
-                ax.scatter(t_ms, y, marker='o', color='orange', s=20, label=label)
+                ax.scatter(t_ms, y, marker='o', color='orange', s=30, label=label)
     # plot duplicates
     if show_duplicate and duplicate:
         dup_x, dup_y = [], []
         for timestamps, totals in duplicate.values():
             dup_x.extend([(t - zero_time).total_seconds() * 1000 for t in timestamps])
             dup_y.extend(totals)
-        ax.scatter(dup_x, dup_y, color='red', alpha=0.9, s=10, label="Duplicates")
-        
+        ax.scatter(dup_x, dup_y, color='red', s=20, label="Duplicates")
+
     # some labels
     ax.set_xlabel("Time since first shred (ms)", fontsize=12, color="white")
     ax.set_ylabel("Shred count", fontsize=12, color="white")
@@ -238,42 +237,42 @@ def main():
     cursor = Cursor(slot_ids)
     plt.style.use("dark_background")
     fig, ax = plt.subplots(figsize=(12, 6))
-    
+
     check_ax = plt.axes([0.01, 0.8, 0.08, 0.1])
     visibility_options = {
         "Repair": True,
         "Duplicate": True
     }
-    
-    check = CheckButtons(check_ax, 
-                         list(visibility_options.keys()), 
-                         list(visibility_options.values()), 
-                         check_props={"color": "white"}, 
+
+    check = CheckButtons(check_ax,
+                         list(visibility_options.keys()),
+                         list(visibility_options.values()),
+                         check_props={"color": "white"},
                          frame_props={"edgecolor": "white"})
-    
+
     def render():
         slot_id = cursor.current()
         print(f"Slot ID: {slot_id} ")
         byte_range = slot_map[slot_id]
-        
+
         df = read_slot_data_by_bytes(file_path, byte_range, slot_id)
-        
+
         if current_filter["type"] == "REPAIR":
             df = df[df["type"] == "REPAIR"]
         elif current_filter["type"] == "SHRED":
             df = df[df["type"] == "SHRED"]
-        
+
         shreds, duplicates = extract_block(df)
         done_batches = when_batch_done(df)
         ready_indicators = ready_indicator(done_batches, shreds)
-        
+
         plot_shreds(df, ax, shreds, duplicates, ready_indicators,
                     show_repair=visibility_options["Repair"],
                     show_duplicate=visibility_options["Duplicate"])
-        
+
         fig.suptitle(f"Block number {cursor.current()} - Showing {current_filter['type']} shreds", fontsize=14, color="white")
         fig.canvas.draw()
-        
+
     def check_toggle(label):
         visibility_options[label] = not visibility_options[label]
         render()
