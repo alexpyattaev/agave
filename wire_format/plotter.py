@@ -167,7 +167,7 @@ def plot_shreds(df, ax, shreds_dict, duplicate, ready_indicators, show_repair=Tr
         deltas = [(t - zero_time).total_seconds() * 1000 for t in times]
         counts = [time_data[t] for t in times]
 
-        ax.plot(deltas, counts, color=colors[i % len(colors)], alpha=1, linewidth=2, label=f"FEC {fec_set_num}")
+        ax.plot(deltas, counts, color=colors[i % len(colors)], alpha=1, linewidth=2, label=f"FEC {fec_set_num//32}")
         max_y = max(max_y, counts[-1])
 
     # plot batch is ready marks
@@ -192,7 +192,7 @@ def plot_shreds(df, ax, shreds_dict, duplicate, ready_indicators, show_repair=Tr
         for timestamps, totals in duplicate.values():
             dup_x.extend([(t - zero_time).total_seconds() * 1000 for t in timestamps])
             dup_y.extend(totals)
-        ax.scatter(dup_x, dup_y, color='red', s=20, label="Duplicates")
+        ax.scatter(dup_x, dup_y, color='red', marker="+", s=25, label="Duplicates")
 
     # some labels
     ax.set_xlabel("Time since first shred (ms)", fontsize=12, color="white")
