@@ -104,7 +104,12 @@ impl PacketLogger for TurbineLogger {
             &mut buf,
             "{event_type}:{slot}:{idx}:{fecidx}:{src_ip}:{timestamp}\n",
             slot = pkt.slot(),
-            idx = pkt.index(),
+            idx = if pkt.is_code(){
+                pkt.index()*2
+            }
+            else {
+                pkt.index()
+            };
             fecidx = pkt.fec_set_index(),
         )
         .unwrap();
