@@ -658,6 +658,20 @@ const SIGNATURE: [u8; SIGNATURE_BYTES] = [7u8; SIGNATURE_BYTES];
 
 fn report_collected_votes(peers: HashMap<Pubkey, PeerData>, total_staked: Stake, slot: Slot) {
     trace!("Reporting statistics for slot {slot}");
+    let mut missing_notarize = Vec::new();
+    let mut missing_notarize_cert = Vec::new();
+    let mut missing_finalize_cert = Vec::new();
+    for (address, peer) in peers.iter() {
+        if peer.relative_time_of_arrival[0] == 0 {
+            missing_notarize.push(peer.address);
+        }
+        if peer.relative_time_of_arrival[1] == 0 {
+            missing_notarize_cert.push(peer.address);
+        }
+        if peer.relative_time_of_arrival[2] == 0 {
+            missing_finalize_cert.push(peer.address);
+        }
+    }
     let (total_voted_nodes, stake_weighted_delay, percent_collected) =
         compute_stake_weighted_means(&peers, total_staked);
     datapoint_info!(
