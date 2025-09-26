@@ -661,17 +661,23 @@ fn report_collected_votes(peers: HashMap<Pubkey, PeerData>, total_staked: Stake,
     let mut missing_notarize = Vec::new();
     let mut missing_notarize_cert = Vec::new();
     let mut missing_finalize_cert = Vec::new();
-    for (address, peer) in peers.iter() {
-        if peer.relative_time_of_arrival[0] == 0 {
+    for (_address, peer) in peers.iter() {
+        if peer.relative_time_of_arrival[0] == None {
             missing_notarize.push(peer.address);
         }
-        if peer.relative_time_of_arrival[1] == 0 {
+        if peer.relative_time_of_arrival[1] == None {
             missing_notarize_cert.push(peer.address);
         }
-        if peer.relative_time_of_arrival[2] == 0 {
+        if peer.relative_time_of_arrival[2] == None {
             missing_finalize_cert.push(peer.address);
         }
     }
+    info!(
+        "MissingAGCerts:
+        notarize={missing_notarize:?}
+        notarize_cert={missing_notarize_cert:?}
+        finalize_cert={missing_finalize_cert:?}"
+    );
     let (total_voted_nodes, stake_weighted_delay, percent_collected) =
         compute_stake_weighted_means(&peers, total_staked);
     datapoint_info!(
