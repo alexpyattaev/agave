@@ -11,6 +11,7 @@ edition = { workspace = true }
 publish = false
 
 [dependencies]
+bencher.workspace = true
 bincode = { workspace = true }
 bytes = { workspace = true }
 chacha20 = "0.9.1"
@@ -20,6 +21,12 @@ serde = { workspace = true, features = ["derive"] }
 serde_with = { workspace = true, features = ["macros"] }
 solana-short-vec = { workspace = true }
 thiserror = { workspace = true }
+wincode = {path="/home/sol/wincode/wincode", features=["solana-short-vec"]}
+wincode-derive = {path="/home/sol/wincode/wincode-derive"}
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "tlv_vs_wincode"
+harness = false
