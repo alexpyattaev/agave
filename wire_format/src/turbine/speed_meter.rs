@@ -96,7 +96,7 @@ impl BitrateMonitor {
 }
 
 impl PacketLogger for BitrateMonitor {
-    fn handle_pkt(&mut self, wire_bytes: &[u8]) -> std::ops::ControlFlow<()> {
+    async fn handle_pkt(&mut self, wire_bytes: &[u8]) -> std::ops::ControlFlow<()> {
         let data_slice = &wire_bytes[20 + 8..];
         let Some((data_slice, nonce)) = detect_repair_nonce(data_slice) else {
             return ControlFlow::Continue(());

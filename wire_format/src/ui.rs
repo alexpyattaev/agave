@@ -295,3 +295,12 @@ pub fn RatesMonitorMenu(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         RateDisplay(rates:rates.read().clone(), units:"Mbps", max_val:smooth_max as f64)
     }
 }
+
+use chrono::{Timelike, Utc};
+
+pub fn _utc_minute_string() -> String {
+    let now = Utc::now();
+    let rounded = now.with_second(0).unwrap().with_nanosecond(0).unwrap();
+
+    rounded.format("%Y-%m-%d_%H-%M").to_string()
+}

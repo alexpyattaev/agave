@@ -98,7 +98,7 @@ impl BitrateMonitor {
 
 #[allow(dead_code, unused_variables)]
 impl PacketLogger for BitrateMonitor {
-    fn handle_pkt(&mut self, wire_bytes: &[u8]) -> std::ops::ControlFlow<()> {
+    async fn handle_pkt(&mut self, wire_bytes: &[u8]) -> std::ops::ControlFlow<()> {
         let data_slice = &wire_bytes[20 + 8..];
         let data_bytes = data_slice.len();
         println!("Got {data_bytes} in packet");

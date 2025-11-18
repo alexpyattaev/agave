@@ -130,7 +130,7 @@ impl PacketLogger for MysteryCRDSLogger {
         file.flush().await?;
         Ok(())
     }
-    fn handle_pkt(&mut self, wire_bytes: &[u8]) -> ControlFlow<()> {
+    async fn handle_pkt(&mut self, wire_bytes: &[u8]) -> ControlFlow<()> {
         let Ok(pkt) = parse_gossip(&wire_bytes[20 + 8..]) else {
             return ControlFlow::Continue(());
         };

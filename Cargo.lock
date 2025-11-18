@@ -14136,6 +14136,8 @@ dependencies = [
  "aya",
  "aya-log",
  "bincode",
+ "bytemuck",
+ "chrono",
  "clap 4.5.31",
  "crossbeam-channel",
  "derive_more 2.0.1",
@@ -14167,6 +14169,7 @@ dependencies = [
  "tokio",
  "tokio-util 0.7.16",
  "wf-common",
+ "wincode",
 ]
 
 [[package]]

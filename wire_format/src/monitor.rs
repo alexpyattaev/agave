@@ -10,7 +10,6 @@ use {
     clap::Subcommand,
     log::{error, info},
     std::{
-        io::Write,
         net::{IpAddr, Ipv4Addr},
         ops::ControlFlow,
         path::PathBuf,
@@ -261,10 +260,10 @@ pub async fn detect_repair_shreds(
         tokio::select! {
            res =  tokio::time::timeout(timeout, rx.recv())=> {
                match res{
-                   Ok(shred) => {
-                       if let Some(shred) = shred {
+                   Ok(x) => {
+                       if let Some(_x) = x {
                            bpf_controls.reset_dst()?;
-                           std::io::stdout().write_all(&shred)?;
+                           info!("Detected repair shred");
                            result = port;
                        }
                        else{
@@ -291,7 +290,7 @@ pub async fn detect_repair_shreds(
 }
 
 pub trait PacketLogger {
-    fn handle_pkt(&mut self, wire_bytes: &[u8]) -> ControlFlow<()>;
+    async fn handle_pkt(&mut self, wire_bytes: &[u8]) -> ControlFlow<()>;
     async fn finalize(&mut self) -> anyhow::Result<()>;
 }
 
@@ -320,7 +319,7 @@ pub async fn process_packet_flow(
             let size = unsafe { std::ptr::read_unaligned::<u16>(ptr as *const u16) };
             let wire_bytes = unsafe { std::slice::from_raw_parts(ptr.byte_add(2), size.into()) };
 
-            if let ControlFlow::Break(_) = handler.handle_pkt(wire_bytes) {
+            if let ControlFlow::Break(_) = handler.handle_pkt(wire_bytes).await {
                 break 'outer;
             }
         }

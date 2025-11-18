@@ -19,6 +19,9 @@ pcap-file = "2.0.0"
 pkts = "0.2.1"
 rayon.workspace = true
 rscap = "0.3.1"
+chrono = { version = "0.4", features = ["clock"] }
+
+
 serde = { workspace = true, features = ["derive"] }
 solana-gossip.workspace = true
 solana-core.workspace = true
@@ -54,5 +57,7 @@ serde_json.workspace = true
 tokio-util.workspace = true
 arrayvec.workspace = true
 solana-metrics.workspace = true
+bytemuck = { workspace = true, features = ["bytemuck_derive"] }
+wincode.workspace = true
 [lints]
 workspace = true
