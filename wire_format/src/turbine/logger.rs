@@ -48,7 +48,7 @@ async fn write_worker(
 impl TurbineLogger {
     async fn new_writer(&mut self) -> anyhow::Result<()> {
         let mut path = self.output_file_name.clone();
-        path.push(format!("_{}.bin", self.num_captured));
+        path.set_file_name(format!("{:?}_{}.bin", path.file_name(), self.num_captured));
         info!("Logging arrival pattern into {path:?}");
         let writer = BufWriter::with_capacity(64 * 1024 * 1024, File::create(&path).await?);
 
