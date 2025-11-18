@@ -127,10 +127,13 @@ impl PacketLogger for TurbineLogger {
             .unwrap()
             .as_micros() as u64;
 
+        let fec_set_index = pkt.fec_set_index();
+        let unique_index =
+            fec_set_index * 64 + pkt.index() - fec_set_index + if pkt.is_code() { 32 } else { 0 };
         let log_entry = TurbineLogEntry {
             us_since_epoch: timestamp,
             slot_number: pkt.slot(),
-            index: pkt.index(),
+            index: unique_index,
             sender_ip: src_ip.to_bits(),
             is_repair,
         };
