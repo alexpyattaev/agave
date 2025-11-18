@@ -48,7 +48,11 @@ async fn write_worker(
 impl TurbineLogger {
     async fn new_writer(&mut self) -> anyhow::Result<()> {
         let mut path = self.output_file_name.clone();
-        path.set_file_name(format!("{:?}_{}.bin", path.file_name(), self.num_captured));
+        path.set_file_name(format!(
+            "{}_{}.bin",
+            path.file_name().unwrap().to_string_lossy(),
+            self.num_captured
+        ));
         info!("Logging arrival pattern into {path:?}");
         let writer = BufWriter::with_capacity(64 * 1024 * 1024, File::create(&path).await?);
 
@@ -138,7 +142,7 @@ impl PacketLogger for TurbineLogger {
         if let Err(_e) = self.chan.as_mut().unwrap().try_send(log_entry) {
             return ControlFlow::Break(());
         };
-        if self.writer.is_some() && self.num_captured % 1024 * 1024 * 64 == 0 {
+        if self.writer.is_some() && (self.num_captured % (1024 * 1024 * 64) == 0) {
             info!("Rotating log file after {} packets", self.num_captured);
             self.new_writer().await.unwrap();
         }
