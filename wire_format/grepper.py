@@ -22,7 +22,8 @@ def main():
     arr = arr[arr["slot_number"] == args.slot]
     if len(arr) == 0:
         print("Not found")
-    np.save(arr, f"{args.path}_{args.slot}")
+        exit()
+    np.save(f"{args.path}_{args.slot}", arr)
 
 
 if __name__ == "__main__":
