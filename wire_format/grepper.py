@@ -20,11 +20,14 @@ def main():
         ]
     )
     arr = np.fromfile(args.path, dtype=dtype)
-    arr = arr[args.slot_max <= arr["slot_number"] <= args.slot_max]
+
+    arr = arr[
+        (args.slot_min <= arr["slot_number"]) * (arr["slot_number"] <= args.slot_max)
+    ]
     if len(arr) == 0:
         print("Not found")
         exit()
-    np.save(f"{args.path}_{args.slot}", arr)
+    np.save(f"grepped_{args.slot_min}_{args.slot_max}", arr)
 
 
 if __name__ == "__main__":

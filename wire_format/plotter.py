@@ -8,6 +8,7 @@ from matplotlib.widgets import Button
 from collections import defaultdict
 from matplotlib.widgets import CheckButtons
 import numpy as np
+from ipaddress import IPv4Address
 
 
 def parse_data(file_name: str):
@@ -156,6 +157,12 @@ def plot_shreds(
         zero_time = min(min(times.keys()) for times in shreds_dict.values())
     except ValueError:
         return
+
+    late = df.loc[(df["time_stamp"] - zero_time) > 400000]
+    print(late)
+    for row in late.loc[:, ["time_stamp", "sender_ip"]].itertuples(index=False):
+        ip = IPv4Address(row.sender_ip)
+        print(f"""delay: {(row.time_stamp - zero_time) / 1000} ip {ip}""")
 
     # plot FEC set
     for i, (fec_set_num, time_data) in enumerate(shreds_dict.items()):
