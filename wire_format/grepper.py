@@ -20,7 +20,9 @@ def main():
     )
     arr = np.fromfile(args.path, dtype=dtype)
     arr = arr[arr["slot_number"] == args.slot]
-    np.save(f"{args.path}_{args.slot}")
+    if len(arr) == 0:
+        print("Not found")
+    np.save(arr, f"{args.path}_{args.slot}")
 
 
 if __name__ == "__main__":
