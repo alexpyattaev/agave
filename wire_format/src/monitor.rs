@@ -250,7 +250,7 @@ pub async fn detect_repair_shreds(
     bpf_controls.allow_src_port(0)?;
     bpf_controls.set_flags(bpf_flags)?;
     let (mut logger, mut rx) = TurbineLogger::new_with_channel(0, 0)?;
-    let timeout = Duration::from_secs(1);
+    let timeout = Duration::from_secs(10);
     let mut result = 0;
     for port in port_range.iter().cloned() {
         bpf_controls.reset_dst()?;

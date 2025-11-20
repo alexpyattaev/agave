@@ -6,7 +6,8 @@ import numpy as np
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("path", help="data file path", type=str)
-    parser.add_argument("slot", help="slot to locate", type=int)
+    parser.add_argument("slot_min", help="first slot to locate", type=int)
+    parser.add_argument("slot_max", help="last slot to locate", type=int)
     args = parser.parse_args()
 
     dtype = np.dtype(
@@ -19,7 +20,7 @@ def main():
         ]
     )
     arr = np.fromfile(args.path, dtype=dtype)
-    arr = arr[arr["slot_number"] == args.slot]
+    arr = arr[args.slot_max <= arr["slot_number"] <= args.slot_max]
     if len(arr) == 0:
         print("Not found")
         exit()
