@@ -1,98 +1,228 @@
+#!/usr/bin/env python3
 import pandas as pd
-import matplotlib.pyplot as plt
 import matplotlib as mpl
+import matplotlib.pyplot as plt
 import argparse
+import io
+from matplotlib.widgets import Button
+from collections import defaultdict
+from matplotlib.widgets import CheckButtons
 import numpy as np
-import matplotlib.dates as mdates
 
-def parse_data(file_name:str, time_sample:int, start:int, end:int):
-    columns = ["type", "slot ID", "Shred ID", "FEC ID", "FEC set size", "time_stamp"]
-    start = max(start, 1) # skip header
-    data = pd.read_csv(file_name, skiprows=range(0, start), sep=":", names=columns,
-                        dtype={"type": str, "slot ID": int, "Shred ID": int, "FEC ID":int, "FEC set size":int, "time_stamp": str},
-                        nrows=end - start)
-    data["time_stamp"] = pd.to_numeric(data["time_stamp"], errors="coerce")
-    data["time_stamp"] = pd.to_datetime(data["time_stamp"], unit="us", utc=True, errors="coerce")
-    data["time_stamp"] = data["time_stamp"].dt.round(f"{time_sample}us")
+
+def parse_data(file_name: str):
+    # if we are given npy file produced by grepper
+    if file_name.endswith("npy"):
+        arr = np.load(file_name)
+    else:
+        # if we are given raw binary file
+        dtype = np.dtype(
+            [
+                ("time_stamp", "<u8"),
+                ("slot_number", "<u8"),
+                ("index", "<u4"),
+                ("sender_ip", "<u4"),
+                ("is_repair", "u1"),
+            ]
+        )
+        arr = np.fromfile(file_name, dtype=dtype)
+
+    data = pd.DataFrame(arr)
+    data["is_repair"] = data["is_repair"].astype(bool)
+
     return data
 
-def extract_block(data, block_idx:int):
-    res = {}
+
+# Searches when batches for code block were ready to assemble
+# Batch done when amount of unique shreds for one FEC Set  >= FEC ID Size/2
+# Returns dict {FEC_SET_ID:TIME_STAMP}
+def when_batch_done(block_df):
+    done_stamps = {}
+    block_times = []
+    block_total_shreds = 0
+    block_unique_shreds = 0
+    block_batches = 0
+    batch_size = 64
+
+    try:
+        repairs = block_df.loc[block_df["is_repair"]].shape[0]
+
+        grouped = block_df.groupby("fec_index")
+
+        for fec_id, group in grouped:
+            group = group.sort_values("time_stamp")
+
+            if not batch_size:
+                continue
+
+            total_shreds_received = group.shape[0]
+            block_total_shreds += total_shreds_received
+            block_batches += 1
+            first_arrival = group.groupby("index")["time_stamp"].first()
+            time_stamps = first_arrival.sort_values().tolist()
+            block_unique_shreds += len(time_stamps)
+
+            batch_time = (
+                group["time_stamp"].iloc[-1] - group["time_stamp"].iloc[0]
+            ) // 1000
+            block_times.append(batch_time)
+
+            required = batch_size // 2
+            if len(time_stamps) >= required:
+                done_stamps[fec_id] = time_stamps[required - 1]
+
+        print(
+            f"Block Time Statistics:\n- Batch average time: {(sum(block_times) / len(block_times)):.3f} ms"
+            f"\n- Longest batch time: {max(block_times):.3f} ms"
+            f"\n- Smallest batch time: {min(block_times):.3f} ms"
+        )
+        print(
+            f"Block Data Statistics:\n- Batch count: {block_batches}"
+            f"\n- Total shreds received: {block_total_shreds}"
+            f"\n- Unique shreds received: {block_unique_shreds}"
+            f"\n- Duplicate shreds: {block_total_shreds - block_unique_shreds}"
+            f"\n- Repair shreds in block: {repairs}"
+        )
+
+    except Exception as e:
+        print("Some error happened...", e)
+    finally:
+        return done_stamps
+
+
+def ready_indicator(dct, shreds_set):
+    indicators = {}
+    for id, time_stamp in dct.items():
+        indicators[time_stamp] = shreds_set[id][time_stamp]
+    return indicators
+
+
+def extract_block(block_df):
+    shreds = defaultdict(dict)
     duplicate = {}
-    block_df = data.loc[data["slot ID"] == block_idx]
-    fec_ids = list(set(block_df["FEC ID"]))
-    block_df.loc[:, "FEC ID"] = block_df["FEC ID"]
-    for id in fec_ids:
+
+    block_df.loc[:, "fec_index"] = block_df["index"] // 64
+    grouped_by_fec = block_df.groupby("fec_index")
+
+    for fec_id, group in grouped_by_fec:
+        group = group.sort_values("time_stamp")
         rcv_data = {}
-        name = id
-        res[name] = {}
-        filtered = block_df.loc[block_df["FEC ID"] == id]
         total = 0
-        for t in filtered["time_stamp"].unique():
-            total += len(filtered.loc[block_df["time_stamp"] == t])
-            res[name][t] = total
-            for shred in filtered.loc[block_df["time_stamp"] == t].itertuples():
-                if shred[3] not in rcv_data:
-                    rcv_data[shred[3]] = [[],[],[]]
-                rcv_data[shred[3]][0].append(shred[6]) #TIMESTAMP
-                rcv_data[shred[3]][1].append(total) #CURRENT TOTAL
-                rcv_data[shred[3]][2].append(shred[1]) #RECEIVE METHOD (REPAIR/TURBINE)
-        for shred in rcv_data.keys():
-            if len(rcv_data[shred][1]) > 1:
-                duplicate[("|".join([str(shred),str([rcv_data[shred][2]])[3]]))] = [rcv_data[shred][0], rcv_data[shred][1]]
 
-    return res, duplicate
+        grouped_by_time = group.groupby("time_stamp")
+
+        for time, time_group in grouped_by_time:
+            time_shred_ids = time_group["index"].tolist()
+            duplicates_count = 0
+
+            for shred_id in time_shred_ids:
+                if shred_id in rcv_data:
+                    duplicates_count += 1
+                else:
+                    rcv_data[shred_id] = [[], [], []]
+
+            total += len(time_shred_ids) - duplicates_count
+            shreds[fec_id][time] = total
+
+            for _, row in time_group.iterrows():
+                shred_id = row["index"]
+                if shred_id in rcv_data:
+                    rcv_data[shred_id][0].append(row["time_stamp"])
+                    rcv_data[shred_id][1].append(total)
+                    rcv_data[shred_id][2].append(row["is_repair"])
+
+        # count duplicates
+        for shred_id, (timestamps, totals, repair) in rcv_data.items():
+            if len(totals) > 1:
+                duplicate[shred_id] = [timestamps, totals]
+
+    return dict(shreds), duplicate
 
 
-def data_process(data, data_type):
-    res = {}
-    for block in data["slot number"].unique():
-        name = " ".join([str(block),data_type])
-        res[name] = {}
-        filtered = data.loc[data["slot number"] == block]
-        total = 0
-        for t in filtered["time_stamp"].unique():
-            total += len(filtered.loc[filtered["time_stamp"] == t])
-            res[name][t] = total
-    return res
-
-def plot_shreds(ax, shreds_dict, duplicate):
+def plot_shreds(
+    df,
+    ax,
+    shreds_dict,
+    duplicate,
+    ready_indicators,
+    show_repair=True,
+    show_duplicate=True,
+):
     ax.clear()
-    colors = mpl.color_sequences['Set1']
+    colors = mpl.color_sequences["Set1"]
     max_y = 0
 
+    try:
+        zero_time = min(min(times.keys()) for times in shreds_dict.values())
+    except ValueError:
+        return
+
+    # plot FEC set
     for i, (fec_set_num, time_data) in enumerate(shreds_dict.items()):
-        times = sorted(time_data.keys())  # Get timestamps in order
-        counts = [time_data[t] for t in times]  # Get corresponding amounts
-        ax.plot(times, counts, color=colors[i % len(colors)], alpha=1, linewidth=2)
-        max_y = max(max_y, max(counts))
-        ax.annotate(f'{fec_set_num}', xy=(times[-1], counts[-1]),
-            rotation=90, xytext=(times[-1], counts[-1]+5),
-                    arrowprops=dict(facecolor='white', headwidth=2, headlength=3, width=1),)
+        times = sorted(time_data.keys())
+        deltas = [(t - zero_time) // 1000 for t in times]
+        counts = [time_data[t] for t in times]
 
-    #for i, (name,(timestamps, totals)) in enumerate(duplicate.items()):
-    #    ax.scatter(timestamps, totals, color='red', alpha=1, s=35)
-    #    for i in range(0,len(totals)):
-    #        t = timestamps[i]
-    #        total = totals[i]
-    #        ax.annotate(f'{name}', xy=(t, total), xytext=(t, total + 3), ha='center', fontsize=9,rotation=90,
-    #                    color='white', arrowprops=dict(facecolor='white', headwidth=2, headlength=3, width=1))
+        ax.plot(
+            deltas,
+            counts,
+            color=colors[i % len(colors)],
+            alpha=1,
+            linewidth=2,
+            label=f"FEC {fec_set_num // 32}",
+        )
+        max_y = max(max_y, counts[-1])
 
-    ax.set_xlabel("Timestamp", fontsize=12, color="white")
-    ax.set_ylabel("Count", fontsize=12, color="white")
-    ax.set_ylim([0,max_y + 10])
-    ax.tick_params(axis="x",rotation=45, color="white")
+    # plot batch is ready marks
+    if ready_indicators:
+        done_times = [(ts - zero_time) // 1000 for ts in ready_indicators.keys()]
+        done_counts = list(ready_indicators.values())
+        ax.scatter(
+            done_times,
+            done_counts,
+            color="green",
+            alpha=1,
+            s=80,
+            marker="X",
+            label="Batch Done",
+        )
+
+    # plot repair shreds
+    if show_repair:
+        repair_df = df[df["is_repair"]]
+        for i, (_, row) in enumerate(repair_df.iterrows()):
+            t = row["time_stamp"]
+            t_ms = (t - zero_time) // 1000
+            y = shreds_dict.get(row["fec_index"], {}).get(t, None)
+            if y is not None:
+                label = "Repair Shred" if i == 0 else "_nolegend_"
+                ax.scatter(t_ms, y, marker="o", color="orange", s=30, label=label)
+    # plot duplicates
+    if show_duplicate and duplicate:
+        dup_x, dup_y = [], []
+        for timestamps, totals in duplicate.values():
+            dup_x.extend([(t - zero_time) // 1000 for t in timestamps])
+            dup_y.extend(totals)
+        ax.scatter(dup_x, dup_y, color="red", marker="+", s=25, label="Duplicates")
+
+    # some labels
+    ax.set_xlabel("Time since first shred (ms)", fontsize=12, color="white")
+    ax.set_ylabel("Shred count", fontsize=12, color="white")
+    ax.set_ylim([0, max_y + 5])
+    ax.tick_params(axis="x", rotation=45, color="white")
     ax.tick_params(axis="y", color="white")
     ax.grid(color="gray", linestyle="--", linewidth=0.5, alpha=0.5)
+    ax.legend(fontsize=8, loc="upper left", bbox_to_anchor=(1, 1), borderaxespad=0.0)
 
 
+# cursor class for navigation thorugh blocks
 class Cursor:
     def __init__(self, data):
-        self.data=data
+        self.data = data
         self.index = 0
 
     def next(self):
-        if self.index < len(self.data)-1:
+        if self.index < len(self.data) - 1:
             self.index += 1
         return self.current()
 
@@ -104,50 +234,80 @@ class Cursor:
     def current(self):
         return self.data[self.index]
 
+
 def main():
+    current_filter = {"type": "ALL"}
     parser = argparse.ArgumentParser()
-    parser.add_argument("path", help = "data file path", type=str)
-    parser.add_argument("end_line", help = "last line that script reads", type=int)
-    parser.add_argument("--start_line", help = "first line that script reads", type=int, default=0)
-    parser.add_argument("--time_sample", help = "time sample in microseconds", type=int, default = 10000)
+    parser.add_argument("path", help="data file path", type=str)
     args = parser.parse_args()
-    data = parse_data(args.path, args.time_sample, args.start_line, args.end_line)
+
+    data = parse_data(args.path)
+
+    cursor = Cursor(sorted(pd.unique(data["slot_number"])))
     plt.style.use("dark_background")
-    fig, axes = plt.subplots(figsize=(12,6))
+    fig, ax = plt.subplots(figsize=(12, 6))
 
-    #stamps = (data["time_stamp"].unique())
-    #print(f"STAMPS:{stamps}")
+    check_ax = plt.axes([0.01, 0.8, 0.08, 0.1])
+    visibility_options = {"Repair": True, "Duplicate": True}
 
-    block_cursor = Cursor(sorted(pd.unique(data["slot ID"])))
-    shreds_set, duplicate = extract_block(data, block_cursor.current())
-    plot_shreds(axes, shreds_set, duplicate)
-    def on_press(event):
-        if event.key == 'right':
-            block_cursor.next()
-        elif event.key == "left":
-            block_cursor.prev()
-        elif event.key == "escape":
-            exit()
+    check = CheckButtons(
+        check_ax,
+        list(visibility_options.keys()),
+        list(visibility_options.values()),
+        check_props={"color": "white"},
+        frame_props={"edgecolor": "white"},
+    )
 
-        shreds_set, duplicate = extract_block(data, block_cursor.current())
-        plot_shreds(axes, shreds_set, duplicate)
-        fig.suptitle(f"Block number {block_cursor.current()}")
+    def render():
+        slot_id = cursor.current()
+        print(f"Slot ID: {slot_id} ")
+        df = data.loc[data["slot_number"] == slot_id].copy()
+
+        if current_filter["type"] == "REPAIR":
+            df = df[df["is_repair"]]
+        elif current_filter["type"] == "SHRED":
+            df = df[not df["is_repair"]]
+
+        shreds, duplicates = extract_block(df)
+        done_batches = when_batch_done(df)
+        ready_indicators = ready_indicator(done_batches, shreds)
+
+        plot_shreds(
+            df,
+            ax,
+            shreds,
+            duplicates,
+            ready_indicators,
+            show_repair=visibility_options["Repair"],
+            show_duplicate=visibility_options["Duplicate"],
+        )
+
+        fig.suptitle(
+            f"Block number {cursor.current()} - Showing {current_filter['type']} shreds",
+            fontsize=14,
+            color="white",
+        )
         fig.canvas.draw()
 
-    fig.canvas.mpl_connect('key_press_event', on_press)
+    def check_toggle(label):
+        visibility_options[label] = not visibility_options[label]
+        render()
+
+    def on_press(event):
+        if event.key == "right":
+            cursor.next()
+        elif event.key == "left":
+            cursor.prev()
+        elif event.key == "escape":
+            exit()
+        render()
+
+    check.on_clicked(check_toggle)
+
+    fig.canvas.mpl_connect("key_press_event", on_press)
+    render()
     plt.show()
-    #shreds = data.loc[data["type"] == "SHRED_RX"]
-    #stamps = (data["time_stamp"].unique())
-    #print(f"STAMPS:{stamps}")
-    #print("Shreds are separated...")
-    #repair = data.loc[data["type"] == "REPAIR_RX"]
-    #print("Repairs are separated...")
-    #datasets = data_process(shreds, "shred")
-    #print("Dataset: shreds added")
-    #datasets.update(data_process(repair, "repair"))
-    #print("Dataset: repairs added")
-    #plot_datasets(datasets)
-    return 0
+
 
 if __name__ == "__main__":
     main()
