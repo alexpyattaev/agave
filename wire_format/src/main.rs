@@ -159,7 +159,14 @@ async fn main() -> Result<(), anyhow::Error> {
                 ports.repair_candidates(repair_search_port_range.0..repair_search_port_range.1);
             let repair_port =
                 detect_repair_shreds(bind_interface, flags, &cand_ports, ports.gossip.ip()).await?;
-            ports.repair = repair_port.map(|p| SocketAddr::new(ports.gossip.ip(), p));
+            ports.repair = repair_port
+                .map(|p| SocketAddr::new(ports.gossip.ip(), p))
+                .or_else(|| {
+                    ports.serve_repair.map(|mut s| {
+                        s.set_port(s.port() - 2);
+                        s
+                    })
+                }); // this is an agave-specific heuristic
             let configfile = File::create(&cli.config)?;
             serde_json::to_writer_pretty(configfile, &ports)?;
             info!("Written ports to {:?}", &cli.config);

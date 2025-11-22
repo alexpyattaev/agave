@@ -6,6 +6,7 @@ use std::{
 use crate::{monitor::PacketLogger, storage::Monitor, ui::*};
 use crossbeam_channel::Sender;
 use iocraft::prelude::*;
+use network_types::ip::Ipv4Hdr;
 use solana_ledger::shred::wire;
 
 use super::{detect_repair_nonce, parse_turbine};
@@ -23,6 +24,8 @@ pub struct BitrateMonitor {
     zero_bytes: Monitor,
     // resigned shreds
     resigned: Monitor,
+    // shreds received over multicast
+    multicast: Monitor,
     total_bytes: Monitor,
 
     channel: Option<Sender<RateDisplayItems>>,
@@ -63,6 +66,7 @@ impl BitrateMonitor {
             row("Data shreds", &mut self.data_shreds),
             row("Zero bytes", &mut self.zero_bytes),
             row("Resigned bytes", &mut self.resigned),
+            row("Multicast bytes", &mut self.multicast),
         ]
     }
     fn send_metrics(&mut self, metrics_category: &'static str) {
@@ -97,6 +101,9 @@ impl BitrateMonitor {
 
 impl PacketLogger for BitrateMonitor {
     async fn handle_pkt(&mut self, wire_bytes: &[u8]) -> std::ops::ControlFlow<()> {
+        let ip_hdr = &wire_bytes[0..20];
+        let ip_hdr_ptr = ip_hdr.as_ptr() as *const Ipv4Hdr;
+        let (src_ip, dst_ip, _ip_proto) = wf_common::parse_ip_header(ip_hdr_ptr);
         let data_slice = &wire_bytes[20 + 8..];
         let Some((data_slice, nonce)) = detect_repair_nonce(data_slice) else {
             return ControlFlow::Continue(());
@@ -112,6 +119,9 @@ impl PacketLogger for BitrateMonitor {
         if pkt.sanitize().is_err() {
             self.invalid.push(data_bytes);
             return ControlFlow::Continue(());
+        }
+        if src_ip.is_multicast() || dst_ip.is_multicast() {
+            self.multicast.push(data_bytes);
         }
         //if udp_dport != 8002 {
         if nonce.is_some() {

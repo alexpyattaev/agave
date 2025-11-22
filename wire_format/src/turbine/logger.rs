@@ -27,7 +27,19 @@ pub struct TurbineLogEntry {
     slot_number: u64,
     index: u32,
     sender_ip: u32,
-    is_repair: bool,
+    flags: Flags,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default, wincode::SchemaWrite)]
+pub struct Flags(u8);
+
+impl Flags {
+    /// Define individual flags as constants.
+    pub const REPAIR: Flags = Flags(0b0000_0001);
+    pub const MULTICAST: Flags = Flags(0b0000_0010);
+    pub fn set(&mut self, other: Flags) {
+        self.0 |= other.0;
+    }
 }
 
 async fn write_worker(
@@ -103,7 +115,7 @@ impl PacketLogger for TurbineLogger {
     async fn handle_pkt(&mut self, wire_bytes: &[u8]) -> std::ops::ControlFlow<()> {
         let ip_hdr = &wire_bytes[0..20];
         let ip_hdr_ptr = ip_hdr.as_ptr() as *const Ipv4Hdr;
-        let (src_ip, _dst_ip, _ip_proto) = wf_common::parse_ip_header(ip_hdr_ptr);
+        let (src_ip, dst_ip, _ip_proto) = wf_common::parse_ip_header(ip_hdr_ptr);
         // let udp_hdr = &wire_bytes[20..(20 + 8)];
         // let dst_port = u16::from_be_bytes(udp_hdr[2..4].try_into().unwrap());
         // TODO: validate that repair packets are coming over repair port
@@ -111,7 +123,13 @@ impl PacketLogger for TurbineLogger {
         let Some((data_slice, nonce)) = detect_repair_nonce(data_slice) else {
             return ControlFlow::Continue(());
         };
-        let is_repair = nonce.is_some();
+        let mut flags = Flags(0);
+        if nonce.is_some() {
+            flags.set(Flags::REPAIR);
+        }
+        if dst_ip.is_multicast() {
+            flags.set(Flags::MULTICAST);
+        }
 
         let pkt = match parse_turbine(data_slice) {
             Ok(pkt) => pkt,
@@ -135,7 +153,7 @@ impl PacketLogger for TurbineLogger {
             slot_number: pkt.slot(),
             index: unique_index,
             sender_ip: src_ip.to_bits(),
-            is_repair,
+            flags,
         };
 
         self.num_captured += 1;

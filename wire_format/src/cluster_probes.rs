@@ -25,6 +25,7 @@ pub struct Ports {
     pub tpu: Option<SocketAddr>,
     pub tpu_quic: Option<SocketAddr>,
     pub tpu_vote: Option<SocketAddr>,
+    pub tpu_vote_quic: Option<SocketAddr>,
     pub turbine: Option<SocketAddr>,
 }
 
@@ -60,6 +61,7 @@ pub async fn find_validator_ports(
             tpu: None,
             tpu_quic: None,
             tpu_vote: None,
+            tpu_vote_quic: None,
         };
         return Ok(ports);
     }
@@ -85,13 +87,14 @@ pub async fn find_validator_ports(
         })
         .ok_or(anyhow::anyhow!("Discover did not find the right validator"))?;
 
-    dbg!(&me);
     let turbine = me.tvu(solana_gossip::contact_info::Protocol::UDP);
     let serve_repair = me.serve_repair(solana_gossip::contact_info::Protocol::UDP);
 
     let tpu = me.tpu(solana_gossip::contact_info::Protocol::UDP);
     let tpu_quic = me.tpu(solana_gossip::contact_info::Protocol::QUIC);
-    let tpu_vote = me.tpu(solana_gossip::contact_info::Protocol::UDP);
+    let tpu_vote = me.tpu_vote(solana_gossip::contact_info::Protocol::UDP);
+    let tpu_vote_quic = me.tpu_vote(solana_gossip::contact_info::Protocol::QUIC);
+
     let ports = Ports {
         shred_version,
         pubkey: *me.pubkey(),
@@ -102,6 +105,7 @@ pub async fn find_validator_ports(
         tpu,
         tpu_quic,
         tpu_vote,
+        tpu_vote_quic,
     };
     info!("Fetched the port information from gossip: {:?}", &ports);
     Ok(ports)
