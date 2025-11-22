@@ -3,8 +3,6 @@ import pandas as pd
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 import argparse
-import io
-from matplotlib.widgets import Button
 from collections import defaultdict
 from matplotlib.widgets import CheckButtons
 import numpy as np
@@ -23,13 +21,14 @@ def parse_data(file_name: str):
                 ("slot_number", "<u8"),
                 ("index", "<u4"),
                 ("sender_ip", "<u4"),
-                ("is_repair", "u1"),
+                ("flags", "u1"),
             ]
         )
         arr = np.fromfile(file_name, dtype=dtype)
 
     data = pd.DataFrame(arr)
-    data["is_repair"] = data["is_repair"].astype(bool)
+    data["is_repair"] = np.array(arr["flags"] & 0b0001, dtype=bool)
+    data["is_multicast"] = np.array(arr["flags"] & 0b0010, dtype=bool)
 
     return data
 
@@ -47,6 +46,7 @@ def when_batch_done(block_df):
 
     try:
         repairs = block_df.loc[block_df["is_repair"]].shape[0]
+        block_multicast_shreds = block_df.loc[block_df["is_multicast"]].shape[0]
 
         grouped = block_df.groupby("fec_index")
 
@@ -80,6 +80,7 @@ def when_batch_done(block_df):
         print(
             f"Block Data Statistics:\n- Batch count: {block_batches}"
             f"\n- Total shreds received: {block_total_shreds}"
+            f"\n- Multicast shreds received: {block_multicast_shreds}"
             f"\n- Unique shreds received: {block_unique_shreds}"
             f"\n- Duplicate shreds: {block_total_shreds - block_unique_shreds}"
             f"\n- Repair shreds in block: {repairs}"
@@ -158,11 +159,10 @@ def plot_shreds(
     except ValueError:
         return
 
-    late = df.loc[(df["time_stamp"] - zero_time) > 400000]
-    print(late)
-    for row in late.loc[:, ["time_stamp", "sender_ip"]].itertuples(index=False):
-        ip = IPv4Address(row.sender_ip)
-        print(f"""delay: {(row.time_stamp - zero_time) / 1000} ip {ip}""")
+    # late = df.loc[(df["time_stamp"] - zero_time) > 400000]
+    # for row in late.loc[:, ["time_stamp", "sender_ip"]].itertuples(index=False):
+    #     ip = IPv4Address(row.sender_ip)
+    #     print(f"""delay: {(row.time_stamp - zero_time) / 1000} ip {ip}""")
 
     # plot FEC set
     for i, (fec_set_num, time_data) in enumerate(shreds_dict.items()):

@@ -16,7 +16,7 @@ def main():
             ("slot_number", "<u8"),
             ("index", "<u4"),
             ("sender_ip", "<u4"),
-            ("is_repair", "u1"),
+            ("flags", "u1"),
         ]
     )
     arr = np.fromfile(args.path, dtype=dtype)
