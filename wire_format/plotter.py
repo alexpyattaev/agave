@@ -3,10 +3,9 @@ import pandas as pd
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 import argparse
-from collections import defaultdict
+from collections import defaultdict, OrderedDict
 from matplotlib.widgets import CheckButtons
 import numpy as np
-from ipaddress import IPv4Address
 
 
 def parse_data(file_name: str):
@@ -36,7 +35,7 @@ def parse_data(file_name: str):
 # Searches when batches for code block were ready to assemble
 # Batch done when amount of unique shreds for one FEC Set  >= FEC ID Size/2
 # Returns dict {FEC_SET_ID:TIME_STAMP}
-def when_batch_done(block_df):
+def when_batch_done(shreds):
     done_stamps = {}
     block_times = []
     block_total_shreds = 0
@@ -44,52 +43,33 @@ def when_batch_done(block_df):
     block_batches = 0
     batch_size = 64
 
-    try:
-        repairs = block_df.loc[block_df["is_repair"]].shape[0]
-        block_multicast_shreds = block_df.loc[block_df["is_multicast"]].shape[0]
+    for fec_id, group in shreds:
+        group = group.sort_values("time_stamp")
 
-        grouped = block_df.groupby("fec_index")
+        if not batch_size:
+            continue
 
-        for fec_id, group in grouped:
-            group = group.sort_values("time_stamp")
+        total_shreds_received = group.shape[0]
+        block_total_shreds += total_shreds_received
+        block_batches += 1
+        first_arrival = group.groupby("index")["time_stamp"].first()
+        time_stamps = first_arrival.sort_values().tolist()
+        block_unique_shreds += len(time_stamps)
 
-            if not batch_size:
-                continue
+        batch_time = (
+            group["time_stamp"].iloc[-1] - group["time_stamp"].iloc[0]
+        ) // 1000
+        block_times.append(batch_time)
 
-            total_shreds_received = group.shape[0]
-            block_total_shreds += total_shreds_received
-            block_batches += 1
-            first_arrival = group.groupby("index")["time_stamp"].first()
-            time_stamps = first_arrival.sort_values().tolist()
-            block_unique_shreds += len(time_stamps)
+        required = batch_size // 2
+        if len(time_stamps) >= required:
+            done_stamps[fec_id] = time_stamps[required - 1]
 
-            batch_time = (
-                group["time_stamp"].iloc[-1] - group["time_stamp"].iloc[0]
-            ) // 1000
-            block_times.append(batch_time)
-
-            required = batch_size // 2
-            if len(time_stamps) >= required:
-                done_stamps[fec_id] = time_stamps[required - 1]
-
-        print(
-            f"Block Time Statistics:\n- Batch average time: {(sum(block_times) / len(block_times)):.3f} ms"
-            f"\n- Longest batch time: {max(block_times):.3f} ms"
-            f"\n- Smallest batch time: {min(block_times):.3f} ms"
-        )
-        print(
-            f"Block Data Statistics:\n- Batch count: {block_batches}"
-            f"\n- Total shreds received: {block_total_shreds}"
-            f"\n- Multicast shreds received: {block_multicast_shreds}"
-            f"\n- Unique shreds received: {block_unique_shreds}"
-            f"\n- Duplicate shreds: {block_total_shreds - block_unique_shreds}"
-            f"\n- Repair shreds in block: {repairs}"
-        )
-
-    except Exception as e:
-        print("Some error happened...", e)
-    finally:
-        return done_stamps
+    print(
+        f"Block Time Statistics:\n- Batch average time: {(sum(block_times) / len(block_times)):.3f} ms"
+        f"\n- Longest batch time: {max(block_times):.3f} ms"
+        f"\n- Smallest batch time: {min(block_times):.3f} ms"
+    )
 
 
 def ready_indicator(dct, shreds_set):
@@ -99,54 +79,86 @@ def ready_indicator(dct, shreds_set):
     return indicators
 
 
-def extract_block(block_df):
-    shreds = defaultdict(dict)
-    duplicate = {}
+def extract_block(block_df) -> pd.DataFrame:
+    # tracks the process of FEC set building
+    shreds = defaultdict(list)
+    # tracks times of arrivals for all duplicates
+    duplicates = defaultdict(list)
+    # tracks timestamps of multicast arrivals for a given FEC set
+    multicasts = defaultdict(list)
+    # tracks timestamps of multicast arrivals for a given FEC set
+    repairs = defaultdict(list)
 
     block_df.loc[:, "fec_index"] = block_df["index"] // 64
     grouped_by_fec = block_df.groupby("fec_index")
+    fec_set_indices = pd.unique(block_df["fec_index"])
 
     for fec_id, group in grouped_by_fec:
         group = group.sort_values("time_stamp")
-        rcv_data = {}
-        total = 0
+        # tracks which indices we have received, and records the row number for them
+        received_indices: OrderedDict[int, int] = OrderedDict()
+        received_indices_multicast: OrderedDict[int, int] = OrderedDict()
+        for shred in group.itertuples():
+            if shred.is_multicast:
+                received_indices_multicast[shred.index] = shred.Index
+                multicasts[fec_id].append(
+                    (shred.time_stamp, len(received_indices_multicast))
+                )
+                continue
+            if shred.index in received_indices:
+                base_shred_time = group.loc[received_indices[shred.index], "time_stamp"]
+                base_shred_y = list(received_indices.keys()).index(shred.index)
+                print("dup", base_shred_time, base_shred_y)
+                duplicates[fec_id].append((base_shred_time, base_shred_y))
+            else:
+                received_indices[shred.index] = shred.Index
 
-        grouped_by_time = group.groupby("time_stamp")
+            y = len(received_indices)
+            shreds[fec_id].append((shred.time_stamp, y))
 
-        for time, time_group in grouped_by_time:
-            time_shred_ids = time_group["index"].tolist()
-            duplicates_count = 0
+            if shred.is_repair:
+                repairs[fec_id].append((shred.time_stamp, y))
 
-            for shred_id in time_shred_ids:
-                if shred_id in rcv_data:
-                    duplicates_count += 1
-                else:
-                    rcv_data[shred_id] = [[], [], []]
+    def total_shreds(x) -> int:
+        return sum([len(fs) for fs in multicasts.values()])
 
-            total += len(time_shred_ids) - duplicates_count
-            shreds[fec_id][time] = total
+    print(
+        f"Block Data Statistics:\n- FEC set count: {len(shreds)}"
+        f"\n- Unicast shreds: {total_shreds(shreds)}"
+        f"\n- Multicast shreds: {total_shreds(multicasts)}"
+        f"\n- Unique unicast shreds: {total_shreds(shreds) - total_shreds(duplicates)}"
+        f"\n- Duplicate unicast shreds: {total_shreds(duplicates)}"
+        f"\n- Repair shreds in block: {total_shreds(repairs)}"
+    )
 
-            for _, row in time_group.iterrows():
-                shred_id = row["index"]
-                if shred_id in rcv_data:
-                    rcv_data[shred_id][0].append(row["time_stamp"])
-                    rcv_data[shred_id][1].append(total)
-                    rcv_data[shred_id][2].append(row["is_repair"])
+    sources = {
+        "shreds": shreds,
+        "duplicates": duplicates,
+        "repairs": repairs,
+        "multicasts": multicasts,
+    }
+    rows = {}
 
-        # count duplicates
-        for shred_id, (timestamps, totals, repair) in rcv_data.items():
-            if len(totals) > 1:
-                duplicate[shred_id] = [timestamps, totals]
-
-    return dict(shreds), duplicate
+    for fec_set_index in fec_set_indices:
+        row = {}
+        for name, data in sources.items():
+            data = data[fec_set_index]
+            if not data:
+                x = []
+                y = []
+            else:
+                x = [d[0] for d in data]
+                y = [d[1] for d in data]
+            row[(name, "times")] = x
+            row[(name, "counts")] = y
+        rows[fec_set_index] = row
+    df = pd.DataFrame(rows).sort_index()
+    return df
 
 
 def plot_shreds(
-    df,
     ax,
-    shreds_dict,
-    duplicate,
-    ready_indicators,
+    block_df,
     show_repair=True,
     show_duplicate=True,
 ):
@@ -154,81 +166,97 @@ def plot_shreds(
     colors = mpl.color_sequences["Set1"]
     max_y = 0
 
-    try:
-        zero_time = min(min(times.keys()) for times in shreds_dict.values())
-    except ValueError:
-        return
-
+    zero_time = min(block_df.loc["shreds"].loc["times"].min())
+    # from ipaddress import IPv4Address
     # late = df.loc[(df["time_stamp"] - zero_time) > 400000]
     # for row in late.loc[:, ["time_stamp", "sender_ip"]].itertuples(index=False):
     #     ip = IPv4Address(row.sender_ip)
     #     print(f"""delay: {(row.time_stamp - zero_time) / 1000} ip {ip}""")
 
     # plot FEC set
-    for i, (fec_set_num, time_data) in enumerate(shreds_dict.items()):
-        times = sorted(time_data.keys())
-        deltas = [(t - zero_time) // 1000 for t in times]
-        counts = [time_data[t] for t in times]
-
+    shreds = block_df.loc["shreds"]
+    for fec in shreds.columns:
+        counts = shreds.at["counts", fec]
+        times = shreds.at["times", fec]
+        t_ms = (np.array(times) - zero_time) / 1000.0
         ax.plot(
-            deltas,
+            t_ms,
             counts,
-            color=colors[i % len(colors)],
+            color=colors[fec % len(colors)],
             alpha=1,
             linewidth=2,
-            label=f"FEC {fec_set_num // 32}",
+            label=f"FEC {fec}",
         )
-        max_y = max(max_y, counts[-1])
 
-    # plot batch is ready marks
-    if ready_indicators:
-        done_times = [(ts - zero_time) // 1000 for ts in ready_indicators.keys()]
-        done_counts = list(ready_indicators.values())
-        ax.scatter(
-            done_times,
-            done_counts,
-            color="green",
+    shreds = block_df.loc["multicasts"]
+    for fec in shreds.columns:
+        counts = shreds.at["counts", fec]
+        times = shreds.at["times", fec]
+        t_ms = (np.array(times) - zero_time) / 1000.0
+        label = "Multicast" if fec == 0 else "_nolegend mcast_"
+        ax.plot(
+            t_ms,
+            counts,
+            color=colors[fec % len(colors)],
             alpha=1,
-            s=80,
-            marker="X",
-            label="Batch Done",
+            linewidth=2,
+            linestyle=":",
+            label=label,
         )
+    # plot batch is ready marks
+    # if ready_indicators:
+    #     done_times = [(ts - zero_time) // 1000 for ts in ready_indicators.keys()]
+    #     done_counts = list(ready_indicators.values())
+    #     ax.scatter(
+    #         done_times,
+    #         done_counts,
+    #         color="green",
+    #         alpha=1,
+    #         s=80,
+    #         marker="X",
+    #         label="Batch Done",
+    #     )
 
     # plot repair shreds
     if show_repair:
-        repair_df = df[df["is_repair"]]
-        for i, (_, row) in enumerate(repair_df.iterrows()):
-            t = row["time_stamp"]
-            t_ms = (t - zero_time) // 1000
-            y = shreds_dict.get(row["fec_index"], {}).get(t, None)
-            if y is not None:
-                label = "Repair Shred" if i == 0 else "_nolegend_"
-                ax.scatter(t_ms, y, marker="o", color="orange", s=30, label=label)
+        repairs = block_df.loc["repairs"]
+        for fec in repairs.columns:
+            counts = repairs.at["counts", fec]
+            times = repairs.at["times", fec]
+            t_ms = (np.array(times) - zero_time) / 1000.0
+            if counts is not None:
+                label = "Repair" if fec == 0 else "_nolegend repair_"
+                ax.scatter(t_ms, counts, marker="o", color="orange", s=30, label=label)
     # plot duplicates
-    if show_duplicate and duplicate:
-        dup_x, dup_y = [], []
-        for timestamps, totals in duplicate.values():
-            dup_x.extend([(t - zero_time) // 1000 for t in timestamps])
-            dup_y.extend(totals)
-        ax.scatter(dup_x, dup_y, color="red", marker="+", s=25, label="Duplicates")
+    if show_duplicate:
+        duplicates = block_df.loc["duplicates"]
+        for fec in duplicates.columns:
+            counts = duplicates.at["counts", fec]
+            times = duplicates.at["times", fec]
+            t_ms = (np.array(times) - zero_time) // 1000
+            label = "Duplicates" if fec == 0 else "_nolegend dup_"
+            ax.scatter(t_ms, counts, color="red", marker="+", s=25, label=label)
 
     # some labels
     ax.set_xlabel("Time since first shred (ms)", fontsize=12, color="white")
     ax.set_ylabel("Shred count", fontsize=12, color="white")
-    ax.set_ylim([0, max_y + 5])
+    ax.set_ylim([0, 70])
+    ax.set_yticks(np.arange(0, 70, 8))
     ax.tick_params(axis="x", rotation=45, color="white")
     ax.tick_params(axis="y", color="white")
     ax.grid(color="gray", linestyle="--", linewidth=0.5, alpha=0.5)
-    ax.legend(fontsize=8, loc="upper left", bbox_to_anchor=(1, 1), borderaxespad=0.0)
+    ax.legend(
+        fontsize=8, loc="upper left", bbox_to_anchor=(1.0, 1.0), borderaxespad=0.0
+    )
 
 
 # cursor class for navigation thorugh blocks
 class Cursor:
-    def __init__(self, data):
+    def __init__(self, data, index=0):
         self.data = data
-        self.index = 0
+        self.index = index
 
-    def next(self):
+    def next(self) -> pd.DataFrame:
         if self.index < len(self.data) - 1:
             self.index += 1
         return self.current()
@@ -243,14 +271,15 @@ class Cursor:
 
 
 def main():
-    current_filter = {"type": "ALL"}
     parser = argparse.ArgumentParser()
     parser.add_argument("path", help="data file path", type=str)
+    parser.add_argument("slot", help="start at given slot", type=int, default=None)
     args = parser.parse_args()
 
     data = parse_data(args.path)
-
-    cursor = Cursor(sorted(pd.unique(data["slot_number"])))
+    all_slots = sorted(pd.unique(data["slot_number"]))
+    start_index = all_slots.index(args.slot) if args.slot is not None else 0
+    cursor = Cursor(all_slots, start_index)
     plt.style.use("dark_background")
     fig, ax = plt.subplots(figsize=(12, 6))
 
@@ -268,29 +297,20 @@ def main():
     def render():
         slot_id = cursor.current()
         print(f"Slot ID: {slot_id} ")
-        df = data.loc[data["slot_number"] == slot_id].copy()
+        block_df = data.loc[data["slot_number"] == slot_id].copy()
 
-        if current_filter["type"] == "REPAIR":
-            df = df[df["is_repair"]]
-        elif current_filter["type"] == "SHRED":
-            df = df[not df["is_repair"]]
-
-        shreds, duplicates = extract_block(df)
-        done_batches = when_batch_done(df)
-        ready_indicators = ready_indicator(done_batches, shreds)
+        block_df = extract_block(block_df)
+        # done_batches = when_batch_done(df)
 
         plot_shreds(
-            df,
             ax,
-            shreds,
-            duplicates,
-            ready_indicators,
+            block_df,
             show_repair=visibility_options["Repair"],
             show_duplicate=visibility_options["Duplicate"],
         )
 
         fig.suptitle(
-            f"Block number {cursor.current()} - Showing {current_filter['type']} shreds",
+            f"Block number {cursor.current()}",
             fontsize=14,
             color="white",
         )
