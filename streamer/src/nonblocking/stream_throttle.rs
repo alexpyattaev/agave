@@ -292,13 +292,16 @@ pub mod test {
             DEFAULT_MAX_UNSTAKED_CONNECTIONS,
             DEFAULT_MAX_STREAMS_PER_MS,
         ));
-        // 50K packets per ms * 20% / 500 max unstaked connections
         assert_eq!(
             load_ema.available_load_capacity_in_throttling_duration(
                 ConnectionPeerType::Unstaked,
                 10000,
             ),
-            20
+            DEFAULT_MAX_STREAMS_PER_MS
+                * STREAM_THROTTLING_INTERVAL_MS
+                * MAX_UNSTAKED_STREAMS_PERCENT
+                / 100
+                / DEFAULT_MAX_UNSTAKED_CONNECTIONS as u64
         );
     }
 
@@ -310,54 +313,47 @@ pub mod test {
             DEFAULT_MAX_STREAMS_PER_MS,
         ));
 
-        // EMA load is used for staked connections to calculate max number of allowed streams.
-        // EMA window = 5ms interval * 10 intervals = 50ms
-        // max streams per window = 500K streams/sec * 80% = 400K/sec = 20K per 50ms
-        // max_streams in 50ms = ((20K * 20K) / ema_load) * stake / total_stake
-        //
-        // Stream throttling window is 100ms. So it'll double the amount of max streams.
-        // max_streams in 100ms (throttling window) = 2 * ((20K * 20K) / ema_load) * stake / total_stake
+        fn ema_logic(my_stake: u64, total_stake: u64, ema_load: u64) -> u64 {
+            // EMA load is used for staked connections to calculate max number of
+            // allowed streams.
+            let max_streams_per_window =
+                DEFAULT_MAX_STREAMS_PER_MS * EMA_WINDOW_MS * (100 - MAX_UNSTAKED_STREAMS_PERCENT)
+                    / 100;
+            2 * max_streams_per_window * max_streams_per_window / ema_load * my_stake / total_stake
+        }
 
         load_ema.current_load_ema.store(20000, Ordering::Relaxed);
-        // ema_load = 20K, stake = 15, total_stake = 10K
-        // max_streams in 100ms (throttling window) = 2 * ((20K * 20K) / 20K) * 15 / 10K  = 60
         assert_eq!(
             load_ema.available_load_capacity_in_throttling_duration(
                 ConnectionPeerType::Staked(15),
                 10000,
             ),
-            60
+            ema_logic(15, 10000, 20000)
         );
 
-        // ema_load = 20K, stake = 1K, total_stake = 10K
-        // max_streams in 100ms (throttling window) = 2 * ((20K * 20K) / 20K) * 1K / 10K  = 4K
         assert_eq!(
             load_ema.available_load_capacity_in_throttling_duration(
                 ConnectionPeerType::Staked(1000),
                 10000,
             ),
-            4000
+            ema_logic(1000, 10000, 20000)
         );
 
         load_ema.current_load_ema.store(5000, Ordering::Relaxed);
-        // ema_load = 5K, stake = 15, total_stake = 10K
-        // max_streams in 100ms (throttling window) = 2 * ((20K * 20K) / 5K) * 15 / 10K  = 240
         assert_eq!(
             load_ema.available_load_capacity_in_throttling_duration(
                 ConnectionPeerType::Staked(15),
                 10000,
             ),
-            240
+            ema_logic(15, 10000, 5000)
         );
 
-        // ema_load = 5K, stake = 1K, total_stake = 10K
-        // max_streams in 100ms (throttling window) = 2 * ((20K * 20K) / 5K) * 1K / 10K  = 16000
         assert_eq!(
             load_ema.available_load_capacity_in_throttling_duration(
                 ConnectionPeerType::Staked(1000),
                 10000,
             ),
-            16000
+            ema_logic(1000, 10000, 5000)
         );
 
         // At 4000, the load is less than 25% of max_load (20K).
