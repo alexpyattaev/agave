@@ -43,7 +43,8 @@ pub enum MonitorCommand {
     },
 }
 
-const TURBINE_MULTICAST_IP: Ipv4Addr = Ipv4Addr::new(233, 84, 178, 6);
+const TURBINE_MULTICAST_IP1: Ipv4Addr = Ipv4Addr::new(233, 84, 178, 6);
+const TURBINE_MULTICAST_IP2: Ipv4Addr = Ipv4Addr::new(233, 84, 178, 3);
 
 pub async fn start_monitor(
     interface: network_interface::NetworkInterface,
@@ -67,7 +68,8 @@ pub async fn start_monitor(
             // only capture packets to me, not stuff i might forward
             bpf_controls.allow_dst_ip(v4(ports.gossip.ip()))?;
             // allow Turbine multicast IP
-            bpf_controls.allow_dst_ip(TURBINE_MULTICAST_IP)?;
+            bpf_controls.allow_dst_ip(TURBINE_MULTICAST_IP1)?;
+            bpf_controls.allow_dst_ip(TURBINE_MULTICAST_IP2)?;
             bpf_controls
         }
         Direction::Outbound => {
