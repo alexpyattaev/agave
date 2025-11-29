@@ -66,7 +66,7 @@ impl TurbineLogger {
             self.num_captured
         ));
         info!("Logging arrival pattern into {path:?}");
-        let writer = BufWriter::with_capacity(64 * 1024 * 1024, File::create(&path).await?);
+        let writer = BufWriter::with_capacity(4 * 1024 * 1024, File::create(&path).await?);
 
         let (tx, rx) = tokio::sync::mpsc::channel(1024 * 1024);
         let jh = tokio::spawn(write_worker(writer, rx));

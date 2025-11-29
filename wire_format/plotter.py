@@ -273,7 +273,7 @@ class Cursor:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("path", help="data file path", type=str)
-    parser.add_argument("slot", help="start at given slot", type=int, default=None)
+    parser.add_argument("slot", help="start at given slot",nargs="?", type=int, default=None)
     args = parser.parse_args()
 
     data = parse_data(args.path)
