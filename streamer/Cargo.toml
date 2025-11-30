@@ -67,5 +67,6 @@ agave-logger = { workspace = true }
 anyhow = { workspace = true }
 assert_matches = { workspace = true }
 clap = { version = "4.5.31", features = ["cargo", "derive", "error-context"] }
+chrono = {workspace=true, features=["now"]}
 solana-net-utils = { workspace = true, features = ["dev-context-only-utils"] }
 solana-streamer = { path = ".", features = ["agave-unstable-api", "dev-context-only-utils"] }

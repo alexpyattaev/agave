@@ -10899,6 +10899,7 @@ dependencies = [
  "arc-swap",
  "assert_matches",
  "bytes",
+ "chrono",
  "clap 4.5.31",
  "crossbeam-channel",
  "dashmap",
