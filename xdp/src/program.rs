@@ -2,7 +2,8 @@
 
 use {
     crate::device::NetworkDevice,
-    aya::{programs::Xdp, Ebpf, EbpfLoader},
+    agave_xdp_ebpf::FirewallConfig,
+    aya::{maps::Array, programs::Xdp, Ebpf, EbpfLoader},
     std::io::{Cursor, Write},
 };
 
@@ -40,18 +41,28 @@ const XDP_PROG: &[u8] = &[
 // the string table
 const STRTAB: &[u8] = b"\0xdp\0.symtab\0.strtab\0agave_xdp\0";
 
-pub fn load_xdp_program(dev: &NetworkDevice) -> Result<Ebpf, Box<dyn std::error::Error>> {
+pub fn load_xdp_program(
+    dev: &NetworkDevice,
+    firewall_config: Option<FirewallConfig>,
+) -> Result<Ebpf, Box<dyn std::error::Error>> {
     let mut loader = EbpfLoader::new();
     let broken_frags = dev.driver()? == "i40e";
-    let mut ebpf = if broken_frags {
+    let mut ebpf = if broken_frags || firewall_config.is_some() {
         loader.set_global("AGAVE_XDP_DROP_MULTI_FRAGS", &1u8, true);
         loader.load(&agave_xdp_ebpf::AGAVE_XDP_EBPF_PROGRAM)
     } else {
         loader.load(&generate_xdp_elf())
     }?;
+
+    if let Some(firewall_config) = firewall_config {
+        let mut array = Array::try_from(
+            ebpf.map_mut("FIREWALL_CONFIG")
+                .expect("Must have loaded the correct program"),
+        )?;
+        array.set(0, firewall_config, 0)?;
+    }
     let p: &mut Xdp = ebpf.program_mut("agave_xdp").unwrap().try_into().unwrap();
     p.load()?;
-
     p.attach_to_if_index(dev.if_index(), aya::programs::xdp::XdpFlags::DRV_MODE)?;
 
     Ok(ebpf)

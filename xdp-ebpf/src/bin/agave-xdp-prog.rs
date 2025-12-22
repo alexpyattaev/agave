@@ -11,7 +11,7 @@ use {
         programs::XdpContext,
     },
     aya_log_ebpf::info,
-    core::ptr,
+    core::{net::Ipv4Addr, ptr},
     helpers::{has_frags, ExtractedHeader},
 };
 
@@ -21,7 +21,7 @@ mod helpers;
 #[unsafe(no_mangle)]
 static AGAVE_XDP_DROP_MULTI_FRAGS: u8 = 0;
 
-/// Ports on which to enact firewalling
+/// Ports on which to enact firewalling.
 #[map]
 static FIREWALL_CONFIG: Array<FirewallConfig> = Array::with_max_entries(1, 0);
 
@@ -49,6 +49,10 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ExtractError> {
     let Some(config) = FIREWALL_CONFIG.get(0) else {
         return Ok(XDP_PASS);
     };
+    // if configuration is invalid abort firewalling
+    if config.my_ip == Ipv4Addr::UNSPECIFIED {
+        return Ok(XDP_PASS);
+    }
     let mut action = XDP_PASS;
     let header = match ExtractedHeader::from_context(&ctx) {
         Ok(header) => header,
@@ -66,6 +70,7 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ExtractError> {
     } else if header.dst_ip != config.my_ip {
         action = XDP_DROP;
     } else {
+        let first_byte: u8 = unsafe { *ptr_at(&ctx, header.payload_offset)? };
         if header.dst_port == config.tpu_vote {
             if header.payload_len < 300 {
                 action = XDP_DROP;
@@ -74,17 +79,28 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ExtractError> {
             if header.payload_len < 1200 {
                 action = XDP_DROP;
             }
+        } else if (header.dst_port == config.tpu_quic) || (header.dst_port == config.tpu_vote_quic)
+        {
+            if !has_quic_fixed_bit(first_byte) {
+                action = XDP_DROP;
+            }
         } else if header.dst_port == config.repair {
-            if header.payload_len < 96 {
+            if header.payload_len < 64 {
+                action = XDP_DROP;
+            }
+        } else if header.dst_port == config.serve_repair {
+            if header.payload_len < 64 {
+                action = XDP_DROP;
+            }
+        } else if header.dst_port == config.ancestor_repair {
+            if header.payload_len < 64 {
                 action = XDP_DROP;
             }
         } else if header.dst_port == config.gossip {
-            if header.payload_len < 96 {
+            if header.payload_len < 120 {
                 action = XDP_DROP;
             }
-
-            let tag: u8 = unsafe { *ptr_at(&ctx, header.payload_offset)? };
-            if tag != 5 {
+            if first_byte != 5 {
                 action = XDP_DROP;
             }
         }
@@ -108,4 +124,8 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
     // program as it'll detect an infinite loop.
     #[allow(clippy::empty_loop)]
     loop {}
+}
+
+fn has_quic_fixed_bit(first_byte: u8) -> bool {
+    (first_byte & 0x40) == 1
 }
