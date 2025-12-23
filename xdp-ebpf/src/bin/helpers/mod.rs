@@ -1,5 +1,5 @@
 use {
-    aya_ebpf::{helpers::gen::bpf_xdp_get_buff_len, programs::XdpContext},
+    aya_ebpf::programs::XdpContext,
     core::{mem, net::Ipv4Addr},
     network_types::{
         eth::{EthHdr, EtherType},
@@ -18,9 +18,12 @@ pub fn parse_ip_header(ipv4hdr: *const Ipv4Hdr) -> (Ipv4Addr, Ipv4Addr, IpProto)
 }
 
 pub enum ExtractError {
-    Ipv6,
+    /// Special marker for packets we do not support (so we do not know if we should drop them)
+    NotSupported,
+    /// Some valid IP packet but not UDP, we should let it pass
     NotUdp,
-    Drop,
+    /// Malformed packets we can not parse
+    Malformed,
 }
 
 pub struct ExtractedHeader {
@@ -33,14 +36,17 @@ pub struct ExtractedHeader {
 }
 impl ExtractedHeader {
     pub fn from_context(ctx: &XdpContext) -> Result<Self, ExtractError> {
-        let ethhdr: *const EthHdr = unsafe { ptr_at(&ctx, 0)? };
-        match unsafe { (*ethhdr).ether_type().map_err(|_| ExtractError::Drop)? } {
+        let ethhdr: *const EthHdr = ptr_at(&ctx, 0)?;
+        match unsafe {
+            (*ethhdr)
+                .ether_type()
+                .map_err(|_| ExtractError::Malformed)?
+        } {
             EtherType::Ipv4 => {}
-            EtherType::Ipv6 => return Err(ExtractError::Ipv6),
-            _ => return Err(ExtractError::Drop),
+            _ => return Err(ExtractError::NotSupported),
         }
         let mut ip_header_offset = EthHdr::LEN;
-        let mut ipv4hdr: *const Ipv4Hdr = unsafe { ptr_at(&ctx, ip_header_offset)? };
+        let mut ipv4hdr: *const Ipv4Hdr = ptr_at(&ctx, ip_header_offset)?;
         let (src_ip, dst_ip, ip_proto) = parse_ip_header(ipv4hdr);
         let (src_ip, dst_ip) = match ip_proto {
             IpProto::Udp => (src_ip, dst_ip),
@@ -48,7 +54,7 @@ impl ExtractedHeader {
             IpProto::Gre => {
                 ip_header_offset = EthHdr::LEN + Ipv4Hdr::LEN + GRE_HDR_LEN;
 
-                ipv4hdr = unsafe { ptr_at(&ctx, ip_header_offset)? };
+                ipv4hdr = ptr_at(&ctx, ip_header_offset)?;
                 let (src_ip, dst_ip, ip_proto) = parse_ip_header(ipv4hdr);
                 if !matches!(ip_proto, IpProto::Udp) {
                     return Err(ExtractError::NotUdp);
@@ -59,7 +65,7 @@ impl ExtractedHeader {
                 return Err(ExtractError::NotUdp);
             }
         };
-        let udphdr: *const UdpHdr = unsafe { ptr_at(&ctx, ip_header_offset + Ipv4Hdr::LEN)? };
+        let udphdr: *const UdpHdr = ptr_at(&ctx, ip_header_offset + Ipv4Hdr::LEN)?;
         let src_port = unsafe { u16::from_be_bytes((*udphdr).src) };
         let dst_port = unsafe { u16::from_be_bytes((*udphdr).dst) };
         let payload_len =
@@ -77,23 +83,26 @@ impl ExtractedHeader {
 }
 
 #[inline(always)]
-pub unsafe fn ptr_at<T>(ctx: &XdpContext, offset: usize) -> Result<*const T, ExtractError> {
+pub fn ptr_at<T>(ctx: &XdpContext, offset: usize) -> Result<*const T, ExtractError> {
     let (start, end) = (ctx.data(), ctx.data_end());
     let len = mem::size_of::<T>();
 
     if start + offset + len > end {
-        return Err(ExtractError::Drop);
+        return Err(ExtractError::Malformed);
     }
 
     let ptr = (start + offset) as *const T;
-    Ok(unsafe { &*ptr })
+    Ok(ptr)
 }
 
-#[inline]
-pub fn has_frags(ctx: &XdpContext) -> bool {
-    #[allow(clippy::arithmetic_side_effects)]
-    let linear_len = ctx.data_end() - ctx.data();
-    // Safety: generated binding is unsafe, but static verifier guarantees ctx.ctx is valid.
-    let buf_len = unsafe { bpf_xdp_get_buff_len(ctx.ctx) as usize };
-    linear_len < buf_len
+#[inline(always)]
+pub fn get_or_default<T: Default + Copy>(ctx: &XdpContext, offset: usize) -> T {
+    match ptr_at(&ctx, offset) {
+        Ok(ptr) => unsafe { *ptr },
+        Err(_) => return Default::default(),
+    }
+}
+
+pub fn has_quic_fixed_bit(first_byte: u8) -> bool {
+    (first_byte & 0x40) != 0
 }

@@ -1,6 +1,5 @@
 // re-export since this is needed at validator startup
-pub use agave_xdp::set_cpu_affinity;
-pub use agave_xdp_ebpf::FirewallConfig;
+pub use {agave_xdp::set_cpu_affinity, agave_xdp_ebpf::FirewallConfig};
 #[cfg(target_os = "linux")]
 use {
     agave_xdp::{

@@ -61,7 +61,11 @@ pub fn load_xdp_program(
         )?;
         array.set(0, firewall_config, 0)?;
     }
+
+    aya_log::EbpfLogger::init(&mut ebpf).unwrap();
+
     let p: &mut Xdp = ebpf.program_mut("agave_xdp").unwrap().try_into().unwrap();
+
     p.load()?;
     p.attach_to_if_index(dev.if_index(), aya::programs::xdp::XdpFlags::DRV_MODE)?;
 

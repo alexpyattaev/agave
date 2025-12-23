@@ -35,8 +35,10 @@ pub static AGAVE_XDP_EBPF_PROGRAM: [u8; aya::include_bytes_aligned!(concat!(
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]
 pub struct FirewallConfig {
+    pub deny_ingress_ports: [u16; 7],
     pub tpu_vote: u16,
     pub tpu_quic: u16,
+    pub tpu_forwards_quic: u16,
     pub tpu_vote_quic: u16,
     pub turbine: u16,
     pub repair: u16,

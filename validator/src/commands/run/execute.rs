@@ -73,14 +73,13 @@ use {
         collections::HashSet,
         env,
         fs::{self, File},
-        net::{IpAddr, Ipv4Addr, SocketAddr},
+        net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket},
         num::{NonZeroU64, NonZeroUsize},
         path::{Path, PathBuf},
         process::exit,
         str::{self, FromStr},
         sync::{atomic::AtomicBool, Arc, RwLock},
     },
-    tokio::net::UdpSocket,
 };
 
 #[derive(Debug, PartialEq, Eq)]
@@ -866,7 +865,7 @@ pub fn execute(
 
     if let Some(retransmit_xdp) = validator_config.retransmit_xdp.as_mut() {
         if enable_firewall {
-            fn port(sock: Option<UdpSocket>) -> u16 {
+            fn port(sock: Option<&UdpSocket>) -> u16 {
                 let Some(sock) = sock else {
                     return 0;
                 };
@@ -882,15 +881,28 @@ pub fn execute(
             retransmit_xdp.firewall_config = Some(FirewallConfig {
                 tpu_vote: port(node.sockets.tpu_vote.first()),
                 tpu_quic: port(node.sockets.tpu_quic.first()),
+                tpu_forwards_quic: port(node.sockets.tpu_forwards_quic.first()),
                 tpu_vote_quic: port(node.sockets.tpu_vote_quic.first()),
                 turbine: port(node.sockets.tvu.first()),
-                repair: port(node.sockets.repair.first()),
-                serve_repair: port(Some(node.sockets.serve_repair)),
-                ancestor_repair: port(Some(node.sockets.ancestor_hashes_requests)),
-                gossip: port(Some(node.info.gossip())),
+                repair: port(Some(&node.sockets.repair)),
+                serve_repair: port(Some(&node.sockets.serve_repair)),
+                ancestor_repair: port(Some(&node.sockets.ancestor_hashes_requests)),
+                gossip: port(node.sockets.gossip.first()),
                 solana_min_port: dynamic_port_range.0,
                 solana_max_port: dynamic_port_range.1,
                 my_ip: primary_ipv4,
+                deny_ingress_ports: [
+                    // TX only ports
+                    port(node.sockets.retransmit_sockets.first()),
+                    port(node.sockets.broadcast.first()),
+                    port(Some(&node.sockets.tpu_vote_forwarding_client)),
+                    // QUIC transports for repair and turbine - not in use
+                    port(Some(&node.sockets.serve_repair_quic)),
+                    port(Some(&node.sockets.tvu_quic)),
+                    // UDP versions of the TPU ports - not in use
+                    port(node.sockets.tpu_forwards.first()),
+                    port(node.sockets.tpu.first()),
+                ],
             })
         }
     }

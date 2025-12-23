@@ -2,17 +2,18 @@
 #![no_main]
 
 use {
-    crate::helpers::{ptr_at, ExtractError},
+    crate::helpers::{get_or_default, has_quic_fixed_bit, ExtractError},
     agave_xdp_ebpf::FirewallConfig,
     aya_ebpf::{
-        bindings::xdp_action::{XDP_ABORTED, XDP_DROP, XDP_PASS},
+        bindings::xdp_action::{XDP_DROP, XDP_PASS},
+        helpers::gen::bpf_xdp_get_buff_len,
         macros::{map, xdp},
         maps::Array,
         programs::XdpContext,
     },
-    aya_log_ebpf::info,
+    aya_log_ebpf::{error, info},
     core::{net::Ipv4Addr, ptr},
-    helpers::{has_frags, ExtractedHeader},
+    helpers::ExtractedHeader,
 };
 
 mod helpers;
@@ -32,10 +33,18 @@ pub fn agave_xdp(ctx: XdpContext) -> u32 {
         // https://lore.kernel.org/netdev/20251021173200.7908-2-alessandro.d@gmail.com
         return XDP_DROP;
     }
-    match try_xdp_firewall(ctx) {
-        Ok(ret) => ret,
-        Err(_) => XDP_ABORTED,
-    }
+    let _firewall_decision = apply_xdp_firewall(ctx);
+    // TODO: this should be replaced with actual return from the firewall
+    XDP_PASS
+}
+
+#[inline]
+pub fn has_frags(ctx: &XdpContext) -> bool {
+    #[allow(clippy::arithmetic_side_effects)]
+    let linear_len = ctx.data_end() - ctx.data();
+    // Safety: generated binding is unsafe, but static verifier guarantees ctx.ctx is valid.
+    let buf_len = unsafe { bpf_xdp_get_buff_len(ctx.ctx) as usize };
+    linear_len < buf_len
 }
 
 #[inline]
@@ -45,77 +54,98 @@ fn drop_frags() -> bool {
     unsafe { ptr::read_volatile(&AGAVE_XDP_DROP_MULTI_FRAGS) == 1 }
 }
 
-fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ExtractError> {
+fn apply_xdp_firewall(ctx: XdpContext) -> u32 {
     let Some(config) = FIREWALL_CONFIG.get(0) else {
-        return Ok(XDP_PASS);
+        return XDP_PASS;
     };
     // if configuration is invalid abort firewalling
     if config.my_ip == Ipv4Addr::UNSPECIFIED {
-        return Ok(XDP_PASS);
+        return XDP_PASS;
     }
-    let mut action = XDP_PASS;
+    let mut drop_reason = "";
     let header = match ExtractedHeader::from_context(&ctx) {
         Ok(header) => header,
-        Err(ExtractError::Ipv6 | ExtractError::NotUdp) => return Ok(XDP_PASS),
+        Err(ExtractError::NotUdp) => return XDP_PASS,
+        Err(ExtractError::NotSupported) => return XDP_PASS,
         // encountered a packet we could not parse
-        _ => return Err(ExtractError::Drop),
+        _ => {
+            error!(&ctx, "FIREWALL could not parse packet");
+            return XDP_DROP;
+        }
     };
 
     if header.dst_port < config.solana_min_port || header.dst_port > config.solana_max_port {
-        return Ok(XDP_PASS);
+        // do not touch packets targeting ports outside of solana range
+        return XDP_PASS;
     }
     // drop things from "reserved" ports
     if header.src_port < 1024 {
-        action = XDP_DROP;
+        drop_reason = "port: reserved";
     } else if header.dst_ip != config.my_ip {
-        action = XDP_DROP;
+        drop_reason = "IP: wrong destination";
     } else {
-        let first_byte: u8 = unsafe { *ptr_at(&ctx, header.payload_offset)? };
+        let first_byte: u8 = get_or_default(&ctx, header.payload_offset);
         if header.dst_port == config.tpu_vote {
-            if header.payload_len < 300 {
-                action = XDP_DROP;
+            if header.payload_len < 64 {
+                drop_reason = "vote: too short";
             }
         } else if header.dst_port == config.turbine {
+            // turbine port receives shreds
             if header.payload_len < 1200 {
-                action = XDP_DROP;
+                drop_reason = "turbine: too short";
             }
-        } else if (header.dst_port == config.tpu_quic) || (header.dst_port == config.tpu_vote_quic)
+        } else if (header.dst_port == config.tpu_quic)
+            || (header.dst_port == config.tpu_vote_quic)
+            || (header.dst_port == config.tpu_forwards_quic)
         {
+            // these ports receive via QUIC
             if !has_quic_fixed_bit(first_byte) {
-                action = XDP_DROP;
+                drop_reason = "TPU QUIC: not QUIC packet";
             }
         } else if header.dst_port == config.repair {
-            if header.payload_len < 64 {
-                action = XDP_DROP;
+            // repair port receives shreds
+            if header.payload_len < 1200 {
+                drop_reason = "repair: too short";
             }
         } else if header.dst_port == config.serve_repair {
             if header.payload_len < 64 {
-                action = XDP_DROP;
+                drop_reason = "serve_repair: too short";
             }
         } else if header.dst_port == config.ancestor_repair {
             if header.payload_len < 64 {
-                action = XDP_DROP;
+                drop_reason = "ancestor_repair: too short";
             }
         } else if header.dst_port == config.gossip {
-            if header.payload_len < 120 {
-                action = XDP_DROP;
+            if header.payload_len < 132 {
+                drop_reason = "gossip: too short";
             }
-            if first_byte != 5 {
-                action = XDP_DROP;
+            if first_byte > 5 {
+                drop_reason = "gossip: fingerprint";
             }
+        } else if config
+            .deny_ingress_ports
+            .iter()
+            .copied()
+            .find(|&port| port == header.dst_port)
+            .is_some()
+        {
+            // some ports are only used to send data
+            drop_reason = "port: tx only"
         }
     }
-
-    info!(
-        &ctx,
-        "SRC: {}:{}, DST PORT:{}, ACTION: {}",
-        header.src_ip,
-        header.src_port,
-        header.dst_port,
-        action
-    );
-
-    Ok(action)
+    if drop_reason.is_empty() {
+        XDP_PASS
+    } else {
+        info!(
+            &ctx,
+            "DROP: SRC: {}:{}, DST PORT:{}, REASON: {}",
+            header.src_ip,
+            header.src_port,
+            header.dst_port,
+            drop_reason
+        );
+        XDP_DROP
+    }
 }
 
 #[panic_handler]
@@ -124,8 +154,4 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
     // program as it'll detect an infinite loop.
     #[allow(clippy::empty_loop)]
     loop {}
-}
-
-fn has_quic_fixed_bit(first_byte: u8) -> bool {
-    (first_byte & 0x40) == 1
 }
