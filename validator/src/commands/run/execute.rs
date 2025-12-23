@@ -903,6 +903,7 @@ pub fn execute(
                     port(node.sockets.tpu_forwards.first()),
                     port(node.sockets.tpu.first()),
                 ],
+                drop_frags: false,
             })
         }
     }

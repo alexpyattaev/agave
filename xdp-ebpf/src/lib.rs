@@ -20,17 +20,8 @@ use core::net::Ipv4Addr;
 
 #[cfg(all(target_os = "linux", not(target_arch = "bpf")))]
 #[unsafe(no_mangle)]
-pub static AGAVE_XDP_EBPF_PROGRAM: [u8; aya::include_bytes_aligned!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/agave-xdp-prog"
-))
-.len()] = unsafe {
-    core::ptr::read(
-        aya::include_bytes_aligned!(concat!(env!("CARGO_MANIFEST_DIR"), "/agave-xdp-prog"))
-            .as_ptr()
-            .cast(),
-    )
-};
+pub static AGAVE_XDP_EBPF_PROGRAM: &[u8] =
+    aya::include_bytes_aligned!(concat!(env!("CARGO_MANIFEST_DIR"), "/agave-xdp-prog"));
 
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]
@@ -48,6 +39,27 @@ pub struct FirewallConfig {
     pub solana_min_port: u16,
     pub solana_max_port: u16,
     pub my_ip: Ipv4Addr,
+    pub drop_frags: bool,
+}
+impl Default for FirewallConfig {
+    fn default() -> Self {
+        Self {
+            deny_ingress_ports: [0; 7],
+            tpu_vote: 0,
+            tpu_quic: 0,
+            tpu_forwards_quic: 0,
+            tpu_vote_quic: 0,
+            turbine: 0,
+            repair: 0,
+            serve_repair: 0,
+            ancestor_repair: 0,
+            gossip: 0,
+            solana_min_port: 0,
+            solana_max_port: 0,
+            my_ip: Ipv4Addr::UNSPECIFIED,
+            drop_frags: false,
+        }
+    }
 }
 
 #[cfg(all(target_os = "linux", not(target_arch = "bpf")))]

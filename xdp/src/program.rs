@@ -4,6 +4,7 @@ use {
     crate::device::NetworkDevice,
     agave_xdp_ebpf::FirewallConfig,
     aya::{maps::Array, programs::Xdp, Ebpf, EbpfLoader},
+    log::info,
     std::io::{Cursor, Write},
 };
 
@@ -48,21 +49,23 @@ pub fn load_xdp_program(
     let mut loader = EbpfLoader::new();
     let broken_frags = dev.driver()? == "i40e";
     let mut ebpf = if broken_frags || firewall_config.is_some() {
-        loader.set_global("AGAVE_XDP_DROP_MULTI_FRAGS", &1u8, true);
-        loader.load(&agave_xdp_ebpf::AGAVE_XDP_EBPF_PROGRAM)
-    } else {
-        loader.load(&generate_xdp_elf())
-    }?;
-
-    if let Some(firewall_config) = firewall_config {
+        info!("Loading the XDP program with firewall support");
+        let mut ebpf = loader.load(agave_xdp_ebpf::AGAVE_XDP_EBPF_PROGRAM)?;
+        let mut firewall_config = firewall_config.unwrap_or_default();
+        firewall_config.drop_frags = broken_frags;
+        info!("Firewall configured with {firewall_config:?}");
+        //aya_log::EbpfLogger::init(&mut ebpf).unwrap();
         let mut array = Array::try_from(
             ebpf.map_mut("FIREWALL_CONFIG")
                 .expect("Must have loaded the correct program"),
         )?;
-        array.set(0, firewall_config, 0)?;
-    }
 
-    aya_log::EbpfLogger::init(&mut ebpf).unwrap();
+        array.set(0, firewall_config, 0)?;
+        ebpf
+    } else {
+        info!("Loading the bypass XDP program");
+        loader.load(&generate_xdp_elf())?
+    };
 
     let p: &mut Xdp = ebpf.program_mut("agave_xdp").unwrap().try_into().unwrap();
 
