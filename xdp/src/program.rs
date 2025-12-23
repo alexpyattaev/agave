@@ -3,7 +3,7 @@
 use {
     crate::device::NetworkDevice,
     agave_xdp_ebpf::FirewallConfig,
-    aya::{maps::Array, programs::Xdp, Ebpf, EbpfLoader},
+    aya::{maps::Array, programs::Xdp, Ebpf},
     log::info,
     std::io::{Cursor, Write},
 };
@@ -46,25 +46,19 @@ pub fn load_xdp_program(
     dev: &NetworkDevice,
     firewall_config: Option<FirewallConfig>,
 ) -> Result<Ebpf, Box<dyn std::error::Error>> {
-    let mut loader = EbpfLoader::new();
     let broken_frags = dev.driver()? == "i40e";
-    let mut ebpf = if broken_frags || firewall_config.is_some() {
-        info!("Loading the XDP program with firewall support");
-        let mut ebpf = loader.load(agave_xdp_ebpf::AGAVE_XDP_EBPF_PROGRAM)?;
-        let mut firewall_config = firewall_config.unwrap_or_default();
-        firewall_config.drop_frags = broken_frags;
-        info!("Firewall configured with {firewall_config:?}");
-        //aya_log::EbpfLogger::init(&mut ebpf).unwrap();
-        let mut array = Array::try_from(
-            ebpf.map_mut("FIREWALL_CONFIG")
-                .expect("Must have loaded the correct program"),
-        )?;
+    let load_firewall = broken_frags || firewall_config.is_some();
 
-        array.set(0, firewall_config, 0)?;
+    let mut firewall_config = firewall_config.unwrap_or_default();
+    let mut ebpf = if load_firewall {
+        info!("Loading the XDP program with firewall support");
+        let mut ebpf = Ebpf::load(agave_xdp_ebpf::AGAVE_XDP_EBPF_PROGRAM)?;
+        firewall_config.drop_frags = broken_frags;
+        aya_log::EbpfLogger::init(&mut ebpf)?;
         ebpf
     } else {
         info!("Loading the bypass XDP program");
-        loader.load(&generate_xdp_elf())?
+        Ebpf::load(&generate_xdp_elf())?
     };
 
     let p: &mut Xdp = ebpf.program_mut("agave_xdp").unwrap().try_into().unwrap();
@@ -72,6 +66,14 @@ pub fn load_xdp_program(
     p.load()?;
     p.attach_to_if_index(dev.if_index(), aya::programs::xdp::XdpFlags::DRV_MODE)?;
 
+    if load_firewall {
+        let mut array = Array::try_from(
+            ebpf.map_mut("FIREWALL_CONFIG")
+                .expect("Must have loaded the correct program"),
+        )?;
+        array.set(0, firewall_config, 0)?;
+        info!("Firewall configured with {firewall_config:?}");
+    }
     Ok(ebpf)
 }
 

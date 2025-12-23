@@ -11,7 +11,7 @@ use {
         maps::Array,
         programs::XdpContext,
     },
-    //aya_log_ebpf::{error, info},
+    aya_log_ebpf::{error, info},
     core::net::Ipv4Addr,
     helpers::ExtractedHeader,
 };
@@ -58,7 +58,7 @@ fn apply_xdp_firewall(ctx: XdpContext, config: &FirewallConfig) -> u32 {
         Err(ExtractError::NotSupported) => return XDP_PASS,
         // encountered a packet we could not parse
         _ => {
-            //error!(&ctx, "FIREWALL could not parse packet");
+            error!(&ctx, "FIREWALL could not parse packet");
             return XDP_DROP;
         }
     };
@@ -125,14 +125,14 @@ fn apply_xdp_firewall(ctx: XdpContext, config: &FirewallConfig) -> u32 {
     if drop_reason.is_empty() {
         XDP_PASS
     } else {
-        /*info!(
+        info!(
             &ctx,
             "DROP: SRC: {}:{}, DST PORT:{}, REASON: {}",
             header.src_ip,
             header.src_port,
             header.dst_port,
             drop_reason
-        );*/
+        );
         XDP_DROP
     }
 }
