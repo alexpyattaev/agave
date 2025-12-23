@@ -131,16 +131,28 @@ fn apply_xdp_firewall(ctx: XdpContext, config: &FirewallConfig) -> u32 {
     if drop_reason.is_empty() {
         XDP_PASS
     } else {
-        info!(
+        //info!(&ctx, "DROP:  SRC: {}", header.src_ip);
+        /*info!(
             &ctx,
-            "DROP: SRC: {}:{}, DST PORT:{}, REASON: {}",
+            "DROP: SRC: {}:{}, DST PORT:{}",
             header.src_ip,
             header.src_port,
             header.dst_port,
-            drop_reason
-        );
+            //drop_reason
+        );*/
         XDP_DROP
     }
+}
+
+fn print_header(header: &Header) {
+    info!(
+        &ctx,
+        "DROP: SRC: {}:{}, DST PORT:{}",
+        header.src_ip,
+        header.src_port,
+        header.dst_port,
+        //drop_reason
+    );
 }
 
 #[panic_handler]

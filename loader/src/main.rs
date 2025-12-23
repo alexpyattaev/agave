@@ -3,7 +3,10 @@ use std::{net::Ipv4Addr, thread, time::Duration};
 use agave_xdp::{device::NetworkDevice, load_xdp_program};
 use agave_xdp_ebpf::FirewallConfig;
 
-fn main() {
+#[tokio::main(flavor = "current_thread")]
+async fn main() {
+    env_logger::init();
+    // solana_logger::setup_with_default_filter();
     let interface = "eno17395np0";
     let dev = NetworkDevice::new(interface).unwrap();
     let firewall_config = FirewallConfig {
@@ -23,5 +26,5 @@ fn main() {
         drop_frags: false,
     };
     load_xdp_program(&dev, Some(firewall_config)).unwrap();
-    thread::sleep(Duration::from_secs(60));
+    tokio::time::sleep(Duration::from_secs(60)).await;
 }

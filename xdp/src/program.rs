@@ -4,7 +4,8 @@ use {
     crate::device::NetworkDevice,
     agave_xdp_ebpf::FirewallConfig,
     aya::{maps::Array, programs::Xdp, Ebpf},
-    log::info,
+    aya_log::EbpfLogger,
+    log::{info, warn},
     std::io::{Cursor, Write},
 };
 
@@ -41,6 +42,33 @@ const XDP_PROG: &[u8] = &[
 
 // the string table
 const STRTAB: &[u8] = b"\0xdp\0.symtab\0.strtab\0agave_xdp\0";
+
+// fn aya_logger(bpf: &mut Ebpf) {
+//     let runtime = tokio::runtime::Builder::new_current_thread()
+//         .enable_all()
+//         .build()
+//         .unwrap();
+//     runtime.block_on(async move {
+//         match EbpfLogger::init(bpf) {
+//             Err(e) => {
+//                 // This can happen if you remove all log statements from your eBPF program.
+//                 warn!("failed to initialize eBPF logger: {e}");
+//             }
+//             Ok(logger) => {
+//                 let mut logger =
+//                     tokio::io::unix::AsyncFd::with_interest(logger, tokio::io::Interest::READABLE)
+//                         .unwrap();
+//                 tokio::task::spawn(async move {
+//                     loop {
+//                         let mut guard = logger.readable_mut().await.unwrap();
+//                         guard.get_inner_mut().flush();
+//                         guard.clear_ready();
+//                     }
+//                 });
+//             }
+//         }
+//     });
+// }
 
 pub fn load_xdp_program(
     dev: &NetworkDevice,

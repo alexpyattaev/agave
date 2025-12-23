@@ -11,6 +11,9 @@ edition.workspace = true
 [dependencies]
 agave-xdp.workspace = true
 agave-xdp-ebpf.workspace = true
+solana-logger = "3.0.0"
+tokio = {workspace = true, features = ["full"]}
+env_logger = "0.10.0"
 
 [lints]
 workspace = true
