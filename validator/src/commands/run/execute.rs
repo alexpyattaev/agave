@@ -892,18 +892,21 @@ pub fn execute(
                 solana_max_port: dynamic_port_range.1,
                 my_ip: primary_ipv4,
                 deny_ingress_ports: [
-                    // TX only ports
-                    port(node.sockets.retransmit_sockets.first()),
-                    port(node.sockets.broadcast.first()),
-                    port(Some(&node.sockets.tpu_vote_forwarding_client)),
-                    // QUIC transports for repair and turbine - not in use
-                    port(Some(&node.sockets.serve_repair_quic)),
-                    port(Some(&node.sockets.tvu_quic)),
                     // UDP versions of the TPU ports - not in use
                     port(node.sockets.tpu_forwards.first()),
                     port(node.sockets.tpu.first()),
+                    // TX only ports
+                    port(node.sockets.retransmit_sockets.first()),
+                    port(node.sockets.broadcast.first()),
+                    // QUIC transports for repair and turbine - not in use
+                    port(Some(&node.sockets.serve_repair_quic)),
+                    port(Some(&node.sockets.ancestor_hashes_requests_quic)),
+                    port(Some(&node.sockets.repair_quic)),
+                    port(Some(&node.sockets.tvu_quic)),
                 ],
+                strip_gre: true, // support operating with DZ turned on
                 drop_frags: false,
+                enforce: false,
             })
         }
     }

@@ -641,6 +641,7 @@ dependencies = [
  "aya-ebpf",
  "aya-log-ebpf",
  "network-types",
+ "serde",
 ]
 
 [[package]]
@@ -4675,6 +4676,18 @@ name = "litemap"
 version = "0.7.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "643cb0b8d4fcc284004d5fd0d67ccf61dfffadb7f75e1e71bc420f4688a3a704"
+
+[[package]]
+name = "loader"
+version = "4.0.0-alpha.0"
+dependencies = [
+ "agave-xdp",
+ "agave-xdp-ebpf",
+ "clap 4.5.31",
+ "serde_json",
+ "solana-logger",
+ "tokio",
+]
 
 [[package]]
 name = "lock_api"
@@ -9433,6 +9446,19 @@ dependencies = [
  "strum",
  "tempfile",
  "trees",
+]
+
+[[package]]
+name = "solana-logger"
+version = "3.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ef7421d1092680d72065edbf5c7605856719b021bf5f173656c71febcdd5d003"
+dependencies = [
+ "env_logger",
+ "lazy_static",
+ "libc",
+ "log",
+ "signal-hook",
 ]
 
 [[package]]

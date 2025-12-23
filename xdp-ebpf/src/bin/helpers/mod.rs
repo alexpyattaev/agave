@@ -10,6 +10,7 @@ use {
 
 const GRE_HDR_LEN: usize = 4;
 
+#[inline(always)]
 pub fn parse_ip_header(ipv4hdr: *const Ipv4Hdr) -> (Ipv4Addr, Ipv4Addr, IpProto) {
     let src_ip = Ipv4Addr::from_bits(unsafe { u32::from_be_bytes((*ipv4hdr).src_addr) });
     let dst_ip = Ipv4Addr::from_bits(unsafe { u32::from_be_bytes((*ipv4hdr).dst_addr) });
@@ -22,25 +23,27 @@ pub enum ExtractError {
     NotSupported,
     /// Some valid IP packet but not UDP, we should let it pass
     NotUdp,
+    /// Malformed Ethernet frame we can not parse
+    MalformedEth,
     /// Malformed packets we can not parse
-    Malformed,
+    InvalidOffset,
 }
 
 pub struct ExtractedHeader {
     pub payload_offset: usize,
-    pub src_ip: Ipv4Addr,
+    pub _src_ip: Ipv4Addr,
     pub dst_ip: Ipv4Addr,
     pub src_port: u16,
     pub dst_port: u16,
     pub payload_len: usize,
 }
 impl ExtractedHeader {
-    pub fn from_context(ctx: &XdpContext) -> Result<Self, ExtractError> {
+    pub fn from_context(ctx: &XdpContext, strip_gre: bool) -> Result<Self, ExtractError> {
         let ethhdr: *const EthHdr = ptr_at(&ctx, 0)?;
         match unsafe {
             (*ethhdr)
                 .ether_type()
-                .map_err(|_| ExtractError::Malformed)?
+                .map_err(|_| ExtractError::MalformedEth)?
         } {
             EtherType::Ipv4 => {}
             _ => return Err(ExtractError::NotSupported),
@@ -48,10 +51,9 @@ impl ExtractedHeader {
         let mut ip_header_offset = EthHdr::LEN;
         let mut ipv4hdr: *const Ipv4Hdr = ptr_at(&ctx, ip_header_offset)?;
         let (src_ip, dst_ip, ip_proto) = parse_ip_header(ipv4hdr);
-        let (src_ip, dst_ip) = match ip_proto {
-            IpProto::Udp => (src_ip, dst_ip),
-            // support DZ ingress
-            IpProto::Gre => {
+        let (src_ip, dst_ip) = match (ip_proto, strip_gre) {
+            (IpProto::Udp, _) => (src_ip, dst_ip),
+            (IpProto::Gre, true) => {
                 ip_header_offset = EthHdr::LEN + Ipv4Hdr::LEN + GRE_HDR_LEN;
 
                 ipv4hdr = ptr_at(&ctx, ip_header_offset)?;
@@ -73,7 +75,7 @@ impl ExtractedHeader {
         let payload_offset = ip_header_offset + Ipv4Hdr::LEN + UdpHdr::LEN;
         Ok(Self {
             payload_offset,
-            src_ip,
+            _src_ip: src_ip,
             dst_ip,
             src_port,
             dst_port,
@@ -88,7 +90,7 @@ pub fn ptr_at<T>(ctx: &XdpContext, offset: usize) -> Result<*const T, ExtractErr
     let len = mem::size_of::<T>();
 
     if start + offset + len > end {
-        return Err(ExtractError::Malformed);
+        return Err(ExtractError::InvalidOffset);
     }
 
     let ptr = (start + offset) as *const T;
@@ -103,6 +105,7 @@ pub fn get_or_default<T: Default + Copy>(ctx: &XdpContext, offset: usize) -> T {
     }
 }
 
+#[inline(always)]
 pub fn has_quic_fixed_bit(first_byte: u8) -> bool {
     (first_byte & 0x40) != 0
 }
