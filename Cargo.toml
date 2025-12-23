@@ -45,7 +45,7 @@ members = [
     "io-uring",
     "keygen",
     "lattice-hash",
-    "ledger",
+    "ledger", "loader",
     "local-cluster",
     "logger",
     "measure",

@@ -1,0 +1,16 @@
+[package]
+name = "loader"
+version.workspace = true
+authors.workspace = true
+description.workspace = true
+repository.workspace = true
+homepage.workspace = true
+license.workspace = true
+edition.workspace = true
+
+[dependencies]
+agave-xdp.workspace = true
+agave-xdp-ebpf.workspace = true
+
+[lints]
+workspace = true

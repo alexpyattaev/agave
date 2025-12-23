@@ -1,0 +1,27 @@
+use std::{net::Ipv4Addr, thread, time::Duration};
+
+use agave_xdp::{device::NetworkDevice, load_xdp_program};
+use agave_xdp_ebpf::FirewallConfig;
+
+fn main() {
+    let interface = "eno17395np0";
+    let dev = NetworkDevice::new(interface).unwrap();
+    let firewall_config = FirewallConfig {
+        deny_ingress_ports: [0; 7],
+        tpu_vote: 0,
+        tpu_quic: 0,
+        tpu_forwards_quic: 0,
+        tpu_vote_quic: 0,
+        turbine: 0,
+        repair: 0,
+        serve_repair: 0,
+        ancestor_repair: 0,
+        gossip: 0,
+        solana_min_port: 0,
+        solana_max_port: 0,
+        my_ip: Ipv4Addr::new(64, 130, 63, 75),
+        drop_frags: false,
+    };
+    load_xdp_program(&dev, Some(firewall_config)).unwrap();
+    thread::sleep(Duration::from_secs(60));
+}

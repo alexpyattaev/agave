@@ -4677,6 +4677,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "643cb0b8d4fcc284004d5fd0d67ccf61dfffadb7f75e1e71bc420f4688a3a704"
 
 [[package]]
+name = "loader"
+version = "4.0.0-alpha.0"
+dependencies = [
+ "agave-xdp",
+ "agave-xdp-ebpf",
+]
+
+[[package]]
 name = "lock_api"
 version = "0.4.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"

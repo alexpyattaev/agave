@@ -32,9 +32,7 @@ pub fn agave_xdp(ctx: XdpContext) -> u32 {
         // https://lore.kernel.org/netdev/20251021173200.7908-2-alessandro.d@gmail.com
         return XDP_DROP;
     }
-    let _firewall_decision = apply_xdp_firewall(ctx, config);
-    // TODO: this should be replaced with actual return from the firewall
-    XDP_PASS
+    apply_xdp_firewall(ctx, config)
 }
 
 #[inline]
@@ -92,17 +90,25 @@ fn apply_xdp_firewall(ctx: XdpContext, config: &FirewallConfig) -> u32 {
                 drop_reason = "TPU QUIC: not QUIC packet";
             }
         } else if header.dst_port == config.repair {
-            // repair port receives shreds
-            if header.payload_len < 1200 {
+            if header.payload_len < 132 {
                 drop_reason = "repair: too short";
             }
+            if (first_byte < 6) || (first_byte > 11) {
+                drop_reason = "repair: fingerprint";
+            }
         } else if header.dst_port == config.serve_repair {
-            if header.payload_len < 64 {
+            if header.payload_len < 132 {
                 drop_reason = "serve_repair: too short";
             }
+            if (first_byte < 6) || (first_byte > 11) {
+                drop_reason = "repair: fingerprint";
+            }
         } else if header.dst_port == config.ancestor_repair {
-            if header.payload_len < 64 {
+            if header.payload_len < 132 {
                 drop_reason = "ancestor_repair: too short";
+            }
+            if (first_byte < 6) || (first_byte > 11) {
+                drop_reason = "repair: fingerprint";
             }
         } else if header.dst_port == config.gossip {
             if header.payload_len < 132 {
