@@ -140,13 +140,14 @@ fn apply_xdp_firewall(ctx: XdpContext, config: &FirewallConfig) -> u32 {
             header.dst_port,
             //drop_reason
         );*/
+        print_header(&ctx, &header);
         XDP_DROP
     }
 }
 
-fn print_header(header: &Header) {
+fn print_header(ctx: &XdpContext, header: &ExtractedHeader) {
     info!(
-        &ctx,
+        ctx,
         "DROP: SRC: {}:{}, DST PORT:{}",
         header.src_ip,
         header.src_port,
