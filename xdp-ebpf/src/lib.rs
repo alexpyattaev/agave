@@ -64,3 +64,38 @@ impl Default for FirewallConfig {
 
 #[cfg(all(target_os = "linux", not(target_arch = "bpf")))]
 unsafe impl aya::Pod for FirewallConfig {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum FirewallDecision {
+    Pass,
+
+    RepairTooShort,
+    AncestorRepairTooShort,
+    RepairFingerprint,
+    ServeRepairTooShort,
+
+    GossipFingerprint,
+    GossipTooShort,
+
+    IpWrongDestination,
+    ReservedPort,
+    TxOnlyPort,
+
+    NotQuicPacket,
+    TpuQuicTooShort,
+    TpuVoteQuicTooShort,
+
+    TurbineTooShort,
+
+    VoteTooShort,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
+pub struct DecisionEvent {
+    pub dst_port: u16,
+    pub decision: FirewallDecision,
+}
+
+pub const DECISION_EVENT_SIZE: usize = core::mem::size_of::<DecisionEvent>();

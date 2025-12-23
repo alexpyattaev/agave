@@ -30,3 +30,10 @@ aya = { workspace = true }
 
 [lints]
 workspace = true
+
+[profile.release]
+opt-level = 3
+codegen-units = 1
+debug = false
+lto = true
+panic = "abort"
