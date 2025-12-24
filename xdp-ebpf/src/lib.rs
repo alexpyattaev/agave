@@ -66,7 +66,7 @@ impl Default for FirewallConfig {
 unsafe impl aya::Pod for FirewallConfig {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
+#[repr(u64)]
 pub enum FirewallDecision {
     Pass,
 
@@ -94,9 +94,8 @@ pub enum FirewallDecision {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
 pub struct DecisionEvent {
-    pub dst_port: u16,
+    pub dst_port: u64,
     pub decision: FirewallDecision,
-    pub _padding: [u8; 5],
 }
 
 pub const DECISION_EVENT_SIZE: usize = core::mem::size_of::<DecisionEvent>();

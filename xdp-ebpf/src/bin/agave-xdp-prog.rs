@@ -161,9 +161,8 @@ fn apply_xdp_firewall(
 
 fn report_decision(ctx: &XdpContext, dst_port: u16, decision: FirewallDecision) {
     let event = DecisionEvent {
-        dst_port,
+        dst_port: dst_port as u64,
         decision,
-        _padding: [0; 5],
     };
 
     RING_BUF.output(&event, 0);
