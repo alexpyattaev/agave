@@ -6,8 +6,12 @@ use clap::Parser;
 
 #[derive(Debug, clap::Parser)]
 struct Cli {
-    #[arg(short, long, default_value_t = String::from("bond0"))]
+    #[arg(short, long)]
     interface: String,
+    #[arg(long)]
+    my_ip: Ipv4Addr,
+    #[arg(long)]
+    gossip_port: u16,
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -27,10 +31,10 @@ async fn main() {
         repair: 0,
         serve_repair: 0,
         ancestor_repair: 0,
-        gossip: 8000,
+        gossip: cli.gossip_port,
         solana_min_port: 8000,
         solana_max_port: 8050,
-        my_ip: Ipv4Addr::new(64, 130, 63, 75),
+        my_ip: cli.my_ip,
         drop_frags: false,
     };
     load_xdp_program(&dev, Some(firewall_config)).unwrap();
