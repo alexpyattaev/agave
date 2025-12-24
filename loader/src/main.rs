@@ -19,9 +19,9 @@ async fn main() {
         repair: 0,
         serve_repair: 0,
         ancestor_repair: 0,
-        gossip: 0,
-        solana_min_port: 0,
-        solana_max_port: 0,
+        gossip: 8000,
+        solana_min_port: 8000,
+        solana_max_port: 8050,
         my_ip: Ipv4Addr::new(64, 130, 63, 75),
         drop_frags: false,
     };

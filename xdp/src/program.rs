@@ -2,11 +2,17 @@
 
 use {
     crate::device::NetworkDevice,
-    agave_xdp_ebpf::FirewallConfig,
-    aya::{maps::Array, programs::Xdp, Ebpf},
-    aya_log::EbpfLogger,
+    agave_xdp_ebpf::{DecisionEvent, FirewallConfig},
+    aya::{
+        maps::{Array, MapData, RingBuf},
+        programs::Xdp,
+        Ebpf,
+    },
     log::{info, warn},
-    std::io::{Cursor, Write},
+    std::{
+        io::{Cursor, Write},
+        time::Duration,
+    },
 };
 
 macro_rules! write_fields {
@@ -43,33 +49,6 @@ const XDP_PROG: &[u8] = &[
 // the string table
 const STRTAB: &[u8] = b"\0xdp\0.symtab\0.strtab\0agave_xdp\0";
 
-// fn aya_logger(bpf: &mut Ebpf) {
-//     let runtime = tokio::runtime::Builder::new_current_thread()
-//         .enable_all()
-//         .build()
-//         .unwrap();
-//     runtime.block_on(async move {
-//         match EbpfLogger::init(bpf) {
-//             Err(e) => {
-//                 // This can happen if you remove all log statements from your eBPF program.
-//                 warn!("failed to initialize eBPF logger: {e}");
-//             }
-//             Ok(logger) => {
-//                 let mut logger =
-//                     tokio::io::unix::AsyncFd::with_interest(logger, tokio::io::Interest::READABLE)
-//                         .unwrap();
-//                 tokio::task::spawn(async move {
-//                     loop {
-//                         let mut guard = logger.readable_mut().await.unwrap();
-//                         guard.get_inner_mut().flush();
-//                         guard.clear_ready();
-//                     }
-//                 });
-//             }
-//         }
-//     });
-// }
-
 pub fn load_xdp_program(
     dev: &NetworkDevice,
     firewall_config: Option<FirewallConfig>,
@@ -101,8 +80,30 @@ pub fn load_xdp_program(
         )?;
         array.set(0, firewall_config, 0)?;
         info!("Firewall configured with {firewall_config:?}");
+        let ringbuf = RingBuf::try_from(
+            ebpf.take_map("RING_BUF")
+                .expect("Must have loaded the correct program"),
+        )?;
+        std::thread::spawn(move || watch_ring(ringbuf));
     }
     Ok(ebpf)
+}
+
+fn watch_ring(mut ring: RingBuf<MapData>) {
+    loop {
+        let next = ring.next();
+        if let Some(read) = next {
+            let ptr = read.as_ptr();
+
+            let event: DecisionEvent =
+                unsafe { std::ptr::read_unaligned::<DecisionEvent>(ptr as *const DecisionEvent) };
+            warn!(
+                "Firewall decision: {:?} for port {}",
+                event.decision, event.dst_port,
+            );
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
 }
 
 fn generate_xdp_elf() -> Vec<u8> {

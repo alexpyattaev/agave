@@ -46,18 +46,17 @@ pub fn agave_xdp(ctx: XdpContext) -> u32 {
         // encountered a packet we could not parse
         _ => {
             error!(&ctx, "FIREWALL could not parse packet");
-            return XDP_DROP;
+            return XDP_PASS;
         }
     };
     if outside_valid_port_range(header.dst_port, config) {
         return XDP_PASS;
     }
     let decision = apply_xdp_firewall(&ctx, &header, config);
+    print_decision(&ctx, header.dst_port, decision);
     if matches!(decision, FirewallDecision::Pass) {
         return XDP_PASS;
     }
-
-    print_decision(&ctx, header.dst_port, decision);
     XDP_PASS
 }
 
