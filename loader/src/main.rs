@@ -1,17 +1,25 @@
-use std::{net::Ipv4Addr, thread, time::Duration};
+use std::{net::Ipv4Addr, time::Duration};
 
 use agave_xdp::{device::NetworkDevice, load_xdp_program};
 use agave_xdp_ebpf::FirewallConfig;
+use clap::Parser;
+
+#[derive(Debug, clap::Parser)]
+struct Cli {
+    #[arg(short, long, default_value_t = String::from("bond0"))]
+    interface: String,
+}
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    env_logger::init();
-    // solana_logger::setup_with_default_filter();
-    let interface = "eno17395np0";
+    solana_logger::setup_with_default_filter();
+
+    let cli = Cli::parse();
+    let interface = &cli.interface;
     let dev = NetworkDevice::new(interface).unwrap();
     let firewall_config = FirewallConfig {
         deny_ingress_ports: [0; 7],
-        tpu_vote: 0,
+        tpu_vote: 8002,
         tpu_quic: 0,
         tpu_forwards_quic: 0,
         tpu_vote_quic: 0,

@@ -2,16 +2,18 @@
 
 use {
     crate::device::NetworkDevice,
-    agave_xdp_ebpf::{DecisionEvent, FirewallConfig},
+    agave_xdp_ebpf::{DecisionEvent, FirewallConfig, DECISION_EVENT_SIZE},
     aya::{
         maps::{Array, MapData, RingBuf},
         programs::Xdp,
         Ebpf,
     },
+    libc::{poll, pollfd, POLLERR, POLLIN},
     log::{info, warn},
     std::{
         io::{Cursor, Write},
-        time::Duration,
+        os::fd::AsRawFd,
+        thread,
     },
 };
 
@@ -61,7 +63,7 @@ pub fn load_xdp_program(
         info!("Loading the XDP program with firewall support");
         let mut ebpf = Ebpf::load(agave_xdp_ebpf::AGAVE_XDP_EBPF_PROGRAM)?;
         firewall_config.drop_frags = broken_frags;
-        aya_log::EbpfLogger::init(&mut ebpf)?;
+        //aya_log::EbpfLogger::init(&mut ebpf)?;
         ebpf
     } else {
         info!("Loading the bypass XDP program");
@@ -84,25 +86,48 @@ pub fn load_xdp_program(
             ebpf.take_map("RING_BUF")
                 .expect("Must have loaded the correct program"),
         )?;
-        std::thread::spawn(move || watch_ring(ringbuf));
+        thread::spawn(move || watch_ring(ringbuf));
     }
     Ok(ebpf)
 }
 
 fn watch_ring(mut ring: RingBuf<MapData>) {
-    loop {
-        let next = ring.next();
-        if let Some(read) = next {
-            let ptr = read.as_ptr();
+    let mut i = 0u64;
+    let mut fds = [pollfd {
+        fd: ring.as_raw_fd(),
+        events: POLLIN | POLLERR,
+        revents: 0,
+    }];
 
-            let event: DecisionEvent =
-                unsafe { std::ptr::read_unaligned::<DecisionEvent>(ptr as *const DecisionEvent) };
-            warn!(
-                "Firewall decision: {:?} for port {}",
-                event.decision, event.dst_port,
-            );
+    loop {
+        // Wait up to 100ms for events
+        let ret = unsafe { poll(fds.as_mut_ptr(), fds.len() as u64, 1000) };
+        if ret < 0 {
+            panic!("poll failed");
         }
-        std::thread::sleep(Duration::from_millis(1));
+        if ret == 0 {
+            warn!("timeout, no events");
+            continue;
+        }
+        // Drain everything currently in the ring
+        loop {
+            let item = ring.next();
+            let Some(read) = item else {
+                break;
+            };
+            assert_eq!(read.len(), DECISION_EVENT_SIZE, "Invalid event size");
+
+            let ptr = read.as_ptr();
+            let event =
+                unsafe { std::ptr::read_unaligned::<DecisionEvent>(ptr as *const DecisionEvent) };
+            if i.is_multiple_of(1000) {
+                warn!(
+                    "Firewall decision: {:?} for port {}",
+                    event.decision, event.dst_port,
+                );
+            }
+            i += 1;
+        }
     }
 }
 

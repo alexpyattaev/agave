@@ -96,6 +96,7 @@ pub enum FirewallDecision {
 pub struct DecisionEvent {
     pub dst_port: u16,
     pub decision: FirewallDecision,
+    pub _padding: [u8; 5],
 }
 
 pub const DECISION_EVENT_SIZE: usize = core::mem::size_of::<DecisionEvent>();
