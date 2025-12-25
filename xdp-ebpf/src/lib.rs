@@ -26,6 +26,7 @@ pub static AGAVE_XDP_EBPF_PROGRAM: &[u8] =
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]
 pub struct FirewallConfig {
+    /// Ports on which only egress is allowed
     pub deny_ingress_ports: [u16; 7],
     pub tpu_vote: u16,
     pub tpu_quic: u16,
@@ -39,6 +40,8 @@ pub struct FirewallConfig {
     pub solana_min_port: u16,
     pub solana_max_port: u16,
     pub my_ip: Ipv4Addr,
+    ///Strips GRE headers for DZ compatibility
+    pub strip_gre: bool,
     pub drop_frags: bool,
 }
 impl Default for FirewallConfig {
@@ -57,6 +60,7 @@ impl Default for FirewallConfig {
             solana_min_port: 0,
             solana_max_port: 0,
             my_ip: Ipv4Addr::UNSPECIFIED,
+            strip_gre: true,
             drop_frags: false,
         }
     }
@@ -66,35 +70,37 @@ impl Default for FirewallConfig {
 unsafe impl aya::Pod for FirewallConfig {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u64)]
 pub enum FirewallDecision {
     Pass,
 
-    RepairTooShort,
-    AncestorRepairTooShort,
-    RepairFingerprint,
-    ServeRepairTooShort,
+    RepairTooShort(u16),
+    AncestorRepairTooShort(u16),
+    RepairFingerprint(u8),
+    ServeRepairTooShort(u16),
 
     GossipFingerprint,
     GossipTooShort,
 
     IpWrongDestination,
     ReservedPort,
-    TxOnlyPort,
+    TxOnlyPort(u16),
 
     NotQuicPacket,
     TpuQuicTooShort,
     TpuVoteQuicTooShort,
 
-    TurbineTooShort,
+    TurbineTooShort(u16),
 
     VoteTooShort,
 }
 
+#[cfg(all(target_os = "linux", not(target_arch = "bpf")))]
+unsafe impl aya::Pod for FirewallDecision {}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
 pub struct DecisionEvent {
-    pub dst_port: u64,
+    pub dst_port: u16,
     pub decision: FirewallDecision,
 }
 

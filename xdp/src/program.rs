@@ -63,7 +63,9 @@ pub fn load_xdp_program(
         info!("Loading the XDP program with firewall support");
         let mut ebpf = Ebpf::load(agave_xdp_ebpf::AGAVE_XDP_EBPF_PROGRAM)?;
         firewall_config.drop_frags = broken_frags;
-        //aya_log::EbpfLogger::init(&mut ebpf)?;
+        // in new aya this would require active polling!
+        //let logger = aya_log::EbpfLogger::init(&mut ebpf)?;
+        //Box::leak(Box::new(logger));
         ebpf
     } else {
         info!("Loading the bypass XDP program");

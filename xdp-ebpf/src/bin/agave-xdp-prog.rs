@@ -11,7 +11,8 @@ use {
         maps::{Array, RingBuf},
         programs::XdpContext,
     },
-    core::{net::Ipv4Addr, ptr},
+    aya_log_ebpf::error,
+    core::net::Ipv4Addr,
     helpers::ExtractedHeader,
 };
 
@@ -21,6 +22,7 @@ mod helpers;
 #[map]
 static FIREWALL_CONFIG: Array<FirewallConfig> = Array::with_max_entries(1, 0);
 
+/// Report the decision made by the firewall.
 #[map]
 static RING_BUF: RingBuf = RingBuf::with_byte_size(4096 * 64, 0);
 
@@ -41,13 +43,15 @@ pub fn agave_xdp(ctx: XdpContext) -> u32 {
         return XDP_PASS;
     }
 
-    let header = match ExtractedHeader::from_context(&ctx) {
+    let header = match ExtractedHeader::from_context(&ctx, config.strip_gre) {
         Ok(header) => header,
+        // TCP (and other things that are not UDP)
         Err(ExtractError::NotUdp) => return XDP_PASS,
+        // IPv6, Arp
         Err(ExtractError::NotSupported) => return XDP_PASS,
         // encountered a packet we could not parse
         _ => {
-            //error!(&ctx, "FIREWALL could not parse packet");
+            error!(&ctx, "FIREWALL could not parse packet");
             return XDP_PASS;
         }
     };
@@ -57,15 +61,14 @@ pub fn agave_xdp(ctx: XdpContext) -> u32 {
     }
 
     let decision = apply_xdp_firewall(&ctx, &header, config);
-    //info!(&ctx, ".");
-    report_decision(&ctx, header.dst_port, decision);
     if matches!(decision, FirewallDecision::Pass) {
         return XDP_PASS;
     }
+    report_decision(header.dst_port, decision);
     XDP_PASS
 }
 
-#[inline]
+#[inline(always)]
 pub fn has_frags(ctx: &XdpContext) -> bool {
     #[allow(clippy::arithmetic_side_effects)]
     let linear_len = ctx.data_end() - ctx.data();
@@ -74,7 +77,7 @@ pub fn has_frags(ctx: &XdpContext) -> bool {
     linear_len < buf_len
 }
 
-#[inline]
+#[inline(always)]
 fn outside_valid_port_range(dst_port: u16, config: &FirewallConfig) -> bool {
     dst_port < config.solana_min_port || dst_port > config.solana_max_port
 }
@@ -99,11 +102,29 @@ fn apply_xdp_firewall(
             return FirewallDecision::VoteTooShort;
         }
     }
+    if header.dst_port == config.gossip {
+        if header.payload_len < 132 {
+            return FirewallDecision::GossipTooShort;
+        }
+        if first_byte > 5 {
+            return FirewallDecision::GossipFingerprint;
+        }
+    }
     if header.dst_port == config.turbine {
         // turbine port receives shreds
         if header.payload_len < 1200 {
-            return FirewallDecision::TurbineTooShort;
+            return FirewallDecision::TurbineTooShort(header.payload_len as u16);
         }
+    }
+    if config
+        .deny_ingress_ports
+        .iter()
+        .copied()
+        .find(|&port| port == header.dst_port)
+        .is_some()
+    {
+        // some ports are only used to send data
+        return FirewallDecision::TxOnlyPort(header.dst_port);
     }
     if (header.dst_port == config.tpu_quic)
         || (header.dst_port == config.tpu_vote_quic)
@@ -116,64 +137,34 @@ fn apply_xdp_firewall(
     }
     if header.dst_port == config.repair {
         if header.payload_len < 132 {
-            return FirewallDecision::RepairTooShort;
+            return FirewallDecision::RepairTooShort(header.payload_len as u16);
         }
         if (first_byte < 6) || (first_byte > 11) {
-            return FirewallDecision::RepairFingerprint;
+            return FirewallDecision::RepairFingerprint(first_byte);
         }
     }
     if header.dst_port == config.serve_repair {
         if header.payload_len < 132 {
-            return FirewallDecision::ServeRepairTooShort;
+            return FirewallDecision::ServeRepairTooShort(header.payload_len as u16);
         }
         if (first_byte < 6) || (first_byte > 11) {
-            return FirewallDecision::RepairFingerprint;
+            return FirewallDecision::RepairFingerprint(first_byte);
         }
     }
     if header.dst_port == config.ancestor_repair {
         if header.payload_len < 132 {
-            return FirewallDecision::AncestorRepairTooShort;
+            return FirewallDecision::AncestorRepairTooShort(header.payload_len as u16);
         }
         if (first_byte < 6) || (first_byte > 11) {
-            return FirewallDecision::RepairFingerprint;
+            return FirewallDecision::RepairFingerprint(first_byte);
         }
-    }
-    if header.dst_port == config.gossip {
-        if header.payload_len < 132 {
-            return FirewallDecision::GossipTooShort;
-        }
-        if first_byte > 5 {
-            return FirewallDecision::GossipFingerprint;
-        }
-    }
-    if config
-        .deny_ingress_ports
-        .iter()
-        .copied()
-        .find(|&port| port == header.dst_port)
-        .is_some()
-    {
-        // some ports are only used to send data
-        return FirewallDecision::TxOnlyPort;
     }
     FirewallDecision::Pass
 }
 
-fn report_decision(ctx: &XdpContext, dst_port: u16, decision: FirewallDecision) {
-    let event = DecisionEvent {
-        dst_port: dst_port as u64,
-        decision,
-    };
-
-    RING_BUF.output(&event, 0);
-    // let Some(mut slot) = RING_BUF.reserve::<DecisionEvent>(0) else {
-    //     return;
-    // };
-
-    // unsafe {
-    //     ptr::write_unaligned(slot.as_mut_ptr(), event);
-    // }
-    // slot.submit(0);
+fn report_decision(dst_port: u16, decision: FirewallDecision) {
+    let event = DecisionEvent { dst_port, decision };
+    let _ = RING_BUF.output(&event, 0);
 }
 
 #[panic_handler]

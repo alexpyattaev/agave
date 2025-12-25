@@ -35,8 +35,9 @@ async fn main() {
         solana_min_port: 8000,
         solana_max_port: 8050,
         my_ip: cli.my_ip,
+        strip_gre: true,
         drop_frags: false,
     };
-    load_xdp_program(&dev, Some(firewall_config)).unwrap();
+    let ebpf = load_xdp_program(&dev, Some(firewall_config)).unwrap();
     tokio::time::sleep(Duration::from_secs(60)).await;
 }
