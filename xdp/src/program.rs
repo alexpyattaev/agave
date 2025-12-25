@@ -122,13 +122,11 @@ fn watch_ring(mut ring: RingBuf<MapData>) {
             let ptr = read.as_ptr();
             let event =
                 unsafe { std::ptr::read_unaligned::<DecisionEvent>(ptr as *const DecisionEvent) };
-            if i.is_multiple_of(1000) {
-                warn!(
-                    "Firewall decision: {:?} for port {}",
-                    event.decision, event.dst_port,
-                );
-            }
-            i += 1;
+
+            warn!(
+                "Firewall decision: {:?} for port {}",
+                event.decision, event.dst_port,
+            );
         }
     }
 }

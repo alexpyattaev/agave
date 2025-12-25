@@ -31,7 +31,7 @@ pub static AGAVE_XDP_EBPF_PROGRAM: &[u8] =
 #[repr(C)]
 pub struct FirewallConfig {
     /// Ports on which only egress is allowed
-    pub deny_ingress_ports: [u16; 7],
+    pub deny_ingress_ports: [u16; 8],
     pub tpu_vote: u16,
     pub tpu_quic: u16,
     pub tpu_forwards_quic: u16,
@@ -52,7 +52,7 @@ pub struct FirewallConfig {
 impl Default for FirewallConfig {
     fn default() -> Self {
         Self {
-            deny_ingress_ports: [0; 7],
+            deny_ingress_ports: [0; 8],
             tpu_vote: 0,
             tpu_quic: 0,
             tpu_forwards_quic: 0,
