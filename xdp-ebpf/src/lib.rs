@@ -23,6 +23,10 @@ use core::net::Ipv4Addr;
 pub static AGAVE_XDP_EBPF_PROGRAM: &[u8] =
     aya::include_bytes_aligned!(concat!(env!("CARGO_MANIFEST_DIR"), "/agave-xdp-prog"));
 
+#[cfg_attr(
+    all(target_os = "linux", not(target_arch = "bpf")),
+    derive(serde::Deserialize)
+)]
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]
 pub struct FirewallConfig {
@@ -44,6 +48,7 @@ pub struct FirewallConfig {
     pub strip_gre: bool,
     pub drop_frags: bool,
 }
+
 impl Default for FirewallConfig {
     fn default() -> Self {
         Self {

@@ -641,6 +641,7 @@ dependencies = [
  "aya-ebpf",
  "aya-log-ebpf",
  "network-types",
+ "serde",
 ]
 
 [[package]]
@@ -4683,6 +4684,7 @@ dependencies = [
  "agave-xdp",
  "agave-xdp-ebpf",
  "clap 4.5.31",
+ "serde_json",
  "solana-logger",
  "tokio",
 ]
