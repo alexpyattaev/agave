@@ -8,6 +8,8 @@ use {
     },
 };
 
+pub mod vote;
+
 const GRE_HDR_LEN: usize = 4;
 
 #[inline(always)]

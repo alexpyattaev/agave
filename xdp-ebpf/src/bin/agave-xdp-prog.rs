@@ -16,7 +16,7 @@ use {
     helpers::ExtractedHeader,
 };
 
-mod helpers;
+pub mod helpers;
 
 /// Ports on which to enact firewalling.
 #[map]
