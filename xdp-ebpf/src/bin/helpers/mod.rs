@@ -1,4 +1,5 @@
 use {
+    agave_xdp_ebpf::FirewallDecision,
     aya_ebpf::programs::XdpContext,
     core::{mem, net::Ipv4Addr},
     network_types::{

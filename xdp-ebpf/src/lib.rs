@@ -30,40 +30,45 @@ pub static AGAVE_XDP_EBPF_PROGRAM: &[u8] =
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]
 pub struct FirewallConfig {
-    /// Ports on which only egress is allowed
-    pub deny_ingress_ports: [u16; 8],
-    pub tpu_vote: u16,
-    pub tpu_quic: u16,
-    pub tpu_forwards_quic: u16,
-    pub tpu_vote_quic: u16,
-    pub turbine: u16,
-    pub repair: u16,
-    pub serve_repair: u16,
-    pub ancestor_repair: u16,
-    pub gossip: u16,
+    /// Base port for all Solana services
     pub solana_min_port: u16,
-    pub solana_max_port: u16,
     pub my_ip: Ipv4Addr,
     ///Strips GRE headers for DZ compatibility
     pub strip_gre: bool,
+    /// Drop on fragmented contexts
     pub drop_frags: bool,
     /// Whether to enforce firewall rules
     pub enforce: bool,
 }
 
+pub const MAX_FIREWALL_RULES: usize = 64;
+
+#[derive(Clone, Copy, Debug)]
+#[repr(C)]
+pub enum FirewallRule {
+    /// Drops all incoming packets
+    DenyIngress,
+    /// Allows only QUIC packets
+    Quic,
+    /// Allows packets of Repair protocol
+    Repair,
+    /// Allows only UDP shreds
+    Turbine,
+    /// Allows only gossip
+    Gossip,
+    /// Allows only UDP vote packets
+    Vote,
+}
+
+impl Default for FirewallRule {
+    fn default() -> Self {
+        Self::DenyIngress
+    }
+}
+
 impl Default for FirewallConfig {
     fn default() -> Self {
         Self {
-            deny_ingress_ports: [0; 8],
-            tpu_vote: 0,
-            tpu_quic: 0,
-            tpu_forwards_quic: 0,
-            tpu_vote_quic: 0,
-            turbine: 0,
-            repair: 0,
-            serve_repair: 0,
-            ancestor_repair: 0,
-            gossip: 0,
             solana_min_port: 0,
             solana_max_port: 0,
             my_ip: Ipv4Addr::UNSPECIFIED,

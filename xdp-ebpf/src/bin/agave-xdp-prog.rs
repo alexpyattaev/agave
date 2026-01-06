@@ -2,8 +2,12 @@
 #![no_main]
 
 use {
-    crate::helpers::{get_or_default, has_quic_fixed_bit, ExtractError},
-    agave_xdp_ebpf::{DecisionEvent, FirewallConfig, FirewallDecision},
+    crate::helpers::{
+        get_or_default, has_quic_fixed_bit, vote::check_vote_signature, ExtractError,
+    },
+    agave_xdp_ebpf::{
+        DecisionEvent, FirewallConfig, FirewallDecision, FirewallRule, MAX_FIREWALL_RULES,
+    },
     aya_ebpf::{
         bindings::xdp_action::{XDP_DROP, XDP_PASS},
         helpers::gen::bpf_xdp_get_buff_len,
@@ -21,6 +25,9 @@ pub mod helpers;
 /// Ports on which to enact firewalling.
 #[map]
 static FIREWALL_CONFIG: Array<FirewallConfig> = Array::with_max_entries(1, 0);
+
+#[map]
+static FIREWALL_RULES: Array<FirewallRule> = Array::with_max_entries(MAX_FIREWALL_RULES, 0);
 
 /// Report the decision made by the firewall.
 #[map]
@@ -83,7 +90,20 @@ pub fn has_frags(ctx: &XdpContext) -> bool {
 
 #[inline(always)]
 fn outside_valid_port_range(dst_port: u16, config: &FirewallConfig) -> bool {
-    dst_port < config.solana_min_port || dst_port > config.solana_max_port
+    dst_port < config.solana_min_port || dst_port > config.solana_min_port + MAX_FIREWALL_RULES
+}
+
+/// Non-protocol specific checks
+fn sanity_checks(header: &ExtractedHeader, config: &FirewallConfig) -> Option<FirewallDecision> {
+    // drop packets from "reserved" ports as Solana should never run as root
+    if header.src_port < 1024 {
+        return Some(FirewallDecision::ReservedPort);
+    }
+    // drop packets targeting IP which is not ours
+    if header.dst_ip != config.my_ip {
+        return Some(FirewallDecision::IpWrongDestination);
+    }
+    None
 }
 
 /// Core protocol-specific logic of the firewall for Agave
@@ -92,83 +112,73 @@ fn apply_xdp_firewall(
     header: &ExtractedHeader,
     config: &FirewallConfig,
 ) -> FirewallDecision {
-    // drop things from "reserved" ports
-    if header.src_port < 1024 {
-        return FirewallDecision::ReservedPort;
+    if let Some(decision) = sanity_checks(&header, config) {
+        return decision;
     }
-    if header.dst_ip != config.my_ip {
-        return FirewallDecision::IpWrongDestination;
-    }
+    // find an offset into the rules array based on solana port range
+    // if destination port is outside the range, the map lookup will fail
+    let rule_offset = header.dst_port.saturating_sub(config.solana_min_port) as usize;
+    // Default rule is to deny ingress, so if we can not find a rule for
+    // a given port, the packet is dropped
+    let rule: FirewallRule = get_or_default(&ctx, rule_offset);
 
-    let first_byte: u8 = get_or_default(&ctx, header.payload_offset);
-    if header.dst_port == config.tpu_vote {
-        if header.payload_len < 64 {
-            return FirewallDecision::VoteTooShort;
+    match rule {
+        FirewallRule::DenyIngress => FirewallDecision::TxOnlyPort(header.dst_port),
+        FirewallRule::Quic => {
+            let first_byte: u8 = get_or_default(&ctx, header.payload_offset);
+            if !has_quic_fixed_bit(first_byte) {
+                FirewallDecision::NotQuicPacket
+            } else {
+                FirewallDecision::Pass
+            }
+        }
+        FirewallRule::Repair => {
+            let first_byte: u8 = get_or_default(&ctx, header.payload_offset);
+            check_repair_fingerprint(&header, first_byte)
+        }
+        FirewallRule::Turbine => {
+            // todo: check the shredversion byte
+            if header.payload_len < 1200 {
+                FirewallDecision::TurbineTooShort(header.payload_len as u16)
+            } else {
+                FirewallDecision::Pass
+            }
+        }
+        FirewallRule::Gossip => {
+            let first_byte: u8 = get_or_default(&ctx, header.payload_offset);
+            check_gossip_fingerprint(&header, first_byte)
+        }
+        FirewallRule::Vote => {
+            let first_byte: u8 = get_or_default(&ctx, header.payload_offset);
+            check_vote_signature(&ctx, &header, first_byte)
         }
     }
-    if header.dst_port == config.gossip {
-        if header.payload_len < 132 {
-            return FirewallDecision::GossipTooShort;
-        }
-        if first_byte > 5 {
-            return FirewallDecision::GossipFingerprint;
-        }
-    }
-    if header.dst_port == config.turbine {
-        // turbine port receives shreds
-        if header.payload_len < 1200 {
-            return FirewallDecision::TurbineTooShort(header.payload_len as u16);
-        }
-    }
-    if config
-        .deny_ingress_ports
-        .iter()
-        .copied()
-        .find(|&port| port == header.dst_port)
-        .is_some()
-    {
-        // some ports are only used to send data
-        return FirewallDecision::TxOnlyPort(header.dst_port);
-    }
-    if (header.dst_port == config.tpu_quic)
-        || (header.dst_port == config.tpu_vote_quic)
-        || (header.dst_port == config.tpu_forwards_quic)
-    {
-        // these ports receive via QUIC
-        if !has_quic_fixed_bit(first_byte) {
-            return FirewallDecision::NotQuicPacket;
-        }
-    }
-    if header.dst_port == config.repair {
-        if header.payload_len < 132 {
-            return FirewallDecision::RepairTooShort(header.payload_len as u16);
-        }
-        if (first_byte < 6) || (first_byte > 11) {
-            return FirewallDecision::RepairFingerprint(first_byte);
-        }
-    }
-    if header.dst_port == config.serve_repair {
-        if header.payload_len < 132 {
-            return FirewallDecision::ServeRepairTooShort(header.payload_len as u16);
-        }
-        if (first_byte < 6) || (first_byte > 11) {
-            return FirewallDecision::RepairFingerprint(first_byte);
-        }
-    }
-    if header.dst_port == config.ancestor_repair {
-        if header.payload_len < 132 {
-            return FirewallDecision::AncestorRepairTooShort(header.payload_len as u16);
-        }
-        if (first_byte < 6) || (first_byte > 11) {
-            return FirewallDecision::RepairFingerprint(first_byte);
-        }
-    }
-    FirewallDecision::Pass
 }
 
 fn report_decision(dst_port: u16, decision: FirewallDecision) {
     let event = DecisionEvent { dst_port, decision };
     let _ = RING_BUF.output(&event, 0);
+}
+
+pub fn check_repair_fingerprint(header: &ExtractedHeader, first_byte: u8) -> FirewallDecision {
+    if header.payload_len < 132 {
+        return FirewallDecision::RepairTooShort(header.payload_len as u16);
+    }
+    if (first_byte < 6) || (first_byte > 11) {
+        return FirewallDecision::RepairFingerprint(first_byte);
+    }
+    FirewallDecision::Pass
+}
+
+pub fn check_gossip_fingerprint(header: &ExtractedHeader, first_byte: u8) -> FirewallDecision {
+    if header.payload_len < 132 {
+        return FirewallDecision::GossipTooShort;
+    }
+    if first_byte > 5 {
+        return FirewallDecision::GossipFingerprint;
+    }
+
+    FirewallDecision::Pass
 }
 
 #[panic_handler]
