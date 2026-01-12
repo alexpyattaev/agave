@@ -161,9 +161,11 @@ fn report_decision(dst_port: u16, decision: FirewallDecision) {
 }
 
 pub fn check_repair_fingerprint(header: &ExtractedHeader, first_byte: u8) -> FirewallDecision {
-    if header.payload_len < 132 {
+    //defined by REPAIR_REQUEST_MIN_BYTES
+    if header.payload_len < 128 {
         return FirewallDecision::RepairTooShort(header.payload_len as u16);
     }
+    // based on RepairProtocol enum
     if (first_byte < 6) || (first_byte > 11) {
         return FirewallDecision::RepairFingerprint(first_byte);
     }

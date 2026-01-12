@@ -70,7 +70,6 @@ impl Default for FirewallConfig {
     fn default() -> Self {
         Self {
             solana_min_port: 0,
-            solana_max_port: 0,
             my_ip: Ipv4Addr::UNSPECIFIED,
             strip_gre: true,
             drop_frags: false,
