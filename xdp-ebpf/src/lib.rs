@@ -41,7 +41,7 @@ pub struct FirewallConfig {
     pub enforce: bool,
 }
 
-pub const MAX_FIREWALL_RULES: usize = 64;
+pub const MAX_FIREWALL_RULES: u16 = 64;
 
 #[cfg_attr(
     all(target_os = "linux", not(target_arch = "bpf")),

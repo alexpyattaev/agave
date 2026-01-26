@@ -28,7 +28,7 @@ pub mod helpers;
 static FIREWALL_CONFIG: Array<FirewallConfig> = Array::with_max_entries(1, 0);
 
 #[map]
-static FIREWALL_RULES: Array<FirewallRule> = Array::with_max_entries(MAX_FIREWALL_RULES, 0);
+static FIREWALL_RULES: Array<FirewallRule> = Array::with_max_entries(MAX_FIREWALL_RULES as u32, 0);
 
 /// Report the decision made by the firewall.
 #[map]
