@@ -2,7 +2,7 @@
 
 use {
     crate::device::NetworkDevice,
-    agave_xdp_ebpf::{DecisionEvent, FirewallConfig, DECISION_EVENT_SIZE},
+    agave_xdp_ebpf::{DecisionEvent, FirewallConfig, FirewallRule, DECISION_EVENT_SIZE},
     aya::{
         maps::{Array, MapData, RingBuf},
         programs::Xdp,
@@ -54,6 +54,7 @@ const STRTAB: &[u8] = b"\0xdp\0.symtab\0.strtab\0agave_xdp\0";
 pub fn load_xdp_program(
     dev: &NetworkDevice,
     firewall_config: Option<FirewallConfig>,
+    firewall_rules: &[FirewallRule],
 ) -> Result<Ebpf, Box<dyn std::error::Error>> {
     let broken_frags = dev.driver()? == "i40e";
     let load_firewall = broken_frags || firewall_config.is_some();
@@ -78,11 +79,18 @@ pub fn load_xdp_program(
     p.attach_to_if_index(dev.if_index(), aya::programs::xdp::XdpFlags::DRV_MODE)?;
 
     if load_firewall {
-        let mut array = Array::try_from(
+        let mut config_map = Array::try_from(
             ebpf.map_mut("FIREWALL_CONFIG")
                 .expect("Must have loaded the correct program"),
         )?;
-        array.set(0, firewall_config, 0)?;
+        config_map.set(0, firewall_config, 0)?;
+        let mut rules_map: Array<_, FirewallRule> = Array::try_from(
+            ebpf.map_mut("FIREWALL_RULES")
+                .expect("Must have loaded the correct program"),
+        )?;
+        for (index, rule) in firewall_rules.iter().enumerate() {
+            rules_map.set(index as u32, *rule, 0)?;
+        }
         info!("Firewall configured with {firewall_config:?}");
         let ringbuf = RingBuf::try_from(
             ebpf.take_map("RING_BUF")

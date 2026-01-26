@@ -112,3 +112,26 @@ pub fn get_or_default<T: Default + Copy>(ctx: &XdpContext, offset: usize) -> T {
 pub fn has_quic_fixed_bit(first_byte: u8) -> bool {
     (first_byte & 0x40) != 0
 }
+
+pub fn check_repair_fingerprint(header: &ExtractedHeader, first_byte: u8) -> FirewallDecision {
+    //defined by REPAIR_REQUEST_MIN_BYTES
+    if header.payload_len < 128 {
+        return FirewallDecision::RepairTooShort(header.payload_len as u16);
+    }
+    // based on RepairProtocol enum
+    if (first_byte < 6) || (first_byte > 11) {
+        return FirewallDecision::RepairFingerprint(first_byte);
+    }
+    FirewallDecision::Pass
+}
+
+pub fn check_gossip_fingerprint(header: &ExtractedHeader, first_byte: u8) -> FirewallDecision {
+    if header.payload_len < 132 {
+        return FirewallDecision::GossipTooShort;
+    }
+    if first_byte > 5 {
+        return FirewallDecision::GossipFingerprint;
+    }
+
+    FirewallDecision::Pass
+}

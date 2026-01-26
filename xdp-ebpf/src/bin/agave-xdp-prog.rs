@@ -3,7 +3,8 @@
 
 use {
     crate::helpers::{
-        get_or_default, has_quic_fixed_bit, vote::check_vote_signature, ExtractError,
+        check_gossip_fingerprint, check_repair_fingerprint, get_or_default, has_quic_fixed_bit,
+        vote::check_vote_signature, ExtractError,
     },
     agave_xdp_ebpf::{
         DecisionEvent, FirewallConfig, FirewallDecision, FirewallRule, MAX_FIREWALL_RULES,
@@ -150,7 +151,7 @@ fn apply_xdp_firewall(
         }
         FirewallRule::Vote => {
             let first_byte: u8 = get_or_default(&ctx, header.payload_offset);
-            check_vote_signature(&ctx, &header, first_byte)
+            check_vote_signature(&header, first_byte)
         }
     }
 }
@@ -158,29 +159,6 @@ fn apply_xdp_firewall(
 fn report_decision(dst_port: u16, decision: FirewallDecision) {
     let event = DecisionEvent { dst_port, decision };
     let _ = RING_BUF.output(&event, 0);
-}
-
-pub fn check_repair_fingerprint(header: &ExtractedHeader, first_byte: u8) -> FirewallDecision {
-    //defined by REPAIR_REQUEST_MIN_BYTES
-    if header.payload_len < 128 {
-        return FirewallDecision::RepairTooShort(header.payload_len as u16);
-    }
-    // based on RepairProtocol enum
-    if (first_byte < 6) || (first_byte > 11) {
-        return FirewallDecision::RepairFingerprint(first_byte);
-    }
-    FirewallDecision::Pass
-}
-
-pub fn check_gossip_fingerprint(header: &ExtractedHeader, first_byte: u8) -> FirewallDecision {
-    if header.payload_len < 132 {
-        return FirewallDecision::GossipTooShort;
-    }
-    if first_byte > 5 {
-        return FirewallDecision::GossipFingerprint;
-    }
-
-    FirewallDecision::Pass
 }
 
 #[panic_handler]

@@ -43,8 +43,12 @@ pub struct FirewallConfig {
 
 pub const MAX_FIREWALL_RULES: usize = 64;
 
+#[cfg_attr(
+    all(target_os = "linux", not(target_arch = "bpf")),
+    derive(serde::Deserialize)
+)]
 #[derive(Clone, Copy, Debug)]
-#[repr(C)]
+#[repr(u8)]
 pub enum FirewallRule {
     /// Drops all incoming packets
     DenyIngress,
@@ -65,6 +69,9 @@ impl Default for FirewallRule {
         Self::DenyIngress
     }
 }
+
+#[cfg(all(target_os = "linux", not(target_arch = "bpf")))]
+unsafe impl aya::Pod for FirewallRule {}
 
 impl Default for FirewallConfig {
     fn default() -> Self {
@@ -104,6 +111,7 @@ pub enum FirewallDecision {
     TurbineTooShort(u16),
 
     VoteTooShort,
+    VoteInvalidSigCount(u8),
 }
 
 #[cfg(all(target_os = "linux", not(target_arch = "bpf")))]
