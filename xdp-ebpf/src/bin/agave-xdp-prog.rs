@@ -3,7 +3,7 @@
 
 use {
     crate::helpers::{
-        check_gossip_fingerprint, check_repair_fingerprint, get_or_default, has_quic_fixed_bit,
+        check_gossip_fingerprint, check_quic_fingerprint, check_repair_fingerprint, get_or_default,
         vote::check_vote_signature, ExtractError,
     },
     agave_xdp_ebpf::{
@@ -118,24 +118,18 @@ fn apply_xdp_firewall(
     }
     // find an offset into the rules array based on solana port range
     // if destination port is outside the range, the map lookup will fail
-    let rule_offset = header.dst_port.saturating_sub(config.solana_min_port) as usize;
-    // Default rule is to deny ingress, so if we can not find a rule for
+    let rule_offset = header.dst_port.saturating_sub(config.solana_min_port) as u32;
+    // Default rule is DenyIngress, so if we can not find a rule for
     // a given port, the packet is dropped
-    let rule: FirewallRule = get_or_default(&ctx, rule_offset);
+    let rule = FIREWALL_RULES.get(rule_offset).cloned().unwrap_or_default();
 
+    // this is to keep verifier happy (we are setting first_byte on all variants of the match)
+    let mut first_byte = 0;
     match rule {
         FirewallRule::DenyIngress => FirewallDecision::TxOnlyPort(header.dst_port),
         FirewallRule::Quic => {
-            let first_byte: u8 = get_or_default(&ctx, header.payload_offset);
-            if !has_quic_fixed_bit(first_byte) {
-                FirewallDecision::NotQuicPacket
-            } else {
-                FirewallDecision::Pass
-            }
-        }
-        FirewallRule::Repair => {
-            let first_byte: u8 = get_or_default(&ctx, header.payload_offset);
-            check_repair_fingerprint(&header, first_byte)
+            first_byte = get_or_default(&ctx, header.payload_offset);
+            check_quic_fingerprint(first_byte)
         }
         FirewallRule::Turbine => {
             // todo: check the shredversion byte
@@ -145,12 +139,16 @@ fn apply_xdp_firewall(
                 FirewallDecision::Pass
             }
         }
+        FirewallRule::Repair => {
+            first_byte = get_or_default(&ctx, header.payload_offset);
+            check_repair_fingerprint(&header, first_byte)
+        }
         FirewallRule::Gossip => {
-            let first_byte: u8 = get_or_default(&ctx, header.payload_offset);
+            first_byte = get_or_default(&ctx, header.payload_offset);
             check_gossip_fingerprint(&header, first_byte)
         }
         FirewallRule::Vote => {
-            let first_byte: u8 = get_or_default(&ctx, header.payload_offset);
+            first_byte = get_or_default(&ctx, header.payload_offset);
             check_vote_signature(&header, first_byte)
         }
     }

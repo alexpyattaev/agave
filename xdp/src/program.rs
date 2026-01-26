@@ -64,26 +64,26 @@ pub fn load_xdp_program(
         info!("Loading the XDP program with firewall support");
         let ebpf = Ebpf::load(agave_xdp_ebpf::AGAVE_XDP_EBPF_PROGRAM)?;
         firewall_config.drop_frags = broken_frags;
-        // in new aya this would require active polling!
-        //let logger = aya_log::EbpfLogger::init(&mut ebpf)?;
-        //Box::leak(Box::new(logger));
         ebpf
     } else {
         info!("Loading the bypass XDP program");
         Ebpf::load(&generate_xdp_elf())?
     };
 
+    dbg!("Ready to load");
     let p: &mut Xdp = ebpf.program_mut("agave_xdp").unwrap().try_into().unwrap();
 
     p.load()?;
     p.attach_to_if_index(dev.if_index(), aya::programs::xdp::XdpFlags::DRV_MODE)?;
 
+    dbg!("Attaching program done");
     if load_firewall {
         let mut config_map = Array::try_from(
             ebpf.map_mut("FIREWALL_CONFIG")
                 .expect("Must have loaded the correct program"),
         )?;
         config_map.set(0, firewall_config, 0)?;
+        dbg!("Configured firewall");
         let mut rules_map: Array<_, FirewallRule> = Array::try_from(
             ebpf.map_mut("FIREWALL_RULES")
                 .expect("Must have loaded the correct program"),

@@ -22,7 +22,7 @@ pub fn check_vote_signature(header: &ExtractedHeader, first_byte: u8) -> Firewal
     let sig_len = decode_shortu16_len(first_byte).unwrap_or_default();
 
     // vote could have 1 or 2 sigs
-    if sig_len == 0 || sig_len > 2 {
+    if !(1u8..=2).contains(&sig_len) {
         return FirewallDecision::VoteInvalidSigCount(sig_len);
     }
     // after the sigs we must be able to still fit the program ID at the very least
