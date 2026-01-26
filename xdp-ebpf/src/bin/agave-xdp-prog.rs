@@ -123,7 +123,8 @@ fn apply_xdp_firewall(
     // a given port, the packet is dropped
     let rule = FIREWALL_RULES.get(rule_offset).cloned().unwrap_or_default();
 
-    // this is to keep verifier happy (we are setting first_byte on all variants of the match)
+    // this is to keep verifier happy (we are not setting first_byte on all variants of the match)
+    #[allow(unused_assignments)]
     let mut first_byte = 0;
     match rule {
         FirewallRule::DenyIngress => FirewallDecision::TxOnlyPort(header.dst_port),
