@@ -185,14 +185,11 @@ impl SwQos {
         connection: &Connection,
         mut connection_table_l: MutexGuard<ConnectionTable<ConnectionStreamCounter>>,
         conn_context: &SwQosConnectionContext,
-    ) -> Result<
-        (
-            Arc<AtomicU64>,
-            CancellationToken,
-            Arc<ConnectionStreamCounter>,
-        ),
-        (),
-    > {
+    ) -> Option<(
+        Arc<AtomicU64>,
+        CancellationToken,
+        Arc<ConnectionStreamCounter>,
+    )> {
         // get current RTT and limit it to MAX_RTT_MS right away
         let rtt_millis = connection.rtt().as_millis().min(MAX_RTT_MS as u128) as u32;
         let max_uni_streams = VarInt::from_u32(compute_max_allowed_uni_streams_with_rtt(
@@ -230,13 +227,13 @@ impl SwQos {
                 remote_addr,
             );
             debug!("Peer {remote_addr} admitted");
-            Ok((last_update, cancel_connection, stream_counter))
+            Some((last_update, cancel_connection, stream_counter))
         } else {
             debug!("Peer {remote_addr} not admitted - not enough room in connection table");
             self.stats
                 .connection_add_failed
                 .fetch_add(1, Ordering::Relaxed);
-            Err(())
+            None
         }
     }
 
@@ -265,14 +262,11 @@ impl SwQos {
         connection_table: Arc<Mutex<ConnectionTable<ConnectionStreamCounter>>>,
         max_connections: usize,
         conn_context: &SwQosConnectionContext,
-    ) -> Result<
-        (
-            Arc<AtomicU64>,
-            CancellationToken,
-            Arc<ConnectionStreamCounter>,
-        ),
-        (),
-    > {
+    ) -> Option<(
+        Arc<AtomicU64>,
+        CancellationToken,
+        Arc<ConnectionStreamCounter>,
+    )> {
         let stats = self.stats.clone();
         if max_connections > 0 {
             let mut connection_table = connection_table.lock().await;
@@ -288,7 +282,7 @@ impl SwQos {
                 CONNECTION_CLOSE_CODE_DISALLOWED.into(),
                 CONNECTION_CLOSE_REASON_DISALLOWED,
             );
-            Err(())
+            None
         }
     }
 
@@ -367,7 +361,7 @@ impl QosController<SwQosConnectionContext> for SwQos {
                     }
 
                     if connection_table_l.total_size < self.config.max_staked_connections {
-                        if let Ok((last_update, cancel_connection, stream_counter)) = self
+                        if let Some((last_update, cancel_connection, stream_counter)) = self
                             .cache_new_connection(
                                 client_connection_tracker,
                                 connection,
@@ -387,7 +381,7 @@ impl QosController<SwQosConnectionContext> for SwQos {
                         // If we couldn't prune a connection in the staked connection table, let's
                         // put this connection in the unstaked connection table. If needed, prune a
                         // connection from the unstaked connection table.
-                        if let Ok((last_update, cancel_connection, stream_counter)) = self
+                        if let Some((last_update, cancel_connection, stream_counter)) = self
                             .prune_unstaked_connections_and_add_new_connection(
                                 client_connection_tracker,
                                 connection,
@@ -415,7 +409,7 @@ impl QosController<SwQosConnectionContext> for SwQos {
                     }
                 }
                 ConnectionPeerType::Unstaked => {
-                    if let Ok((last_update, cancel_connection, stream_counter)) = self
+                    if let Some((last_update, cancel_connection, stream_counter)) = self
                         .prune_unstaked_connections_and_add_new_connection(
                             client_connection_tracker,
                             connection,

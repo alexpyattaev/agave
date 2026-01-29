@@ -86,7 +86,7 @@ impl SimpleQos {
         connection: &Connection,
         mut connection_table_l: MutexGuard<ConnectionTable<TokenBucket>>,
         conn_context: &SimpleQosConnectionContext,
-    ) -> Result<(Arc<AtomicU64>, CancellationToken, Arc<TokenBucket>), ()> {
+    ) -> Option<(Arc<AtomicU64>, CancellationToken, Arc<TokenBucket>)> {
         let remote_addr = connection.remote_address();
 
         // this will never overflow u32 for reasonable MAX_RTT
@@ -125,12 +125,12 @@ impl SimpleQos {
         {
             update_open_connections_stat(&self.stats, &connection_table_l);
             drop(connection_table_l);
-            Ok((last_update, cancel_connection, stream_counter))
+            Some((last_update, cancel_connection, stream_counter))
         } else {
             self.stats
                 .connection_add_failed
                 .fetch_add(1, Ordering::Relaxed);
-            Err(())
+            None
         }
     }
 }
@@ -203,7 +203,7 @@ impl QosController<SimpleQosConnectionContext> for SimpleQos {
                     }
 
                     if connection_table_l.total_size < self.config.max_staked_connections {
-                        if let Ok((last_update, cancel_connection, stream_counter)) = self
+                        if let Some((last_update, cancel_connection, stream_counter)) = self
                             .cache_new_connection(
                                 client_connection_tracker,
                                 connection,
@@ -439,7 +439,6 @@ mod tests {
         );
 
         // Verify success
-        assert!(result.is_ok());
         let (_last_update, cancel_token, _stream_counter) = result.unwrap();
         assert!(!cancel_token.is_cancelled());
     }
@@ -513,7 +512,7 @@ mod tests {
         );
 
         // Verify failure due to connection limit
-        assert!(result.is_err());
+        assert!(result.is_none());
 
         // Verify stats were updated
         assert_eq!(stats.connection_add_failed.load(Ordering::Relaxed), 1);
@@ -565,7 +564,7 @@ mod tests {
             &conn_context,
         );
 
-        if result.is_ok() {
+        if result.is_some() {
             // Verify stats were updated (open connections should increase)
             assert!(
                 stats.open_staked_connections.load(Ordering::Relaxed) > initial_open_connections
