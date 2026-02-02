@@ -635,10 +635,14 @@ impl ValidatorTpuConfig {
         // vote and tpu_fwd share the same characteristics -- disallow non-staked connections:
         let vote_quic_server_config = SimpleQosQuicStreamerConfig {
             quic_streamer_config: QuicStreamerConfig {
-                max_connections_per_ipaddr_per_min: 32,
+                num_threads: NonZeroUsize::new(8.min(num_cpus::get())).unwrap(),
                 ..Default::default()
             },
-            qos_config: SimpleQosConfig::default(),
+            qos_config: SimpleQosConfig {
+                max_streams_per_second: 50,
+                max_staked_connections: 8192, // way more than we need, but we do not want to run out of these slots
+                max_connections_per_peer: 2,  // primary + beackup node
+            },
         };
 
         ValidatorTpuConfig {
