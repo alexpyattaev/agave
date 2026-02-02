@@ -165,8 +165,12 @@ impl NotifyKeyUpdate for UpdateHandler {
 mod tests {
     use {
         crate::quic_client::VotorQuicClient,
+        solana_bls_signatures::keypair,
+        solana_clock::NUM_CONSECUTIVE_LEADER_SLOTS,
+        solana_gossip::cluster_info::DEFAULT_NUM_TVU_RECEIVE_SOCKETS,
         solana_keypair::Keypair,
         solana_net_utils::sockets::bind_to_localhost_unique,
+        solana_runtime::bank::MAX_ALPENGLOW_VOTE_ACCOUNTS,
         solana_signer::Signer,
         solana_streamer::{
             nonblocking::simple_qos::SimpleQosConfig,
@@ -177,9 +181,11 @@ mod tests {
         solana_tpu_client_next::connection_workers_scheduler::{BindTarget, StakeIdentity},
         std::{
             collections::HashMap,
+            num::{NonZeroU32, NonZeroUsize},
             sync::{Arc, RwLock},
-            time::Duration,
+            time::{Duration, Instant},
         },
+        tokio::runtime::{Builder, Runtime},
         tokio_util::sync::CancellationToken,
     };
 
@@ -244,5 +250,102 @@ mod tests {
         );
         cancel.cancel();
         quic_server_thread.join().unwrap();
+    }
+
+    #[test]
+    fn test_fanout() {
+        agave_logger::setup();
+        let n = MAX_ALPENGLOW_VOTE_ACCOUNTS;
+        let keypairs = (0..n).map(|_| Keypair::new()).collect::<Vec<_>>();
+
+        let keypair = keypairs[0].insecure_clone();
+        // Bind to a random UDP port
+        let listener_sockets = (0..n)
+            .map(|_| solana_net_utils::bind_to_localhost().unwrap())
+            .collect::<Vec<_>>();
+        let listener_addrs = listener_sockets
+            .iter()
+            .map(|socket| socket.local_addr().unwrap())
+            .collect::<Vec<_>>();
+
+        let cancel = CancellationToken::new();
+
+        let bind = BindTarget::Socket(solana_net_utils::bind_to_localhost().unwrap());
+        let runtime = VotorQuicClient::spawn_runtime().unwrap();
+        let (mut quic_sender, key_updater) = VotorQuicClient::new(
+            runtime.handle().clone(),
+            bind,
+            StakeIdentity::new(&keypair),
+            cancel.clone(),
+        )
+        .unwrap();
+
+        let staked_nodes: Arc<RwLock<StakedNodes>> = Arc::new(RwLock::new(StakedNodes::new(
+            Arc::new(HashMap::from_iter(
+                keypairs.iter().map(|kp| (kp.pubkey(), 1000)),
+            )),
+            HashMap::default(), // overrides
+        )));
+        let (sender, receiver) = crossbeam_channel::bounded(MAX_ALPENGLOW_VOTE_ACCOUNTS);
+        //let server_rt = Builder::new_multi_thread().enable_all().build().unwrap();
+
+        // for keypair in keypairs {
+        //     // server_rt.spawn(async{
+
+        //     //     solana_streamer::nonblocking::quic::spawn_server
+        //     // });
+        // }
+        let servers = keypairs
+            .iter()
+            .zip(listener_sockets.into_iter())
+            .map(|(keypair, listener_socket)| {
+                let result = spawn_simple_qos_server(
+                    "AlpenglowLocalClusterTest",
+                    "quic_client_test",
+                    [listener_socket],
+                    &Keypair::new(),
+                    sender.clone(),
+                    staked_nodes.clone(),
+                    QuicStreamerConfig {
+                        max_connections_per_ipaddr_per_min: 32,
+                        num_threads: NonZeroUsize::new(2).unwrap(),
+                        ..Default::default()
+                    },
+                    SimpleQosConfig::default(),
+                    cancel.clone(),
+                )
+                .unwrap();
+                result
+            })
+            .collect::<Vec<_>>();
+
+        // make sure the server is up and running before sending packets
+        std::thread::sleep(Duration::from_secs(2));
+
+        let sent_message = vec![1, 2, 3, 4];
+        quic_sender.send_message_to_peers(sent_message.clone(), listener_addrs.iter().cloned());
+        std::thread::sleep(Duration::from_secs(2));
+
+        let t0 = Instant::now();
+        quic_sender.send_message_to_peers(sent_message.clone(), listener_addrs.iter().cloned());
+
+        let mut num_received = 0;
+        'outer: loop {
+            let packets = receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+            for received_message in packets.into_iter() {
+                assert_eq!(
+                    received_message.data(..).unwrap(),
+                    sent_message,
+                    "must have received what we have sent"
+                );
+                num_received += 1;
+                info!("Received message {num_received}");
+                if num_received == servers.len() {
+                    break 'outer;
+                }
+            }
+        }
+        println!("Received all messages in {}ms", t0.elapsed().as_millis());
+        cancel.cancel();
     }
 }
