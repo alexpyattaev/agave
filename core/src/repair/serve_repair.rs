@@ -636,9 +636,18 @@ impl ServeRepair {
         whitelist: &HashSet<Pubkey>,
         my_id: &Pubkey,
         socket_addr_space: &SocketAddrSpace,
+        data_budget: &DataBudget,
         stats: &mut ServeRepairStats,
     ) -> Vec<RepairRequestWithMeta> {
+        // Estimate how much data budget we have left, 2x margin to prioritize
+        // staked requests (as those get filtered after sigverify)
+        let mut remaining_budget_estimate = data_budget.get() * 2;
+        const MIN_RESPONSE_SIZE: usize = PACKET_DATA_SIZE + SIZE_OF_NONCE;
         let decode_request = |request| {
+            if remaining_budget_estimate < MIN_RESPONSE_SIZE {
+                stats.dropped_requests_load_shed += 1;
+                return None;
+            }
             let result = Self::decode_request(
                 request,
                 epoch_staked_nodes,
@@ -653,6 +662,9 @@ impl ServeRepair {
                     } else {
                         stats.handle_requests_staked += 1;
                     }
+                    // assuming we will reply to the request, we need to update the budget estimate
+                    // some responses may be larger, but we have to be conservative here
+                    remaining_budget_estimate -= MIN_RESPONSE_SIZE;
                 }
                 Err(e) => {
                     Self::record_request_decode_error(e, stats);
@@ -725,6 +737,7 @@ impl ServeRepair {
                 &whitelist,
                 &my_id,
                 &socket_addr_space,
+                data_budget,
                 stats,
             )
         };

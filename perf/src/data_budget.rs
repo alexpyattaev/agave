@@ -18,6 +18,10 @@ impl DataBudget {
         }
     }
 
+    pub fn get(&self) -> usize {
+        self.bytes.load(Ordering::Relaxed)
+    }
+
     // If there are enough bytes in the budget, consumes from
     // the budget and returns true. Otherwise returns false.
     #[must_use]
