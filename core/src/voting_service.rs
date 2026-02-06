@@ -145,19 +145,19 @@ impl VotingService {
             Protocol::UDP,
         );
 
-        if !udp_upcoming_leader_sockets.is_empty() {
-            for tpu_vote_socket in udp_upcoming_leader_sockets {
-                let _ = send_vote_transaction(
-                    cluster_info,
-                    vote_op.tx(),
-                    Some(tpu_vote_socket),
-                    udp_connection_cache,
-                );
-            }
-        } else {
-            // Send to our own tpu vote socket if we cannot find a leader to send to
-            let _ = send_vote_transaction(cluster_info, vote_op.tx(), None, udp_connection_cache);
-        }
+        // if !udp_upcoming_leader_sockets.is_empty() {
+        //     for tpu_vote_socket in udp_upcoming_leader_sockets {
+        //         let _ = send_vote_transaction(
+        //             cluster_info,
+        //             vote_op.tx(),
+        //             Some(tpu_vote_socket),
+        //             udp_connection_cache,
+        //         );
+        //     }
+        // } else {
+        //     // Send to our own tpu vote socket if we cannot find a leader to send to
+        //     let _ = send_vote_transaction(cluster_info, vote_op.tx(), None, udp_connection_cache);
+        // }
 
         if let Some(quic_sender) = quic_sender {
             if let Ok(serialized) = serialize(vote_op.tx()) {
@@ -172,19 +172,19 @@ impl VotingService {
             }
         }
 
-        match vote_op {
-            VoteOp::PushVote {
-                tx, tower_slots, ..
-            } => {
-                cluster_info.push_vote(&tower_slots, tx);
-            }
-            VoteOp::RefreshVote {
-                tx,
-                last_voted_slot,
-            } => {
-                cluster_info.refresh_vote(tx, last_voted_slot);
-            }
-        }
+        // match vote_op {
+        //     VoteOp::PushVote {
+        //         tx, tower_slots, ..
+        //     } => {
+        //         cluster_info.push_vote(&tower_slots, tx);
+        //     }
+        //     VoteOp::RefreshVote {
+        //         tx,
+        //         last_voted_slot,
+        //     } => {
+        //         cluster_info.refresh_vote(tx, last_voted_slot);
+        //     }
+        // }
     }
 
     pub fn join(self) -> thread::Result<()> {

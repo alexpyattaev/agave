@@ -292,7 +292,7 @@ impl DefaultArgs {
             accounts_shrink_ratio: DEFAULT_ACCOUNTS_SHRINK_RATIO.to_string(),
             tpu_max_connections_per_ipaddr_per_minute:
                 DEFAULT_MAX_CONNECTIONS_PER_IPADDR_PER_MINUTE.to_string(),
-            vote_use_quic: DEFAULT_VOTE_USE_QUIC.to_string(),
+            vote_use_quic: true.to_string(),
             tpu_max_connections_per_unstaked_peer: DEFAULT_MAX_QUIC_CONNECTIONS_PER_UNSTAKED_PEER
                 .to_string(),
             tpu_max_connections_per_staked_peer: DEFAULT_MAX_QUIC_CONNECTIONS_PER_STAKED_PEER
