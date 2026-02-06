@@ -1060,9 +1060,9 @@ impl ServeRepair {
             whitelisted: _,
         } in requests.into_iter()
         {
-            if data_budget.current_tokens()
-                < (request.max_response_bytes() * byte_cost_multiplier) as u64
-            {
+            // borrow tokens up to max size needed to serve request
+            let credit = (request.max_response_bytes() * byte_cost_multiplier) as u64;
+            if data_budget.consume_tokens(credit).is_err() {
                 stats.dropped_requests_outbound_bandwidth += 1;
                 continue;
             }
@@ -1074,6 +1074,8 @@ impl ServeRepair {
                     pending_pings.push(ping_pkt);
                 }
                 if !check {
+                    // return borrowed tokens
+                    data_budget.add_tokens(credit);
                     stats.ping_cache_check_failed += 1;
                     continue;
                 }
@@ -1085,16 +1087,16 @@ impl ServeRepair {
             };
             let num_response_packets = rsp.len();
             let num_response_bytes: usize = rsp.iter().map(|p| p.meta().size).sum();
-            if data_budget
-                .consume_tokens((num_response_bytes * byte_cost_multiplier) as u64)
-                .is_ok()
-                && send_response(
-                    rsp,
-                    protocol,
-                    packet_batch_sender,
-                    repair_response_quic_sender,
-                )
-            {
+
+            debug_assert!(credit >= num_response_bytes as u64);
+            // return difference between actual response bytes and credit amount
+            data_budget.add_tokens(credit.saturating_sub(num_response_bytes as u64));
+            if send_response(
+                rsp,
+                protocol,
+                packet_batch_sender,
+                repair_response_quic_sender,
+            ) {
                 stats.total_response_packets += num_response_packets;
                 match stake > 0 {
                     true => stats.total_response_bytes_staked += num_response_bytes,
