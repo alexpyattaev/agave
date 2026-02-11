@@ -12,7 +12,7 @@ from matplotlib.widgets import CheckButtons
 import numpy as np
 from ipaddress import IPv4Address
 
-from anomaly import analyze_duplicates
+from anomaly import analyze_duplicates, analyze_late_shreds
 
 DEBUG_DUP_SENDERS = True
 
@@ -102,6 +102,8 @@ def extract_block(block_df, leader_schedule:dict, gossip_state:dict) -> pd.DataF
     fec_set_indices = pd.unique(block_df["fec_index"])
     fec_set_completion_stats = []
     duplicate_senders = defaultdict(int)
+    too_late_shreds = []
+    first_shred_timestamp = block_df['time_stamp'].min()
     for fec_id, group in grouped_by_fec:
         group = group.sort_values("time_stamp")
         # tracks which indices we have received, and records the row number for them
@@ -123,7 +125,9 @@ def extract_block(block_df, leader_schedule:dict, gossip_state:dict) -> pd.DataF
                 duplicate_senders[IPv4Address( shred.sender_ip)]+=1
             else:
                 received_indices[shred.index] = shred.Index
-
+            latency = (shred.time_stamp - first_shred_timestamp) / 1000
+            if latency > 400:
+                too_late_shreds.append((latency, shred))
             y = len(received_indices)
             shreds[fec_id].append((shred.time_stamp, y))
 
@@ -149,6 +153,8 @@ def extract_block(block_df, leader_schedule:dict, gossip_state:dict) -> pd.DataF
 
     if DEBUG_DUP_SENDERS:
         analyze_duplicates(duplicate_senders, gossip_state)
+
+    analyze_late_shreds(too_late_shreds, gossip_state)
 
     sources = {
         "shreds": shreds,
@@ -259,6 +265,7 @@ def plot_shreds(
     ax.set_xlabel("Time since first shred (ms)", fontsize=12, color="white")
     ax.set_ylabel("Shred count", fontsize=12, color="white")
     ax.set_ylim([0, 70])
+    ax.set_xlim([-20, 500])
     ax.set_yticks(np.arange(0, 70, 8))
     ax.tick_params(axis="x", rotation=45, color="white")
     ax.tick_params(axis="y", color="white")
@@ -319,7 +326,7 @@ def main():
     plt.style.use("dark_background")
     fig, ax = plt.subplots(figsize=(12, 6))
 
-    check_ax = plt.axes([0.01, 0.8, 0.08, 0.1])
+    check_ax = plt.axes((0.01, 0.8, 0.08, 0.1))
     visibility_options = {"Repair": True, "Duplicate": True}
 
     check = CheckButtons(

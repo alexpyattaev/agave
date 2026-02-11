@@ -29,3 +29,13 @@ def analyze_duplicates(duplicate_senders:dict[IPv4Address,int],gossip_state:dict
     # print grouped result
     for version, total_dups in sorted(dups_by_version.items(), key=lambda x: x[1], reverse=True):
         print(f"version: {version}: {total_dups}")
+
+
+def analyze_late_shreds(too_late_shreds,gossip_state):
+    print("==== TOO LATE ====")
+    for (latency, shred) in too_late_shreds:
+        state = gossip_state.get(shred.sender_ip)
+        row = f"IP:{IPv4Address(shred.sender_ip)}: {latency}"
+        if state is not None:
+            row += f"(version:{state['version']} id: {state['identityPubkey']})"
+        print(row)
