@@ -6,8 +6,24 @@ use {
     cfg_if::cfg_if,
     dashmap::{DashMap, mapref::entry::Entry},
     solana_svm_type_overrides::sync::atomic::{AtomicU64, AtomicUsize, Ordering},
-    std::{borrow::Borrow, cmp::Reverse, hash::Hash, time::Instant},
+    std::{borrow::Borrow, cmp::Reverse, hash::Hash},
 };
+
+/// Return current monotonic time in microseconds since epoch
+/// Uses CLOCK_MONOTONIC_COARSE for maximum performance
+#[allow(clippy::arithmetic_side_effects)]
+#[inline(always)]
+fn now_monotonic() -> u64 {
+    let mut time = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    let ret = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC_COARSE, &mut time) };
+    if ret != 0 {
+        return 0;
+    }
+    (time.tv_sec * 1_000_000 + time.tv_nsec / 1_000) as u64
+}
 
 /// Enforces a rate limit on the volume of requests per unit time.
 ///
@@ -17,8 +33,8 @@ use {
 pub struct TokenBucket {
     new_tokens_per_us: f64,
     max_tokens: u64,
-    /// bucket creation
-    base_time: Instant,
+    /// bucket creation timestamp
+    base_time: u64,
     tokens: AtomicU64,
     /// time of last update in us since base_time
     last_update: AtomicU64,
@@ -42,14 +58,13 @@ impl TokenBucket {
             initial_tokens <= max_tokens,
             "Can not have more initial tokens than max tokens"
         );
-        let base_time = Instant::now();
         TokenBucket {
             // recompute into us to avoid FP division on every update
             new_tokens_per_us: new_tokens_per_second / 1e6,
             max_tokens,
             tokens: AtomicU64::new(initial_tokens),
             last_update: AtomicU64::new(0),
-            base_time,
+            base_time: now_monotonic(),
             credit_time_us: AtomicU64::new(0),
         }
     }
@@ -107,14 +122,13 @@ impl TokenBucket {
     }
 
     /// Retrieves monotonic time since bucket creation.
+    #[inline(always)]
     fn time_us(&self) -> u64 {
         cfg_if! {
             if #[cfg(feature="shuttle-test")] {
                 TIME_US.load(Ordering::Relaxed)
             } else {
-                let now = Instant::now();
-                let elapsed = now.saturating_duration_since(self.base_time);
-                elapsed.as_micros() as u64
+                now_monotonic().saturating_sub(self.base_time)
             }
         }
     }
@@ -123,7 +137,7 @@ impl TokenBucket {
     /// depositing new tokens (if appropriate)
     fn update_state(&self, now: u64) {
         // fetch last update time
-        let last = self.last_update.load(Ordering::SeqCst);
+        let last = self.last_update.load(Ordering::Relaxed);
 
         // If time has not advanced, nothing to do.
         if now <= last {

@@ -9358,6 +9358,7 @@ dependencies = [
  "dashmap",
  "hxdmp",
  "itertools 0.14.0",
+ "libc",
  "log",
  "nix",
  "pcap-file",
