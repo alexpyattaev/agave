@@ -498,6 +498,40 @@ impl Crds {
         }
     }
 
+    fn labels_for_indices(&self, indices: &IndexSet<usize>) -> Vec<CrdsValueLabel> {
+        indices
+            .into_iter()
+            .map(|&ix| self.table.get_index(ix).unwrap().0)
+            .cloned()
+            .collect()
+    }
+
+    // Given an index of all crd values associated with a pubkey,
+    // returns crds labels of old values to be evicted.
+    fn evict(
+        &self,
+        pubkey: &Pubkey,
+        index: &IndexSet<usize>,
+        last_valid_time: u64,
+    ) -> Vec<CrdsValueLabel> {
+        let origin = CrdsValueLabel::ContactInfo(*pubkey);
+        let Some(origin) = self.table.get(&origin) else {
+            // Pubkey has no contact-info entry in the table. Drop all
+            // associated entries as orphan records.
+            dbg!("Kill orphan stuff");
+            return self.labels_for_indices(index);
+        };
+        // If the origin's contact-info hasn't expired yet then preserve
+        // all associated values.
+        //dbg!(origin.value.wallclock().min(origin.local_timestamp));
+        if origin.value.wallclock().min(origin.local_timestamp) > last_valid_time {
+            return vec![];
+        }
+        // Origin exists but is stale. Drop all associated values
+        dbg!("Kill stale stuff");
+        self.labels_for_indices(index)
+    }
+
     /// Find all evictable labels in three steps
     /// 1) ContactInfo does not exist in table, remove all associated labels for that pubkey
     /// 2) ContactInfo exists and is not stale, do not remove anything
@@ -510,41 +544,14 @@ impl Crds {
         now: u64,
         timeouts: &CrdsTimeouts,
     ) -> Vec<CrdsValueLabel> {
-        let labels_for_indices = |indices: &IndexSet<usize>| {
-            indices
-                .into_iter()
-                .map(|&ix| self.table.get_index(ix).unwrap().0)
-                .cloned()
-                .collect::<Vec<_>>()
-        };
-        // Given an index of all crd values associated with a pubkey,
-        // returns crds labels of old values to be evicted.
-        let evict = |pubkey, index: &IndexSet<usize>| {
-            let timeout = timeouts[pubkey];
-            let origin = CrdsValueLabel::ContactInfo(*pubkey);
-            let Some(origin) = self.table.get(&origin) else {
-                // Pubkey has no contact-info entry in the table. Drop all
-                // associated entries as orphan records.
-                return labels_for_indices(index);
-            };
-            // If the origin's contact-info hasn't expired yet then preserve
-            // all associated values.
-            if origin
-                .value
-                .wallclock()
-                .min(origin.local_timestamp)
-                .saturating_add(timeout)
-                > now
-            {
-                return vec![];
-            }
-            // Origin exists but is stale. Drop all associated values
-            labels_for_indices(index)
-        };
         thread_pool.install(|| {
             self.records
                 .par_iter()
-                .flat_map(|(pubkey, index)| evict(pubkey, index))
+                .flat_map(|(pubkey, index)| {
+                    let timeout = timeouts[pubkey];
+                    //dbg!(now, timeout);
+                    self.evict(pubkey, index, now.saturating_sub(timeout))
+                })
                 .collect()
         })
     }
@@ -923,7 +930,7 @@ mod tests {
         let mut crds = Crds::default();
         let val = CrdsValue::new_unsigned(CrdsData::from(ContactInfo::new_localhost(
             &Pubkey::new_unique(),
-            0,
+            1,
         )));
         let mut stakes = HashMap::from([(Pubkey::new_unique(), 1u64)]);
         let timeouts = CrdsTimeouts::new(
@@ -933,7 +940,7 @@ mod tests {
             &stakes,
         );
         assert_eq!(
-            crds.insert(val.clone(), 0, GossipRoute::LocalMessage),
+            crds.insert(val.clone(), 1, GossipRoute::LocalMessage),
             Ok(())
         );
         assert!(
