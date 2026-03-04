@@ -24,9 +24,11 @@ use {
     quinn::{Connection, VarInt},
     solana_time_utils as timing,
     std::{
+        fs::OpenOptions,
         future::Future,
+        io::{BufWriter, Write},
         sync::{
-            Arc, RwLock,
+            Arc, Mutex as StdMutex, OnceLock, RwLock,
             atomic::{AtomicU64, Ordering},
         },
     },
@@ -53,6 +55,21 @@ const REFERENCE_RTT_MS: u32 = 50;
 
 /// Above this RTT we stop scaling for BDP
 const MAX_RTT_MS: u32 = 350;
+
+static STREAM_LOG_WRITER: OnceLock<StdMutex<BufWriter<std::fs::File>>> = OnceLock::new();
+
+fn get_stream_log_writer() -> &'static StdMutex<BufWriter<std::fs::File>> {
+    let opt = STREAM_LOG_WRITER.get_or_init(|| {
+        let f = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open("swqos_streams.bin")
+            .unwrap();
+        StdMutex::new(BufWriter::new(f))
+    });
+    opt
+}
 
 #[derive(Clone)]
 pub struct SwQosConfig {
@@ -105,6 +122,7 @@ pub struct SwQosConnectionContext {
     last_update: Arc<AtomicU64>,
     remote_address: std::net::SocketAddr,
     stream_counter: Option<Arc<ConnectionStreamCounter>>,
+    rtt_millis: u32,
 }
 
 impl ConnectionContext for SwQosConnectionContext {
@@ -311,6 +329,7 @@ impl QosController<SwQosConnectionContext> for SwQos {
                 remote_address: connection.remote_address(),
                 stream_counter: None,
                 last_update: Arc::new(AtomicU64::new(timing::timestamp())),
+                rtt_millis: 0,
             },
             |(pubkey, stake, total_stake)| {
                 // The heuristic is that the stake should be large enough to have 1 stream pass through within one throttle
@@ -337,6 +356,7 @@ impl QosController<SwQosConnectionContext> for SwQos {
                     remote_address: connection.remote_address(),
                     last_update: Arc::new(AtomicU64::new(timing::timestamp())),
                     stream_counter: None,
+                    rtt_millis: 0,
                 }
             },
         )
@@ -351,6 +371,10 @@ impl QosController<SwQosConnectionContext> for SwQos {
     ) -> impl Future<Output = Option<CancellationToken>> + Send {
         async move {
             const PRUNE_RANDOM_SAMPLE_SIZE: usize = 2;
+
+            // Cache current RTT on the connection context for logging purposes
+            let rtt_millis = connection.rtt().as_millis().min(MAX_RTT_MS as u128) as u32;
+            conn_context.rtt_millis = rtt_millis;
 
             match conn_context.peer_type() {
                 ConnectionPeerType::Staked(stake) => {
@@ -452,6 +476,27 @@ impl QosController<SwQosConnectionContext> for SwQos {
             .unwrap()
             .stream_count
             .fetch_add(1, Ordering::Relaxed);
+
+        // Log (pubkey, stake, RTT ms) for each admitted stream
+        {
+            if let Ok(mut writer) = get_stream_log_writer().lock() {
+                let pk_bytes = conn_context
+                    .remote_pubkey
+                    .map(|p| p.to_bytes())
+                    .unwrap_or([0u8; 32]);
+                let stake: u64 = match conn_context.peer_type {
+                    ConnectionPeerType::Staked(s) => s,
+                    ConnectionPeerType::Unstaked => 0,
+                };
+                let rtt: u32 = conn_context.rtt_millis;
+
+                // Binary format: [32 bytes pubkey][8 bytes stake LE][4 bytes rtt LE]
+                let _ = writer.write_all(&pk_bytes);
+                let _ = writer.write_all(&stake.to_le_bytes());
+                let _ = writer.write_all(&rtt.to_le_bytes());
+                // Intentionally not flushing to keep admission path fast; BufWriter will flush as needed.
+            }
+        }
     }
 
     fn on_stream_error(&self, _conn_context: &SwQosConnectionContext) {
