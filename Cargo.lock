@@ -14163,6 +14163,7 @@ dependencies = [
  "solana-net-utils",
  "solana-perf",
  "solana-pubkey",
+ "solana-rpc-client",
  "solana-sanitize",
  "solana-streamer",
  "strum",

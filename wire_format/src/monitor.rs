@@ -23,6 +23,9 @@ pub enum MonitorCommand {
     LogMetadata {
         #[arg()]
         protocol: WireProtocol,
+        /// RPC URL for periodic gossip/stake snapshots (e.g. http://localhost:8899)
+        #[arg(long)]
+        rpc_url: Option<String>,
     },
     LogGossipInvalidSenders,
     Bitrate {
@@ -100,7 +103,7 @@ pub async fn start_monitor(
 
             info!("Gossip monitoring done");
         }
-        MonitorCommand::LogMetadata { protocol } => match protocol {
+        MonitorCommand::LogMetadata { protocol, rpc_url } => match protocol {
             WireProtocol::Gossip => {
                 //bpf_controls.allow_dst_port(ports.gossip.port())?;
                 //gossip_log_metadata(&mut bpf_controls.rx_ring, size_hint).await;
@@ -108,6 +111,11 @@ pub async fn start_monitor(
             }
             WireProtocol::Turbine => {
                 let turbine_port = ports.turbine.context("Turbine port is required")?.port();
+
+                if let Some(rpc_url) = rpc_url {
+                    info!("Starting periodic gossip snapshotter via RPC");
+                    turbine::start_gossip_snapshotter(rpc_url, output.clone());
+                }
 
                 info!("Turbine + Repair capture starting");
                 let mut logger = match direction {

@@ -12,9 +12,47 @@ from matplotlib.widgets import CheckButtons
 import numpy as np
 from ipaddress import IPv4Address
 
+from pathlib import Path
 from anomaly import analyze_duplicates, analyze_late_shreds
 
 DEBUG_DUP_SENDERS = True
+
+
+def load_gossip_snapshots(path_str: str) -> list[dict]:
+    """Load gossip snapshot(s) from a file or directory of snapshots.
+    Returns list of (epoch_seconds, entries) sorted by time."""
+    path = Path(path_str)
+    if path.is_file():
+        with open(path, "r") as f:
+            return [(0, json.load(f))]
+    elif path.is_dir():
+        snapshots = []
+        for f in sorted(path.glob("gossip_snapshot_*.json")):
+            # Extract epoch seconds from filename
+            try:
+                epoch_secs = int(f.stem.split("_")[-1])
+            except ValueError:
+                continue
+            with open(f, "r") as fh:
+                snapshots.append((epoch_secs, json.load(fh)))
+        return snapshots
+    return []
+
+
+def gossip_state_for_timestamp(snapshots: list, timestamp_us: int) -> dict:
+    """Find the gossip snapshot nearest to the given microsecond timestamp."""
+    if not snapshots:
+        return {}
+    target_secs = timestamp_us // 1_000_000
+    # Find nearest snapshot by absolute time difference
+    best = min(snapshots, key=lambda s: abs(s[0] - target_secs))
+    state = {}
+    for row in best[1]:
+        ip = row.get("ipAddress", "")
+        if ip:
+            state[IPv4Address(ip)] = row
+        state[row["identityPubkey"]] = row
+    return state
 
 def parse_data(file_name: str):
     # if we are given npy file produced by grepper
@@ -36,6 +74,8 @@ def parse_data(file_name: str):
     data = pd.DataFrame(arr)
     data["is_repair"] = np.array(arr["flags"] & 0b0001, dtype=bool)
     data["is_multicast"] = np.array(arr["flags"] & 0b0010, dtype=bool)
+    data["is_code"] = np.array(arr["flags"] & 0b0100, dtype=bool)
+
     return data
 
 
@@ -317,14 +357,9 @@ def main():
         assert leader_schedule, "Leader schedule must be known"
         tagged_leader_slots = [slot for slot, leader in leader_schedule.items() if args.leader == leader]
 
-    gossip_state = {}
+    gossip_snapshots = []
     if args.gossip_state is not None:
-        with open(args.gossip_state, "r") as f:
-            for row in json.load(f):
-                # store same value using both IP address and pubkey
-                # to save sanity when passing this around
-                gossip_state[IPv4Address(row["ipAddress"])] = row
-                gossip_state[row['identityPubkey']] = row
+        gossip_snapshots = load_gossip_snapshots(args.gossip_state)
     data = parse_data(args.path)
     all_slots = sorted(pd.unique(data["slot_number"]))
     if tagged_leader_slots:
@@ -349,6 +384,10 @@ def main():
         slot_id = int(cursor.current())
         leader_id = leader_schedule.get(slot_id)
 
+        block_df = data.loc[data["slot_number"] == slot_id].copy()
+        block_ts = int(block_df["time_stamp"].min()) if len(block_df) > 0 else 0
+        gossip_state = gossip_state_for_timestamp(gossip_snapshots, block_ts)
+
         leader_info = ""
         if leader_id is not None:
             leader_info += f" {leader_id}"
@@ -357,7 +396,6 @@ def main():
                 leader_info+= f" {gossip_info['ipAddress']} {gossip_info['version']}"
         title = f"Block number {slot_id} {leader_info}"
         print(title)
-        block_df = data.loc[data["slot_number"] == slot_id].copy()
 
         block_df = extract_block(block_df, leader_schedule, gossip_state)
         # done_batches = when_batch_done(df)

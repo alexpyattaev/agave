@@ -1,9 +1,9 @@
 #![allow(dead_code)]
 use crate::monitor::PacketLogger;
 use anyhow::Context;
-use log::info;
+use log::{error, info};
 use network_types::ip::Ipv4Hdr;
-use std::{mem::MaybeUninit, ops::ControlFlow, path::PathBuf};
+use std::{mem::MaybeUninit, ops::ControlFlow, path::PathBuf, time::Duration};
 use tokio::{
     fs::File,
     io::{AsyncWriteExt, BufWriter},
@@ -37,6 +37,7 @@ impl Flags {
     /// Define individual flags as constants.
     pub const REPAIR: Flags = Flags(0b0000_0001);
     pub const MULTICAST: Flags = Flags(0b0000_0010);
+    pub const CODE_SHRED: Flags = Flags(0b0000_0100);
     pub fn set(&mut self, other: Flags) {
         self.0 |= other.0;
     }
@@ -130,7 +131,6 @@ impl PacketLogger for TurbineLogger {
         if dst_ip.is_multicast() {
             flags.set(Flags::MULTICAST);
         }
-
         let pkt = match parse_turbine(data_slice) {
             Ok(pkt) => pkt,
             Err(_) => {
@@ -139,6 +139,9 @@ impl PacketLogger for TurbineLogger {
         };
         if pkt.sanitize().is_err() {
             return ControlFlow::Continue(());
+        }
+        if pkt.is_code() {
+            flags.set(Flags::CODE_SHRED);
         }
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -180,4 +183,72 @@ impl PacketLogger for TurbineLogger {
         }
         Ok(())
     }
+}
+
+/// Periodically snapshots cluster topology via RPC for offline turbine tree analysis.
+pub fn start_gossip_snapshotter(rpc_url: String, output_dir: PathBuf) {
+    use solana_rpc_client::nonblocking::rpc_client::RpcClient;
+
+    tokio::spawn(async move {
+        let client = RpcClient::new(rpc_url);
+        loop {
+            if crate::EXIT.load(std::sync::atomic::Ordering::Relaxed) {
+                break;
+            }
+            match snapshot_cluster_state(&client, &output_dir).await {
+                Ok(path) => info!("Gossip snapshot written to {path:?}"),
+                Err(e) => error!("Gossip snapshot failed: {e}"),
+            }
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        }
+    });
+}
+
+async fn snapshot_cluster_state(
+    client: &solana_rpc_client::nonblocking::rpc_client::RpcClient,
+    output_dir: &PathBuf,
+) -> anyhow::Result<PathBuf> {
+    let cluster_nodes = client.get_cluster_nodes().await?;
+    let vote_accounts = client.get_vote_accounts().await?;
+
+    // Build stake lookup: identity pubkey -> activated stake
+    let mut stake_map = std::collections::HashMap::new();
+    for va in vote_accounts
+        .current
+        .iter()
+        .chain(vote_accounts.delinquent.iter())
+    {
+        stake_map
+            .entry(va.node_pubkey.clone())
+            .and_modify(|s| *s += va.activated_stake)
+            .or_insert(va.activated_stake);
+    }
+
+    // Merge into a format compatible with plotter.py's --gossip_state
+    let mut entries = Vec::with_capacity(cluster_nodes.len());
+    for node in &cluster_nodes {
+        let ip = node
+            .gossip
+            .map(|s| s.ip().to_string())
+            .unwrap_or_default();
+        let tvu = node.tvu.map(|s| s.to_string()).unwrap_or_default();
+        let stake = stake_map.get(&node.pubkey).copied().unwrap_or(0);
+        let version = node.version.clone().unwrap_or_default();
+        entries.push(serde_json::json!({
+            "identityPubkey": node.pubkey,
+            "ipAddress": ip,
+            "version": version,
+            "activatedStake": stake,
+            "tvu": tvu,
+        }));
+    }
+
+    let epoch_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let path = output_dir.join(format!("gossip_snapshot_{epoch_secs}.json"));
+    let json = serde_json::to_string_pretty(&entries)?;
+    tokio::fs::write(&path, json).await?;
+    Ok(path)
 }
