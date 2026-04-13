@@ -143,6 +143,7 @@ args+=(
   --no-os-network-limits-test
   --no-wait-for-vote-to-start-leader
   --full-rpc-api
+  --num-quic-endpoints 2
   --allow-private-addr
 )
 default_arg --gossip-port 8001

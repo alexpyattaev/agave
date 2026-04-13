@@ -623,16 +623,20 @@ async fn handle_connection<Q, C>(
             MaxStreamsAction::Set(max_streams) => {
                 debug_assert!(max_streams > 0, "Set(0) should use Park");
                 if max_streams > 0 && last_applied_max_streams != Some(max_streams) {
+                    let old = last_applied_max_streams.unwrap_or(0);
                     connection.set_max_concurrent_uni_streams(VarInt::from_u32(max_streams));
                     last_applied_max_streams = Some(max_streams);
+                    qos.on_max_streams_applied(&context, old, max_streams);
                 }
                 // Unparked: restore fast re-checks for the next time this connection parks.
                 park_recheck_backoff.reset();
             }
             MaxStreamsAction::Park => {
                 if last_applied_max_streams != Some(0) {
+                    let old = last_applied_max_streams.unwrap_or(0);
                     connection.set_max_concurrent_uni_streams(VarInt::from_u32(0));
                     last_applied_max_streams = Some(0);
+                    qos.on_max_streams_applied(&context, old, 0);
                 }
                 // Park: don't accept streams, wait for load to drop.
                 stats
@@ -646,17 +650,24 @@ async fn handle_connection<Q, C>(
             }
         }
 
-        // Wait for new streams. If the peer is disconnected we get a cancellation signal and stop
-        // the connection task.
-        let mut stream = select! {
-            stream = connection.accept_uni() => match stream {
-                Ok(stream) => stream,
-                Err(e) => {
-                    debug!("stream error: {e:?}");
-                    break;
-                }
-            },
-            _ = cancel.cancelled() => break,
+        // Wait for new streams, re-checking max_streams every 5ms so that
+        // overcommit risk reductions are applied promptly even when no new
+        // streams arrive.
+        let mut stream = loop {
+            select! {
+                stream = connection.accept_uni() => match stream {
+                    Ok(stream) => break stream,
+                    Err(e) => {
+                        debug!("stream error: {e:?}");
+                        break 'conn;
+                    }
+                },
+                _ = tokio::time::sleep(Duration::from_millis(5)) => {
+                    // Re-evaluate max_streams under changing load.
+                    continue 'conn;
+                },
+                _ = cancel.cancelled() => break 'conn,
+            }
         };
 
         qos.on_new_stream(&context).await;

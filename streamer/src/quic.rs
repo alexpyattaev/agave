@@ -237,6 +237,10 @@ pub struct StreamerStats {
     pub(crate) quic_endpoints_count: AtomicUsize,
     /// Streams accepted while the system was saturated (staked peers).
     pub(crate) saturated_staked_streams: AtomicUsize,
+    /// Number of times overcommit reduction was applied to a connection.
+    pub(crate) overcommit_reductions: AtomicUsize,
+    /// Current aggregate allocated streams tracked by overcommit tracker (gauge).
+    pub(crate) overcommit_aggregate: AtomicUsize,
 }
 
 impl StreamerStats {
@@ -556,6 +560,16 @@ impl StreamerStats {
             (
                 "saturated_staked_streams",
                 self.saturated_staked_streams.swap(0, Ordering::Relaxed),
+                i64
+            ),
+            (
+                "overcommit_reductions",
+                self.overcommit_reductions.swap(0, Ordering::Relaxed),
+                i64
+            ),
+            (
+                "overcommit_aggregate",
+                self.overcommit_aggregate.load(Ordering::Relaxed),
                 i64
             ),
         );

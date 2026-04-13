@@ -131,6 +131,19 @@ impl LoadDebtTracker {
         self.bucket.load(Ordering::Relaxed)
     }
 
+    /// Continuous load fraction.
+    /// - 0.0 = idle (bucket full)
+    /// - 1.0 = saturation boundary (bucket = 0)
+    /// - >1.0 = in debt
+    pub fn load_level(&self) -> f64 {
+        1.0 - (self.bucket.load(Ordering::Relaxed) as f64 / self.burst_capacity as f64)
+    }
+
+    /// Burst capacity (for testing and external calculations).
+    pub fn burst_capacity(&self) -> i64 {
+        self.burst_capacity
+    }
+
     /// Retrieves monotonic nanoseconds since epoch.
     fn nanos_since_epoch(&self) -> u64 {
         #[cfg(test)]

@@ -71,6 +71,12 @@ pub(crate) trait QosController<C: ConnectionContext> {
         MaxStreamsAction::Unmanaged
     }
 
+    /// Called after `set_max_concurrent_uni_streams` is applied to a connection.
+    /// Allows the QoS controller to track allocated stream budgets.
+    fn on_max_streams_applied(&self, context: &C, old_streams: u32, new_streams: u32) {
+        let _ = (context, old_streams, new_streams);
+    }
+
     /// How many concurrent
     fn max_concurrent_connections(&self) -> usize;
 }

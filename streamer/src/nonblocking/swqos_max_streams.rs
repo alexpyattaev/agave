@@ -2,6 +2,10 @@ use {
     crate::{
         nonblocking::{
             load_debt_tracker::LoadDebtTracker,
+            overcommit_tracker::{
+                DEFAULT_HIGH_RTT_THRESHOLD, DEFAULT_MAX_OVERCOMMIT_STREAMS,
+                DEFAULT_OVERCOMMIT_ACTIVATION_LOAD, OvercommitTracker,
+            },
             qos::{ConnectionContext, MaxStreamsAction, OpaqueStreamerCounter, QosController},
             quic::{
                 CONNECTION_CLOSE_CODE_DISALLOWED, CONNECTION_CLOSE_REASON_DISALLOWED,
@@ -24,7 +28,7 @@ use {
         future::Future,
         sync::{
             Arc, RwLock,
-            atomic::{AtomicU64, AtomicUsize, Ordering},
+            atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering},
         },
         time::Duration,
     },
@@ -66,6 +70,14 @@ pub struct SwQosMaxStreamsConfig {
     pub max_connections_per_unstaked_peer: usize,
     pub base_max_streams_staked: u32,
     pub base_max_streams_unstaked: u32,
+    /// Maximum aggregate allocated streams for high-RTT connections before
+    /// full reduction is applied.
+    pub max_overcommit_streams: u64,
+    /// RTT threshold in milliseconds. Connections above this are subject to
+    /// overcommit risk management.
+    pub high_rtt_threshold_ms: u64,
+    /// Load fraction (0.0–1.0) at which overcommit reduction begins.
+    pub overcommit_activation_load: f64,
 }
 
 impl Default for SwQosMaxStreamsConfig {
@@ -78,6 +90,9 @@ impl Default for SwQosMaxStreamsConfig {
             max_connections_per_unstaked_peer: DEFAULT_MAX_QUIC_CONNECTIONS_PER_UNSTAKED_PEER,
             base_max_streams_staked: DEFAULT_BASE_MAX_STREAMS_STAKED,
             base_max_streams_unstaked: DEFAULT_BASE_MAX_STREAMS_UNSTAKED,
+            max_overcommit_streams: DEFAULT_MAX_OVERCOMMIT_STREAMS,
+            high_rtt_threshold_ms: DEFAULT_HIGH_RTT_THRESHOLD.as_millis() as u64,
+            overcommit_activation_load: DEFAULT_OVERCOMMIT_ACTIVATION_LOAD,
         }
     }
 }
@@ -97,6 +112,7 @@ pub struct SwQosMaxStreams {
     config: SwQosMaxStreamsConfig,
     capacity_tps: u64,
     load_tracker: Arc<LoadDebtTracker>,
+    overcommit_tracker: Arc<OvercommitTracker>,
     stats: Arc<StreamerStats>,
     staked_nodes: Arc<RwLock<StakedNodes>>,
     unstaked_connection_table: Arc<Mutex<ConnectionTable<SwQosMaxStreamsStreamerCounter>>>,
@@ -111,6 +127,13 @@ pub struct SwQosMaxStreamsConnectionContext {
     in_staked_table: bool,
     last_update: Arc<AtomicU64>,
     stream_counter: Option<Arc<SwQosMaxStreamsStreamerCounter>>,
+    /// RTT captured once at connection open. Never refreshed.
+    cached_rtt: Duration,
+    /// Last value reported to OvercommitTracker (for delta updates).
+    last_reported_overcommit: Arc<AtomicU32>,
+    /// Whether this connection is currently under overcommit reduction.
+    /// Used for hysteresis: enter at risk >= 1.0, exit at risk < 0.5.
+    overcommit_reduced: Arc<AtomicBool>,
 }
 
 impl ConnectionContext for SwQosMaxStreamsConnectionContext {
@@ -128,6 +151,10 @@ impl SwQosMaxStreams {
         &self.load_tracker
     }
 
+    pub fn overcommit_tracker(&self) -> &OvercommitTracker {
+        &self.overcommit_tracker
+    }
+
     pub fn new(
         config: SwQosMaxStreamsConfig,
         stats: Arc<StreamerStats>,
@@ -137,6 +164,13 @@ impl SwQosMaxStreams {
         let max_streams_per_second = config.max_streams_per_ms * 1000;
         let burst_capacity = max_streams_per_second / 10;
 
+        let high_rtt_threshold = Duration::from_millis(config.high_rtt_threshold_ms);
+        let overcommit_tracker = Arc::new(OvercommitTracker::new(
+            config.max_overcommit_streams,
+            high_rtt_threshold,
+            config.overcommit_activation_load,
+        ));
+
         Self {
             config,
             capacity_tps: max_streams_per_second,
@@ -145,6 +179,7 @@ impl SwQosMaxStreams {
                 burst_capacity,
                 Duration::from_millis(1),
             )),
+            overcommit_tracker,
             stats,
             staked_nodes,
             unstaked_connection_table: Arc::new(Mutex::new(ConnectionTable::new(
@@ -180,9 +215,9 @@ impl SwQosMaxStreams {
             }
         };
 
-        if saturated {
+        let base_quota = if saturated {
             match context.peer_type {
-                ConnectionPeerType::Unstaked => Some(0), // park
+                ConnectionPeerType::Unstaked => return Some(0), // park
                 ConnectionPeerType::Staked(stake) => {
                     // Saturated quota uses true BDP (no 50ms floor) for tight
                     // flow control under load.
@@ -202,12 +237,53 @@ impl SwQosMaxStreams {
                     // build_connection_context should not be parked.
                     let per_conn = (quota / num_connections).max(1);
                     // Don't exceed the unsaturated limit.
-                    Some(per_conn.min(unsat_max.max(1)))
+                    per_conn.min(unsat_max.max(1))
                 }
             }
         } else {
-            Some(unsat_max.max(1))
+            unsat_max.max(1)
+        };
+
+        // Apply overcommit risk reduction for high-RTT connections.
+        // Hysteresis: enter reduction at risk >= 1.0, exit at risk < 0.5.
+        let high_rtt_threshold = self.overcommit_tracker.high_rtt_threshold();
+        if context.cached_rtt > high_rtt_threshold {
+            let load_level = self.load_tracker.load_level();
+            let currently_reduced = context.overcommit_reduced.load(Ordering::Relaxed);
+            let reduction = self.overcommit_tracker.reduction_factor(
+                load_level,
+                context.cached_rtt,
+                currently_reduced,
+            );
+            if reduction > 0.0 {
+                context.overcommit_reduced.store(true, Ordering::Relaxed);
+                self.stats
+                    .overcommit_reductions
+                    .fetch_add(1, Ordering::Relaxed);
+                let reduced = (base_quota as f64 * (1.0 - reduction)) as u32;
+                let reduced = reduced.max(1);
+                log::warn!(
+                    "Overcommit reduction: {base_quota}->{reduced} \
+                     (rtt={}ms, load={load_level:.2}, pressure={:.3}, \
+                     reduction={reduction:.2}, aggregate={})",
+                    context.cached_rtt.as_millis(),
+                    self.overcommit_tracker.pressure(),
+                    self.overcommit_tracker.aggregate(),
+                );
+                return Some(reduced);
+            } else if currently_reduced {
+                context.overcommit_reduced.store(false, Ordering::Relaxed);
+                log::info!(
+                    "Overcommit recovery: restoring full quota {base_quota} \
+                     (rtt={}ms, load={load_level:.2}, pressure={:.3}, aggregate={})",
+                    context.cached_rtt.as_millis(),
+                    self.overcommit_tracker.pressure(),
+                    self.overcommit_tracker.aggregate(),
+                );
+            }
         }
+
+        Some(base_quota)
     }
 }
 
@@ -327,6 +403,7 @@ impl QosController<SwQosMaxStreamsConnectionContext> for SwQosMaxStreams {
         &self,
         connection: &Connection,
     ) -> SwQosMaxStreamsConnectionContext {
+        let cached_rtt = connection.rtt();
         get_connection_stake(connection, &self.staked_nodes).map_or(
             SwQosMaxStreamsConnectionContext {
                 peer_type: ConnectionPeerType::Unstaked,
@@ -335,6 +412,9 @@ impl QosController<SwQosMaxStreamsConnectionContext> for SwQosMaxStreams {
                 in_staked_table: false,
                 last_update: Arc::new(AtomicU64::new(timing::timestamp())),
                 stream_counter: None,
+                cached_rtt,
+                last_reported_overcommit: Arc::new(AtomicU32::new(0)),
+                overcommit_reduced: Arc::new(AtomicBool::new(false)),
             },
             |(pubkey, stake, total_stake)| {
                 // Demote ultra-low-stake peers to unstaked: must earn at
@@ -354,6 +434,9 @@ impl QosController<SwQosMaxStreamsConnectionContext> for SwQosMaxStreams {
                     in_staked_table: false,
                     last_update: Arc::new(AtomicU64::new(timing::timestamp())),
                     stream_counter: None,
+                    cached_rtt,
+                    last_reported_overcommit: Arc::new(AtomicU32::new(0)),
+                    overcommit_reduced: Arc::new(AtomicBool::new(false)),
                 }
             },
         )
@@ -489,6 +572,25 @@ impl QosController<SwQosMaxStreamsConnectionContext> for SwQosMaxStreams {
         }
     }
 
+    fn on_max_streams_applied(
+        &self,
+        context: &SwQosMaxStreamsConnectionContext,
+        old_streams: u32,
+        new_streams: u32,
+    ) {
+        if context.cached_rtt > self.overcommit_tracker.high_rtt_threshold() {
+            self.overcommit_tracker.update(old_streams, new_streams);
+            context
+                .last_reported_overcommit
+                .store(new_streams, Ordering::Relaxed);
+
+            let aggregate = self.overcommit_tracker.aggregate();
+            self.stats
+                .overcommit_aggregate
+                .store(aggregate.max(0) as usize, Ordering::Relaxed);
+        }
+    }
+
     fn on_stream_error(&self, _conn_context: &SwQosMaxStreamsConnectionContext) {}
 
     fn on_stream_closed(&self, _conn_context: &SwQosMaxStreamsConnectionContext) {}
@@ -500,6 +602,16 @@ impl QosController<SwQosMaxStreamsConnectionContext> for SwQosMaxStreams {
         connection: Connection,
     ) -> impl Future<Output = usize> + Send {
         async move {
+            // Deregister from overcommit tracker before removing connection.
+            if conn_context.cached_rtt > self.overcommit_tracker.high_rtt_threshold() {
+                let last = conn_context
+                    .last_reported_overcommit
+                    .load(Ordering::Relaxed);
+                if last > 0 {
+                    self.overcommit_tracker.update(last, 0);
+                }
+            }
+
             if let Some(ref counter) = conn_context.stream_counter {
                 counter.connection_count.fetch_sub(1, Ordering::Relaxed);
             }
@@ -554,7 +666,7 @@ pub mod test {
         SwQosMaxStreams::new(config, stats, staked_nodes, cancel)
     }
 
-    fn unstaked_context() -> SwQosMaxStreamsConnectionContext {
+    fn unstaked_context(rtt: Duration) -> SwQosMaxStreamsConnectionContext {
         SwQosMaxStreamsConnectionContext {
             peer_type: ConnectionPeerType::Unstaked,
             remote_pubkey: None,
@@ -562,6 +674,9 @@ pub mod test {
             in_staked_table: false,
             last_update: Arc::new(AtomicU64::new(0)),
             stream_counter: None,
+            cached_rtt: rtt,
+            last_reported_overcommit: Arc::new(AtomicU32::new(0)),
+            overcommit_reduced: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -569,6 +684,7 @@ pub mod test {
         stake: u64,
         total_stake: u64,
         num_connections: usize,
+        rtt: Duration,
     ) -> SwQosMaxStreamsConnectionContext {
         let counter = Arc::new(SwQosMaxStreamsStreamerCounter {
             connection_count: AtomicUsize::new(num_connections),
@@ -580,6 +696,9 @@ pub mod test {
             in_staked_table: true,
             last_update: Arc::new(AtomicU64::new(0)),
             stream_counter: Some(counter),
+            cached_rtt: rtt,
+            last_reported_overcommit: Arc::new(AtomicU32::new(0)),
+            overcommit_reduced: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -602,7 +721,7 @@ pub mod test {
     #[test]
     fn test_saturated_unstaked_returns_zero() {
         let swqos = make_swqos(SwQosMaxStreamsConfig::default());
-        let ctx = unstaked_context();
+        let ctx = unstaked_context(Duration::from_millis(10));
         assert_eq!(
             swqos.compute_max_streams_for_rtt(&ctx, Duration::from_millis(50), true),
             Some(0),
@@ -619,7 +738,7 @@ pub mod test {
         });
         let (stake, total_stake) = (1_000, 100_000);
         let rtt = Duration::from_millis(50);
-        let ctx = staked_context(stake, total_stake, 1);
+        let ctx = staked_context(stake, total_stake, 1, Duration::from_millis(10));
         let expected = expected_saturated_quota(max_streams_per_ms, stake, total_stake, rtt, 1);
         assert_eq!(
             swqos.compute_max_streams_for_rtt(&ctx, rtt, true),
@@ -636,7 +755,7 @@ pub mod test {
             ..SwQosMaxStreamsConfig::default()
         });
         let (stake, total_stake) = (1_000, 100_000);
-        let ctx = staked_context(stake, total_stake, 1);
+        let ctx = staked_context(stake, total_stake, 1, Duration::from_millis(10));
         let rtt50 = Duration::from_millis(50);
         let rtt100 = Duration::from_millis(100);
         let q50 = swqos.compute_max_streams_for_rtt(&ctx, rtt50, true);
@@ -671,8 +790,8 @@ pub mod test {
         });
         let rtt = Duration::from_millis(50);
 
-        let ctx1 = staked_context(1_000, 100_000, 1);
-        let ctx4 = staked_context(1_000, 100_000, 4);
+        let ctx1 = staked_context(1_000, 100_000, 1, Duration::from_millis(10));
+        let ctx4 = staked_context(1_000, 100_000, 4, Duration::from_millis(10));
         let q1 = swqos.compute_max_streams_for_rtt(&ctx1, rtt, true).unwrap();
         let q4 = swqos.compute_max_streams_for_rtt(&ctx4, rtt, true).unwrap();
 
@@ -688,7 +807,7 @@ pub mod test {
             max_streams_per_ms: 500,
             ..SwQosMaxStreamsConfig::default()
         });
-        let ctx = staked_context(1, 1_000_000_000, 1);
+        let ctx = staked_context(1, 1_000_000_000, 1, Duration::from_millis(10));
         assert_eq!(
             swqos.compute_max_streams_for_rtt(&ctx, Duration::from_millis(50), true),
             Some(1),
@@ -701,7 +820,7 @@ pub mod test {
             max_streams_per_ms: 500,
             ..SwQosMaxStreamsConfig::default()
         });
-        let ctx = staked_context(1_000, 0, 1);
+        let ctx = staked_context(1_000, 0, 1, Duration::from_millis(10));
         // checked_div(0) -> unwrap_or(0) -> quota=0 -> .max(1) -> 1
         assert_eq!(
             swqos.compute_max_streams_for_rtt(&ctx, Duration::from_millis(50), true),
@@ -714,7 +833,7 @@ pub mod test {
     #[test]
     fn test_unsaturated_base_at_reference_rtt() {
         let swqos = make_swqos(SwQosMaxStreamsConfig::default());
-        let ctx = staked_context(1_000, 100_000, 1);
+        let ctx = staked_context(1_000, 100_000, 1, Duration::from_millis(10));
         // At REFERENCE_RTT (100ms): rtt_scale=1.0 -> base_max_streams_staked
         assert_eq!(
             swqos.compute_max_streams_for_rtt(&ctx, REFERENCE_RTT, false),
@@ -725,7 +844,7 @@ pub mod test {
     #[test]
     fn test_unsaturated_scales_linearly_with_rtt() {
         let swqos = make_swqos(SwQosMaxStreamsConfig::default());
-        let ctx = staked_context(1_000, 100_000, 1);
+        let ctx = staked_context(1_000, 100_000, 1, Duration::from_millis(10));
         let q100 = swqos
             .compute_max_streams_for_rtt(&ctx, Duration::from_millis(100), false)
             .unwrap();
@@ -741,7 +860,7 @@ pub mod test {
     #[test]
     fn test_unsaturated_low_rtt_clamped_for_staked() {
         let swqos = make_swqos(SwQosMaxStreamsConfig::default());
-        let ctx = staked_context(1_000, 100_000, 1);
+        let ctx = staked_context(1_000, 100_000, 1, Duration::from_millis(10));
         // Staked RTT is clamped to MIN_RTT_STAKED_UNSATURATED (50ms).
         // 1024 * 50/100 = 512
         assert_eq!(
@@ -753,7 +872,7 @@ pub mod test {
     #[test]
     fn test_unsaturated_low_rtt_scales_down_for_unstaked() {
         let swqos = make_swqos(SwQosMaxStreamsConfig::default());
-        let ctx = unstaked_context();
+        let ctx = unstaked_context(Duration::from_millis(10));
         // Unstaked uses true BDP, no 50ms floor.
         // 20 * 5/100 = 1
         assert_eq!(
@@ -765,7 +884,7 @@ pub mod test {
     #[test]
     fn test_unsaturated_rtt_clamped_at_max() {
         let swqos = make_swqos(SwQosMaxStreamsConfig::default());
-        let ctx = staked_context(1_000, 100_000, 1);
+        let ctx = staked_context(1_000, 100_000, 1, Duration::from_millis(10));
         // 500ms RTT gets clamped to MAX_RTT (200ms) -> scale = 2.0
         let q_500 = swqos.compute_max_streams_for_rtt(&ctx, Duration::from_millis(500), false);
         let q_max = swqos.compute_max_streams_for_rtt(&ctx, MAX_RTT, false);
@@ -778,8 +897,8 @@ pub mod test {
         // In unsaturated mode, quota depends only on RTT, not stake
         let swqos = make_swqos(SwQosMaxStreamsConfig::default());
         let rtt = Duration::from_millis(100);
-        let big = staked_context(900_000, 1_000_000, 1);
-        let small = staked_context(1_000, 1_000_000, 1);
+        let big = staked_context(900_000, 1_000_000, 1, Duration::from_millis(10));
+        let small = staked_context(1_000, 1_000_000, 1, Duration::from_millis(10));
         assert_eq!(
             swqos.compute_max_streams_for_rtt(&big, rtt, false),
             swqos.compute_max_streams_for_rtt(&small, rtt, false),
@@ -792,7 +911,7 @@ pub mod test {
             base_max_streams_unstaked: 128,
             ..SwQosMaxStreamsConfig::default()
         });
-        let ctx = unstaked_context();
+        let ctx = unstaked_context(Duration::from_millis(10));
         // At REFERENCE_RTT (100ms): rtt_scale=1.0 -> base_max_streams_unstaked
         assert_eq!(
             swqos.compute_max_streams_for_rtt(&ctx, REFERENCE_RTT, false),
@@ -809,7 +928,7 @@ pub mod test {
             max_streams_per_ms: 500,
             ..SwQosMaxStreamsConfig::default()
         });
-        let ctx = staked_context(1_000_000, 1_000_000, 1);
+        let ctx = staked_context(1_000_000, 1_000_000, 1, Duration::from_millis(10));
         assert_eq!(
             swqos.compute_max_streams_for_rtt(&ctx, Duration::from_millis(50), true),
             Some(512),
@@ -823,7 +942,7 @@ pub mod test {
             max_streams_per_ms: 500,
             ..SwQosMaxStreamsConfig::default()
         });
-        let ctx = staked_context(1_000, 100_000, 1);
+        let ctx = staked_context(1_000, 100_000, 1, Duration::from_millis(10));
         assert_eq!(
             swqos.compute_max_streams_for_rtt(&ctx, Duration::from_millis(50), true),
             Some(250),
@@ -844,8 +963,8 @@ pub mod test {
         let total = stake_large + stake_small;
         let rtt = Duration::from_millis(100);
 
-        let ctx_large = staked_context(stake_large, total, 1);
-        let ctx_small = staked_context(stake_small, total, 1);
+        let ctx_large = staked_context(stake_large, total, 1, Duration::from_millis(10));
+        let ctx_small = staked_context(stake_small, total, 1, Duration::from_millis(10));
 
         // 10M SOL -> quota capped at DEFAULT_BASE_MAX_STREAMS_STAKED; 10K SOL -> quota 49.
         // Without u128: 10M SOL overflows to quota ~ 183, destroying proportionality.
@@ -862,6 +981,256 @@ pub mod test {
             q_large > q_small * 20,
             "large/small ratio={}, expected large staker to dominate",
             q_large / q_small
+        );
+    }
+
+    // -- Overcommit risk management --
+
+    /// Helper: make a SwQosMaxStreams with small overcommit ceiling for testing.
+    fn make_swqos_with_overcommit(
+        max_overcommit: u64,
+        high_rtt_threshold_ms: u64,
+    ) -> SwQosMaxStreams {
+        make_swqos(SwQosMaxStreamsConfig {
+            max_streams_per_ms: 500,
+            max_overcommit_streams: max_overcommit,
+            high_rtt_threshold_ms,
+            overcommit_activation_load: 0.5,
+            ..SwQosMaxStreamsConfig::default()
+        })
+    }
+
+    /// Drain the load tracker bucket to a target load_level.
+    /// load_level = 1.0 - bucket/burst_capacity
+    /// bucket = burst_capacity * (1 - load_level)
+    /// drain = burst_capacity - bucket = burst_capacity * load_level
+    fn set_load_level(swqos: &SwQosMaxStreams, load_level: f64) {
+        let burst = swqos.load_tracker.burst_capacity();
+        let drain = (burst as f64 * load_level) as u64;
+        for _ in 0..drain {
+            swqos.load_tracker.acquire();
+        }
+    }
+
+    #[test]
+    fn test_overcommit_no_reduction_below_activation() {
+        let swqos = make_swqos_with_overcommit(1_000, 50);
+        // Register heavy overcommit
+        swqos.overcommit_tracker.update(0, 1_000);
+        // But load is only 40% (below 50% activation)
+        set_load_level(&swqos, 0.4);
+
+        let ctx = staked_context(1_000, 100_000, 1, Duration::from_millis(200));
+        let base = swqos.compute_max_streams_for_rtt(&ctx, Duration::from_millis(200), false);
+        // Should get full base quota — no reduction
+        assert_eq!(base, Some(2048)); // 1024 * 200/100
+    }
+
+    #[test]
+    fn test_overcommit_no_reduction_for_low_rtt() {
+        let swqos = make_swqos_with_overcommit(1_000, 50);
+        swqos.overcommit_tracker.update(0, 1_000);
+        set_load_level(&swqos, 0.9);
+
+        // 30ms RTT — below threshold, should not be reduced
+        let ctx = staked_context(1_000, 100_000, 1, Duration::from_millis(30));
+        let q = swqos
+            .compute_max_streams_for_rtt(&ctx, Duration::from_millis(100), false)
+            .unwrap();
+        assert_eq!(q, DEFAULT_BASE_MAX_STREAMS_STAKED);
+    }
+
+    #[test]
+    fn test_overcommit_no_reduction_when_no_overcommit() {
+        let swqos = make_swqos_with_overcommit(1_000, 50);
+        // No streams registered in overcommit tracker
+        set_load_level(&swqos, 0.9);
+
+        let ctx = staked_context(1_000, 100_000, 1, Duration::from_millis(200));
+        let q = swqos
+            .compute_max_streams_for_rtt(&ctx, Duration::from_millis(200), false)
+            .unwrap();
+        // Full quota: 1024 * 200/100 = 2048
+        assert_eq!(q, 2048);
+    }
+
+    #[test]
+    fn test_overcommit_high_rtt_reduced_more() {
+        let swqos = make_swqos_with_overcommit(1_000, 50);
+        swqos.overcommit_tracker.update(0, 500); // pressure = 0.5
+        set_load_level(&swqos, 1.0); // saturated boundary
+
+        // 100ms connection: rtt_factor=2.0, adjusted_load=1.0
+        // risk = 1.0 * 0.5 * 2.0 = 1.0 → entry: (1.0-1.0)/1.0 = 0.0 → no reduction
+        let ctx_100 = staked_context(1_000, 100_000, 1, Duration::from_millis(100));
+        let q_100 = swqos
+            .compute_max_streams_for_rtt(&ctx_100, Duration::from_millis(100), false)
+            .unwrap();
+        assert_eq!(q_100, DEFAULT_BASE_MAX_STREAMS_STAKED);
+
+        // 200ms connection: rtt_factor=4.0
+        // risk = 1.0 * 0.5 * 4.0 = 2.0 → (2.0-0.5)/1.5 = 1.0 → floor
+        let ctx_200 = staked_context(1_000, 100_000, 1, Duration::from_millis(200));
+        let q_200 = swqos
+            .compute_max_streams_for_rtt(&ctx_200, Duration::from_millis(200), false)
+            .unwrap();
+        assert_eq!(q_200, 1); // floor
+
+        assert!(q_100 > q_200, "100ms should get more than 200ms");
+    }
+
+    #[test]
+    fn test_overcommit_graduated_reduction() {
+        let swqos = make_swqos_with_overcommit(1_000, 50);
+        swqos.overcommit_tracker.update(0, 500); // pressure = 0.5
+        // 150ms rtt → rtt_factor = 3.0
+
+        // load=0.9 → adjusted_load = (0.9-0.5)/0.5 = 0.8
+        // risk = 0.8 * 0.5 * 3.0 = 1.2 → (1.2-1.0)/1.0 = 0.2
+        set_load_level(&swqos, 0.9);
+        let ctx = staked_context(1_000, 100_000, 1, Duration::from_millis(150));
+        let base = (DEFAULT_BASE_MAX_STREAMS_STAKED as f64 * 1.5) as u32; // 1536
+        let q = swqos
+            .compute_max_streams_for_rtt(&ctx, Duration::from_millis(150), false)
+            .unwrap();
+        let expected = (base as f64 * 0.8) as u32; // 1228
+        assert_eq!(q, expected);
+    }
+
+    #[test]
+    fn test_overcommit_beyond_saturation_amplifies() {
+        let swqos = make_swqos_with_overcommit(1_000, 50);
+        swqos.overcommit_tracker.update(0, 1_000); // pressure = 1.0
+
+        // Drain past saturation into debt.
+        // burst_capacity = 500_000/10 = 50_000
+        // We want load_level ~ 1.5, bucket = burst*(1-1.5) = -25_000
+        // drain = 75_000
+        let burst = swqos.load_tracker.burst_capacity();
+        for _ in 0..(burst as u64 * 3 / 2) {
+            swqos.load_tracker.acquire();
+        }
+
+        // 100ms rtt_factor=2.0, adjusted_load=(1.5-0.5)/0.5=2.0
+        // risk = 2.0 * 1.0 * 2.0 = 4.0 → reduction = clamp(3.0) = 1.0 → floor
+        let ctx = staked_context(1_000, 100_000, 1, Duration::from_millis(100));
+        let q = swqos
+            .compute_max_streams_for_rtt(&ctx, Duration::from_millis(100), false)
+            .unwrap();
+        assert_eq!(q, 1);
+    }
+
+    #[test]
+    fn test_overcommit_on_max_streams_applied_updates_tracker() {
+        let swqos = make_swqos_with_overcommit(1_000, 50);
+        let ctx = staked_context(1_000, 100_000, 1, Duration::from_millis(100));
+
+        // Apply 500 streams
+        swqos.on_max_streams_applied(&ctx, 0, 500);
+        assert_eq!(swqos.overcommit_tracker.aggregate(), 500);
+
+        // Reduce to 200
+        swqos.on_max_streams_applied(&ctx, 500, 200);
+        assert_eq!(swqos.overcommit_tracker.aggregate(), 200);
+    }
+
+    #[test]
+    fn test_overcommit_low_rtt_not_tracked() {
+        let swqos = make_swqos_with_overcommit(1_000, 50);
+        let ctx = staked_context(1_000, 100_000, 1, Duration::from_millis(30));
+
+        swqos.on_max_streams_applied(&ctx, 0, 500);
+        // Below threshold — should not affect aggregate
+        assert_eq!(swqos.overcommit_tracker.aggregate(), 0);
+    }
+
+    #[test]
+    fn test_overcommit_deregisters_on_disconnect() {
+        let swqos = make_swqos_with_overcommit(1_000, 50);
+        let ctx = staked_context(1_000, 100_000, 1, Duration::from_millis(100));
+
+        swqos.on_max_streams_applied(&ctx, 0, 500);
+        assert_eq!(swqos.overcommit_tracker.aggregate(), 500);
+
+        // Simulate what remove_connection does for overcommit
+        let last = ctx.last_reported_overcommit.load(Ordering::Relaxed);
+        assert_eq!(last, 500);
+        swqos.overcommit_tracker.update(last, 0);
+        assert_eq!(swqos.overcommit_tracker.aggregate(), 0);
+    }
+
+    #[test]
+    fn test_overcommit_saturated_path_also_reduced() {
+        let swqos = make_swqos_with_overcommit(1_000, 50);
+        swqos.overcommit_tracker.update(0, 1_000); // full pressure
+
+        // Drain fully into saturation
+        let burst = swqos.load_tracker.burst_capacity();
+        for _ in 0..burst as u64 {
+            swqos.load_tracker.acquire();
+        }
+
+        // 100ms high-RTT, saturated, 1% stake
+        let ctx = staked_context(1_000, 100_000, 1, Duration::from_millis(100));
+        let q = swqos
+            .compute_max_streams_for_rtt(&ctx, Duration::from_millis(100), true)
+            .unwrap();
+        // Base saturated quota = 500000 * 0.01 * 0.1 = 500
+        // load_level=1.0 → adjusted=1.0, pressure=1.0, rtt_factor=2.0
+        // risk=2.0 → reduction=clamp(1.0)=1.0 → floor
+        assert_eq!(q, 1);
+    }
+
+    #[test]
+    fn test_overcommit_hysteresis_prevents_oscillation() {
+        // Simulate: load rises → reduction activates → load drops slightly → should stay reduced
+        // Use 150ms RTT (rtt_factor=3.0) and pressure=0.5 for clear entry at load=1.0
+        let swqos = make_swqos_with_overcommit(1_000, 50);
+        swqos.overcommit_tracker.update(0, 500); // pressure = 0.5
+        let ctx = staked_context(1_000, 100_000, 1, Duration::from_millis(150));
+        // rtt_factor = 3.0
+
+        // Phase 1: load=1.0, adjusted=1.0, risk=1.0*0.5*3.0=1.5 → entry: (1.5-1.0)/1.0=0.5
+        set_load_level(&swqos, 1.0);
+        // Compute base the same way as the function: base_max_streams * rtt / reference_rtt
+        let rtt_secs = Duration::from_millis(150).as_secs_f64();
+        let ref_secs = REFERENCE_RTT.as_secs_f64();
+        let base = (DEFAULT_BASE_MAX_STREAMS_STAKED as f64 * rtt_secs / ref_secs) as u32;
+        let q1 = swqos
+            .compute_max_streams_for_rtt(&ctx, Duration::from_millis(150), false)
+            .unwrap();
+        assert!(q1 < base, "should be reduced, got {q1}");
+        assert!(
+            ctx.overcommit_reduced.load(Ordering::Relaxed),
+            "flag should be set"
+        );
+
+        // Phase 2: load drops, risk falls into hysteresis band (0.5 <= risk < 1.0)
+        // load=0.85, adjusted=0.7, risk=0.7*0.5*3.0=1.05
+        // Currently reduced → threshold=0.5, (1.05-0.5)/1.5=0.367 → stays reduced
+        let swqos2 = make_swqos_with_overcommit(1_000, 50);
+        swqos2.overcommit_tracker.update(0, 500);
+        set_load_level(&swqos2, 0.85);
+        let q2 = swqos2
+            .compute_max_streams_for_rtt(&ctx, Duration::from_millis(150), false)
+            .unwrap();
+        assert!(q2 < base, "should stay reduced in hysteresis band, got {q2}");
+        assert!(q2 > q1, "should be less reduced than at peak load");
+
+        // Phase 3: load drops well below recovery threshold
+        // load=0.6, adjusted=0.2, risk=0.2*0.5*3.0=0.3 < 0.5 → exit
+        let swqos3 = make_swqos_with_overcommit(1_000, 50);
+        swqos3.overcommit_tracker.update(0, 500);
+        set_load_level(&swqos3, 0.6);
+        let q3 = swqos3
+            .compute_max_streams_for_rtt(&ctx, Duration::from_millis(150), false)
+            .unwrap();
+        // base_quota comes from BDP scaling: 1024 * 150/100 = 1536 (via f64 truncation,
+        // may land at 1535 or 1536 depending on float rounding). Just check full restore.
+        assert_eq!(q3, base, "should restore full quota (base={base}, got {q3})");
+        assert!(
+            !ctx.overcommit_reduced.load(Ordering::Relaxed),
+            "flag should be cleared"
         );
     }
 }
