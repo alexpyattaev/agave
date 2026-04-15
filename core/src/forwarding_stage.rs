@@ -77,6 +77,20 @@ const FORWARD_BATCH_SIZE: usize = 128;
 /// all lookahead slots is negligible.
 const NUM_LOOKAHEAD_LEADERS: u64 = 3;
 
+/// Maximum number of packets buffered for forwarding.
+/// Value chosen because it was used historically.
+const PACKET_CONTAINER_CAPACITY: usize = 4 * 4096;
+
+/// Channel capacity for sending transaction batches to `tpu-client-next`.
+const TPU_CLIENT_CHANNEL_SIZE: usize = 128;
+
+/// Multiplier applied to reward in priority calculation to avoid precision
+/// loss from integer division when reward < cost.
+/// For many transactions, the cost will be greater than the fees in terms of raw lamports.
+/// For the purposes of calculating prioritization, we multiply the fees by a large number so that
+/// the cost is a small fraction.
+const PRIORITY_MULTIPLIER: u64 = 1_000_000;
+
 /// [`ForwardAddressGetter`] provides helper methods for retrieving forwarding
 /// addresses for both vote and non-vote transactions.
 #[derive(Clone)]
@@ -206,12 +220,12 @@ impl<VoteClient: ForwardingClient, NonVoteClient: ForwardingClient>
         );
         Self {
             receiver,
-            packet_container: PacketContainer::with_capacity(4 * 4096),
+            packet_container: PacketContainer::with_capacity(PACKET_CONTAINER_CAPACITY),
             sharable_banks,
             non_vote_clients,
             vote_client,
             data_budget,
-            metrics: ForwardingStageMetrics::default(),
+            metrics: ForwardingStageMetrics::new(),
             bind_ip_addrs,
         }
     }
@@ -506,8 +520,7 @@ impl TpuClientNextClient {
         bind_socket: UdpSocket,
         cancel: CancellationToken,
     ) -> Self {
-        // For now use large channel, the more suitable size to be found later.
-        let (sender, receiver) = mpsc::channel(128);
+        let (sender, receiver) = mpsc::channel(TPU_CLIENT_CHANNEL_SIZE);
         let leader_updater = forward_address_getter;
 
         let config = Self::create_config(bind_socket, stake_identity);
@@ -617,15 +630,10 @@ fn calculate_priority(
         &bank.feature_set,
     );
 
-    // We need a multiplier here to avoid rounding down too aggressively.
-    // For many transactions, the cost will be greater than the fees in terms of raw lamports.
-    // For the purposes of calculating prioritization, we multiply the fees by a large number so that
-    // the cost is a small fraction.
-    // An offset of 1 is used in the denominator to explicitly avoid division by zero.
-    const MULTIPLIER: u64 = 1_000_000;
     Some(
-        MULTIPLIER
+        PRIORITY_MULTIPLIER
             .saturating_mul(reward)
+            // An offset of 1 is used in the denominator to explicitly avoid division by zero.
             .wrapping_div(cost.sum().saturating_add(1)),
     )
 }
@@ -639,10 +647,10 @@ fn send_batch_if_full(
     if batch.len() == FORWARD_BATCH_SIZE {
         *forwarded_counter += batch.len();
 
-        let mut swap_batch = Vec::with_capacity(FORWARD_BATCH_SIZE);
-        std::mem::swap(batch, &mut swap_batch);
+        let full_batch = std::mem::take(batch);
+        batch.reserve(FORWARD_BATCH_SIZE);
 
-        if client.send_transactions_in_batch(swap_batch).is_err() {
+        if client.send_transactions_in_batch(full_batch).is_err() {
             *dropped_counter += FORWARD_BATCH_SIZE;
         }
     }
@@ -676,14 +684,35 @@ struct ForwardingStageMetrics {
 }
 
 impl ForwardingStageMetrics {
+    fn new() -> Self {
+        Self {
+            last_reported: Instant::now(),
+            did_something: false,
+            votes_received: 0,
+            votes_dropped_on_receive: 0,
+            votes_dropped_on_capacity: 0,
+            votes_dropped_on_data_budget: 0,
+            votes_forwarded: 0,
+            votes_dropped_on_send: 0,
+            non_votes_received: 0,
+            non_votes_dropped_on_receive: 0,
+            non_votes_dropped_on_capacity: 0,
+            non_votes_dropped_on_data_budget: 0,
+            non_votes_forwarded: 0,
+            non_votes_dropped_on_send: 0,
+        }
+    }
+
+    fn reset(&mut self) -> Self {
+        core::mem::replace(self, Self::new())
+    }
+
     fn maybe_report(&mut self) {
         const REPORTING_INTERVAL: Duration = Duration::from_secs(1);
 
         if self.last_reported.elapsed() > REPORTING_INTERVAL {
-            // Reset time and all counts.
-            let metrics = core::mem::take(self);
+            let metrics = self.reset();
 
-            // Only report if something happened.
             if !metrics.did_something {
                 return;
             }
@@ -731,27 +760,6 @@ impl ForwardingStageMetrics {
                     i64
                 ),
             );
-        }
-    }
-}
-
-impl Default for ForwardingStageMetrics {
-    fn default() -> Self {
-        Self {
-            last_reported: Instant::now(),
-            did_something: false,
-            votes_received: 0,
-            votes_dropped_on_receive: 0,
-            votes_dropped_on_capacity: 0,
-            votes_dropped_on_data_budget: 0,
-            votes_forwarded: 0,
-            votes_dropped_on_send: 0,
-            non_votes_received: 0,
-            non_votes_dropped_on_receive: 0,
-            non_votes_dropped_on_capacity: 0,
-            non_votes_dropped_on_data_budget: 0,
-            non_votes_forwarded: 0,
-            non_votes_dropped_on_send: 0,
         }
     }
 }
