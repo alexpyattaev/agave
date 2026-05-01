@@ -12,10 +12,11 @@ use {
                 AncestorHashesRepairType, AncestorHashesResponse, RepairProtocol, ServeRepair,
             },
             standard_repair_handler::StandardRepairHandler,
+            serve_repair_service::{RESPONSE_CHANNEL_SIZE},
         },
         replay_stage::DUPLICATE_THRESHOLD,
     },
-    crossbeam_channel::{Receiver, RecvTimeoutError, Sender, unbounded},
+    crossbeam_channel::{Receiver, RecvTimeoutError, Sender, bounded},
     dashmap::{DashMap, mapref::entry::Entry::Occupied},
     solana_clock::Slot,
     solana_gossip::{cluster_info::ClusterInfo, contact_info::Protocol, ping_pong::Pong},
@@ -157,7 +158,7 @@ impl AncestorHashesService {
         repair_info: RepairInfo,
     ) -> Self {
         let outstanding_requests = Arc::<RwLock<OutstandingAncestorHashesRepairs>>::default();
-        let (response_sender, response_receiver) = unbounded();
+        let (response_sender, response_receiver) = bounded(RESPONSE_CHANNEL_SIZE);
         let t_receiver = streamer::receiver(
             "solRcvrAncHash".to_string(),
             ancestor_hashes_request_socket.clone(),
@@ -178,7 +179,7 @@ impl AncestorHashesService {
 
         let ancestor_hashes_request_statuses: Arc<DashMap<Slot, AncestorRequestStatus>> =
             Arc::new(DashMap::new());
-        let (retryable_slots_sender, retryable_slots_receiver) = unbounded();
+        let (retryable_slots_sender, retryable_slots_receiver) = bounded(RESPONSE_CHANNEL_SIZE);
 
         // Listen for responses to our ancestor requests
         let t_ancestor_hashes_responses = Self::run_responses_listener(
