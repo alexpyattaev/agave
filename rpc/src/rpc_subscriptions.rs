@@ -62,6 +62,11 @@ mod transaction {
 
 const RECEIVE_DELAY_MILLIS: u64 = 100;
 
+/// Sends observed at or above this notification-channel depth are counted into
+/// the `high_water_count` metric so backlog episodes are visible. Tuning this
+/// requires production data; see follow-up note in the PR body.
+const NOTIFICATION_QUEUE_HIGH_WATER_MARK: usize = 10_000;
+
 fn get_transaction_logs(
     bank: &Bank,
     params: &LogsSubscriptionParams,
@@ -488,12 +493,13 @@ struct PubsubNotificationStats {
 }
 
 impl PubsubNotificationStats {
-    fn maybe_submit(&mut self) {
+    fn maybe_submit(&mut self, channel_depth: usize, hwm_counter: &AtomicU64) {
         const SUBMIT_CADENCE: Duration = RPC_NOTIFICATIONS_METRICS_SUBMISSION_INTERVAL_MS;
         let elapsed = self.since.as_ref().map(Instant::elapsed);
         if elapsed.unwrap_or(Duration::MAX) < SUBMIT_CADENCE {
             return;
         }
+        let high_water_count = hwm_counter.swap(0, Ordering::Relaxed);
         datapoint_info!(
             "pubsub_notification_entries",
             (
@@ -504,6 +510,16 @@ impl PubsubNotificationStats {
             (
                 "notification_entry_processing_time_us",
                 self.notification_entry_processing_time_us,
+                i64
+            ),
+            (
+                "rpc_subscription_notifier_channel_depth",
+                channel_depth,
+                i64
+            ),
+            (
+                "rpc_subscription_notifier_high_water_count",
+                high_water_count,
                 i64
             ),
         );
@@ -520,6 +536,11 @@ pub struct RpcSubscriptions {
 
     exit: Arc<AtomicBool>,
     control: SubscriptionControl,
+    /// Count of notification sends observed at or above
+    /// `NOTIFICATION_QUEUE_HIGH_WATER_MARK`. Producer-incremented in
+    /// `enqueue_notification`, consumer-read-and-reset by the metrics submitter
+    /// in `process_notifications`.
+    notification_channel_hwm_count: Arc<AtomicU64>,
 }
 
 impl Drop for RpcSubscriptions {
@@ -630,8 +651,11 @@ impl RpcSubscriptions {
             )),
         };
 
+        let notification_channel_hwm_count = Arc::new(AtomicU64::new(0));
+
         let t_cleanup = config.notification_threads.map(|notification_threads| {
             let exit = exit.clone();
+            let hwm_count = notification_channel_hwm_count.clone();
             Builder::new()
                 .name("solRpcNotifier".to_string())
                 .spawn(move || {
@@ -654,6 +678,7 @@ impl RpcSubscriptions {
                             bank_forks,
                             block_commitment_cache,
                             optimistically_confirmed_bank,
+                            hwm_count,
                         )
                     });
                 })
@@ -671,6 +696,7 @@ impl RpcSubscriptions {
             t_cleanup,
             exit,
             control,
+            notification_channel_hwm_count,
         }
     }
 
@@ -744,6 +770,10 @@ impl RpcSubscriptions {
 
     fn enqueue_notification(&self, notification_entry: NotificationEntry) {
         if let Some(ref notification_sender) = self.notification_sender {
+            if notification_sender.len() >= NOTIFICATION_QUEUE_HIGH_WATER_MARK {
+                self.notification_channel_hwm_count
+                    .fetch_add(1, Ordering::Relaxed);
+            }
             match notification_sender.send(notification_entry.into()) {
                 Ok(()) => (),
                 Err(SendError(notification)) => {
@@ -764,6 +794,7 @@ impl RpcSubscriptions {
         bank_forks: Arc<RwLock<BankForks>>,
         block_commitment_cache: Arc<RwLock<BlockCommitmentCache>>,
         optimistically_confirmed_bank: Arc<RwLock<OptimisticallyConfirmedBank>>,
+        notification_channel_hwm_count: Arc<AtomicU64>,
     ) {
         let mut stats = PubsubNotificationStats::default();
 
@@ -906,7 +937,7 @@ impl RpcSubscriptions {
                     break;
                 }
             }
-            stats.maybe_submit();
+            stats.maybe_submit(notification_receiver.len(), &notification_channel_hwm_count);
         }
     }
 
