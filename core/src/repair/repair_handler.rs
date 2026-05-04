@@ -310,6 +310,7 @@ mod tests {
     ) -> (Arc<Blockstore>, Hash, Vec<Hash>) {
         let ledger_path = get_tmp_ledger_path_auto_delete!();
         let blockstore = Arc::new(Blockstore::open(ledger_path.path()).unwrap());
+        blockstore.set_block_markers_enabled(true);
 
         // First, insert the parent slot so the child slot can be marked full
         let grandparent_slot = parent_slot.saturating_sub(1);
