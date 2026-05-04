@@ -81,6 +81,15 @@ pub enum PohRecorderError {
 
     #[error("updating bank footer failed with \"{0}\"")]
     UpdateBankFooter(#[from] BankFooterError),
+
+    #[error("couldn't reset bank during fast leader handover slot {0} -> slot {1}")]
+    ResetBankError(Slot, Slot),
+
+    #[error("couldn't reschedule pre-UpdateParent transactions")]
+    RescheduleTransactionsError(Slot),
+
+    #[error("leader window moved past slot {0}")]
+    WindowMovedOn(Slot),
 }
 
 pub(crate) type Result<T> = std::result::Result<T, PohRecorderError>;
@@ -516,7 +525,7 @@ impl PohRecorder {
     /// Updates [`Self::shared_leader_state`] if `set_shared_state` is true.
     /// Otherwise the caller is responsible for setting the state before
     /// releasing the lock.
-    fn clear_bank(&mut self, set_shared_state: bool) {
+    pub fn clear_bank(&mut self, set_shared_state: bool) {
         if let Some(WorkingBank { bank, start, .. }) = self.working_bank.take() {
             let next_leader_slot = self.leader_schedule_cache.next_leader_slot(
                 bank.leader_id(),
