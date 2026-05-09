@@ -764,8 +764,8 @@ impl BlockIdRepairService {
                 //   slot before a possible UpdateParent
                 if blockstore.is_dead(slot) || soft_dead_slots.contains(&slot) {
                     info!(
-                        "{my_pubkey}: FetchBlock: slot {slot} is dead or soft-dead, starting repair for \
-                         block_id={block_id:?}"
+                        "{my_pubkey}: FetchBlock: slot {slot} is dead or soft-dead, starting \
+                         repair for block_id={block_id:?}"
                     );
                     return Ok(PendingRepairDecision::Act(RepairAction::StartRepair {
                         slot,
