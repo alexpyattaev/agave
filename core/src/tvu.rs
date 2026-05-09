@@ -414,10 +414,12 @@ impl Tvu {
         let (completed_slots_sender, completed_slots_receiver) =
             bounded(MAX_COMPLETED_SLOTS_IN_CHANNEL);
         blockstore.add_completed_slots_signal(completed_slots_sender);
+        let (soft_dead_slot_sender, soft_dead_slot_receiver) = unbounded();
 
         let block_id_repair_channels = BlockIdRepairChannels {
             repair_event_receiver,
             completed_slots_receiver,
+            soft_dead_slot_receiver,
         };
 
         let window_service = {
@@ -527,6 +529,7 @@ impl Tvu {
             entry_notification_sender,
             bank_notification_sender,
             ancestor_hashes_replay_update_sender,
+            soft_dead_slot_sender,
             retransmit_slots_sender,
             replay_vote_sender,
             cluster_slots_update_sender,

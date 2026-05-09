@@ -22,6 +22,7 @@ use {
         cost_update_service::CostUpdate,
         repair::{
             ancestor_hashes_service::AncestorHashesReplayUpdateSender,
+            block_id_repair_service::SoftDeadSlotSender,
             cluster_slot_state_verifier::*,
             duplicate_repair_status::AncestorDuplicateSlotToRepair,
             repair_service::{
@@ -216,6 +217,7 @@ struct ProcessActiveBanksContext {
     cluster_slots_update_sender: ClusterSlotsUpdateSender,
     cost_update_sender: Sender<CostUpdate>,
     ancestor_hashes_replay_update_sender: AncestorHashesReplayUpdateSender,
+    soft_dead_slot_sender: SoftDeadSlotSender,
     block_metadata_notifier: Option<BlockMetadataNotifierArc>,
     votor_event_sender: VotorEventSender,
     log_messages_bytes_limit: Option<usize>,
@@ -234,6 +236,7 @@ impl ProcessActiveBanksContext {
             rpc_subscriptions: self.rpc_subscriptions.as_deref(),
             slot_status_notifier: self.slot_status_notifier.as_ref(),
             replay_vote_sender: &self.replay_vote_sender,
+            soft_dead_slot_sender: Some(&self.soft_dead_slot_sender),
         }
     }
 
@@ -301,7 +304,7 @@ impl DeadSlotLogLevel {
     }
 }
 
-/// Sinks that must observe a hard-dead-slot transition.
+/// Sinks that observe replay dead-slot transitions.
 struct DeadSlotNotifications<'a> {
     /// Persistent ledger state. Hard-dead slots are written here; soft-dead
     /// slots intentionally are not.
@@ -312,6 +315,9 @@ struct DeadSlotNotifications<'a> {
     slot_status_notifier: Option<&'a SlotStatusNotifier>,
     /// Replay-vote channel used to release buffered votes for the failed bank.
     replay_vote_sender: &'a ReplayVoteSender,
+    /// Block-id repair notification for soft-dead slots. This is intentionally
+    /// separate from the durable Blockstore dead-slot column.
+    soft_dead_slot_sender: Option<&'a SoftDeadSlotSender>,
 }
 
 /// Tower/duplicate bookkeeping that must be updated only for hard-dead slots.
@@ -351,6 +357,7 @@ impl ProcessActiveBanksContext {
         let (cluster_slots_update_sender, _) = unbounded();
         let (cost_update_sender, _) = unbounded();
         let (ancestor_hashes_replay_update_sender, _) = unbounded();
+        let (soft_dead_slot_sender, _) = unbounded();
         let (votor_event_sender, _) = unbounded();
         let migration_status = Arc::new(MigrationStatus::default());
         let replay_tx_thread_pool = rayon::ThreadPoolBuilder::new()
@@ -370,6 +377,7 @@ impl ProcessActiveBanksContext {
             cluster_slots_update_sender,
             cost_update_sender,
             ancestor_hashes_replay_update_sender,
+            soft_dead_slot_sender,
             block_metadata_notifier: None,
             votor_event_sender,
             log_messages_bytes_limit: None,
@@ -502,6 +510,7 @@ pub struct ReplaySenders {
     pub entry_notification_sender: Option<EntryNotifierSender>,
     pub bank_notification_sender: Option<BankNotificationSenderConfig>,
     pub ancestor_hashes_replay_update_sender: AncestorHashesReplayUpdateSender,
+    pub soft_dead_slot_sender: SoftDeadSlotSender,
     pub retransmit_slots_sender: Sender<u64>,
     pub replay_vote_sender: ReplayVoteSender,
     pub cluster_slots_update_sender: Sender<Vec<u64>>,
@@ -815,6 +824,7 @@ impl ReplayStage {
             entry_notification_sender,
             bank_notification_sender,
             ancestor_hashes_replay_update_sender,
+            soft_dead_slot_sender,
             retransmit_slots_sender,
             replay_vote_sender,
             cluster_slots_update_sender,
@@ -959,6 +969,7 @@ impl ReplayStage {
                 cluster_slots_update_sender: cluster_slots_update_sender.clone(),
                 cost_update_sender: cost_update_sender.clone(),
                 ancestor_hashes_replay_update_sender: ancestor_hashes_replay_update_sender.clone(),
+                soft_dead_slot_sender: soft_dead_slot_sender.clone(),
                 block_metadata_notifier: block_metadata_notifier.clone(),
                 votor_event_sender: votor_event_sender.clone(),
                 log_messages_bytes_limit,
@@ -994,6 +1005,7 @@ impl ReplayStage {
                     &bank_forks,
                     &mut progress,
                     &update_parent_receiver,
+                    &replay_vote_sender,
                     migration_status.as_ref(),
                 );
                 if migration_status.is_alpenglow_enabled() {
@@ -1005,6 +1017,7 @@ impl ReplayStage {
                         slot_status_notifier.as_ref(),
                         &mut progress,
                         &replay_vote_sender,
+                        &soft_dead_slot_sender,
                         migration_status.as_ref(),
                     );
                 }
@@ -2808,7 +2821,7 @@ impl ReplayStage {
         bank: &Bank,
         err: &BlockstoreProcessorError,
         progress: &mut ProgressMap,
-        replay_vote_sender: &ReplayVoteSender,
+        notifications: &DeadSlotNotifications<'_>,
     ) {
         let slot = bank.slot();
         datapoint_info!(
@@ -2820,10 +2833,19 @@ impl ReplayStage {
             .get_mut(&slot)
             .unwrap()
             .mark_dead(DeadSlotReason::ReplayFailureBeforeUpdateParent);
+        Self::send_invalid_bank(bank, notifications.replay_vote_sender);
+        if let Some(soft_dead_slot_sender) = notifications.soft_dead_slot_sender {
+            if let Err(err) = soft_dead_slot_sender.send(slot) {
+                warn!("Failed to send soft-dead slot {slot} to block-id repair: {err}");
+            }
+        }
+    }
+
+    fn send_invalid_bank(bank: &Bank, replay_vote_sender: &ReplayVoteSender) {
         replay_vote_sender
             .send(ReplayVoteMessage::InvalidBank {
                 replay_bank_id: bank.bank_id(),
-                replay_slot: slot,
+                replay_slot: bank.slot(),
             })
             .expect("Failed to send InvalidBank message to replay vote sender");
     }
@@ -2852,13 +2874,7 @@ impl ReplayStage {
             .blockstore
             .set_dead_slot(slot)
             .expect("Failed to mark slot as dead in blockstore");
-        notifications
-            .replay_vote_sender
-            .send(ReplayVoteMessage::InvalidBank {
-                replay_bank_id: bank.bank_id(),
-                replay_slot: slot,
-            })
-            .expect("Failed to send InvalidBank message to replay vote sender");
+        Self::send_invalid_bank(bank, notifications.replay_vote_sender);
 
         notifications.blockstore.slots_stats.mark_dead(slot);
 
@@ -2972,12 +2988,7 @@ impl ReplayStage {
             progress,
             dead_slot_context.migration_status,
         ) {
-            Self::mark_soft_dead_slot(
-                bank,
-                err,
-                progress,
-                dead_slot_context.notifications.replay_vote_sender,
-            );
+            Self::mark_soft_dead_slot(bank, err, progress, &dead_slot_context.notifications);
             return;
         }
 
@@ -3623,8 +3634,9 @@ impl ReplayStage {
                 return (replay_result, None);
             }
             ChainedBlockIdCheck::Mismatch => {
-                // Mismatch, mark dead and don't replay
-                replay_result.is_slot_dead = true;
+                // Mismatch, return a replay error so `process_replay_results`
+                // marks the bank hard-dead and publishes normal dead-slot
+                // notifications.
                 replay_result.replay_result =
                     Some(Err(BlockstoreProcessorError::ChainedBlockIdFailure(
                         bank.slot(),
@@ -3774,6 +3786,11 @@ impl ReplayStage {
                             "AbandonedBank at slot {bank_slot}: switching parent from {} to \
                              {new_parent_slot}",
                             bank.parent_slot()
+                        );
+
+                        Self::send_invalid_bank(
+                            bank,
+                            &process_active_banks_context.replay_vote_sender,
                         );
 
                         // Clear the bank from bank_forks. It will be recreated with the
@@ -5057,6 +5074,7 @@ impl ReplayStage {
         bank_forks: &RwLock<BankForks>,
         progress: &mut ProgressMap,
         signal: &UpdateParentSignal,
+        replay_vote_sender: &ReplayVoteSender,
         migration_status: &MigrationStatus,
         source: &str,
     ) -> bool {
@@ -5106,7 +5124,8 @@ impl ReplayStage {
             signal.slot, replay_fec_set_index, source, current_num_shreds
         );
         progress.remove(&signal.slot);
-        if bank.is_some() {
+        if let Some(bank) = bank {
+            Self::send_invalid_bank(&bank, replay_vote_sender);
             let mut bank_forks = bank_forks.write().unwrap();
             if bank_forks.get(signal.slot).is_some() {
                 bank_forks.clear_bank(signal.slot, false);
@@ -5128,6 +5147,7 @@ impl ReplayStage {
         slot_status_notifier: Option<&SlotStatusNotifier>,
         progress: &mut ProgressMap,
         replay_vote_sender: &ReplayVoteSender,
+        soft_dead_slot_sender: &SoftDeadSlotSender,
         migration_status: &MigrationStatus,
     ) {
         let notifications = DeadSlotNotifications {
@@ -5135,6 +5155,7 @@ impl ReplayStage {
             rpc_subscriptions,
             slot_status_notifier,
             replay_vote_sender,
+            soft_dead_slot_sender: Some(soft_dead_slot_sender),
         };
         let soft_dead_slots = progress
             .iter()
@@ -5174,6 +5195,7 @@ impl ReplayStage {
                     bank_forks,
                     progress,
                     &signal,
+                    replay_vote_sender,
                     migration_status,
                     "soft-dead scan",
                 );
@@ -5236,6 +5258,7 @@ impl ReplayStage {
         bank_forks: &RwLock<BankForks>,
         progress: &mut ProgressMap,
         update_parent_receiver: &UpdateParentReceiver,
+        replay_vote_sender: &ReplayVoteSender,
         migration_status: &MigrationStatus,
     ) {
         while let Ok(signal) = update_parent_receiver.try_recv() {
@@ -5245,6 +5268,7 @@ impl ReplayStage {
                 bank_forks,
                 progress,
                 &signal,
+                replay_vote_sender,
                 migration_status,
                 "UpdateParent signal",
             );
@@ -5639,6 +5663,7 @@ pub(crate) mod tests {
         purge_repair_slot_counter: &'a mut PurgeRepairSlotCounter,
         tbft_structs: &'a mut Option<&'b mut TowerBFTStructures>,
         migration_status: &'a MigrationStatus,
+        soft_dead_slot_sender: Option<&'a SoftDeadSlotSender>,
     ) -> DeadSlotContext<'a, 'b> {
         DeadSlotContext {
             notifications: DeadSlotNotifications {
@@ -5646,6 +5671,7 @@ pub(crate) mod tests {
                 rpc_subscriptions: None,
                 slot_status_notifier: None,
                 replay_vote_sender,
+                soft_dead_slot_sender,
             },
             duplicate: DeadSlotDuplicateContext {
                 root: 0,
@@ -6480,6 +6506,125 @@ pub(crate) mod tests {
         do_test_dead_slot_on_complete_bank(CompleteBankFailure::VerifyError);
     }
 
+    #[test]
+    fn test_cmr_mismatch_hard_dead() {
+        let ReplayBlockstoreComponents {
+            blockstore,
+            vote_simulator,
+            ..
+        } = replay_blockstore_components(Some(tr(0) / tr(1)), 1, None::<GenerateVotes>);
+        let VoteSimulator {
+            bank_forks,
+            mut progress,
+            ..
+        } = vote_simulator;
+
+        let slot = 1;
+        let bank = bank_forks.read().unwrap().get(slot).unwrap();
+        progress.insert(
+            slot,
+            ForkProgress::new(bank.last_blockhash(), Some(0), None, 0, 0, None),
+        );
+
+        let (replay_vote_sender, replay_vote_receiver) = unbounded();
+        let process_active_banks_context = ProcessActiveBanksContext::new_for_tests(
+            bank_forks.clone(),
+            blockstore.clone(),
+            replay_vote_sender,
+        );
+        let replay_result = ReplaySlotFromBlockstore {
+            is_slot_dead: false,
+            bank_slot: slot,
+            replay_result: Some(Err(BlockstoreProcessorError::ChainedBlockIdFailure(
+                slot, 0,
+            ))),
+        };
+
+        ReplayStage::process_replay_results(
+            &process_active_banks_context,
+            &mut progress,
+            &mut Vec::new(),
+            &mut LatestValidatorVotesForFrozenBanks::default(),
+            &mut DuplicateSlotsToRepair::default(),
+            &mut PurgeRepairSlotCounter::default(),
+            None,
+            &[replay_result],
+            &Pubkey::new_unique(),
+        );
+
+        assert!(blockstore.is_dead(slot));
+        assert_eq!(progress.dead_reason(slot), Some(&DeadSlotReason::Hard));
+        assert_eq!(
+            replay_vote_receiver.try_recv(),
+            Ok(ReplayVoteMessage::InvalidBank {
+                replay_bank_id: bank.bank_id(),
+                replay_slot: slot,
+            })
+        );
+    }
+
+    #[test]
+    fn test_abandon_invalidates() {
+        let ReplayBlockstoreComponents {
+            blockstore,
+            vote_simulator,
+            ..
+        } = replay_blockstore_components(Some(tr(0) / tr(1)), 1, None::<GenerateVotes>);
+        let VoteSimulator {
+            bank_forks,
+            mut progress,
+            ..
+        } = vote_simulator;
+
+        let slot = 1;
+        let bank = bank_forks.read().unwrap().get(slot).unwrap();
+        progress.insert(
+            slot,
+            ForkProgress::new(bank.last_blockhash(), Some(0), None, 0, 0, None),
+        );
+
+        let (replay_vote_sender, replay_vote_receiver) = unbounded();
+        let process_active_banks_context = ProcessActiveBanksContext::new_for_tests(
+            bank_forks.clone(),
+            blockstore,
+            replay_vote_sender,
+        );
+        let update_parent =
+            VersionedUpdateParent::V1(solana_entry::block_component::UpdateParentV1 {
+                new_parent_slot: 0,
+                new_parent_block_id: Hash::default(),
+            });
+        let replay_result = ReplaySlotFromBlockstore {
+            is_slot_dead: false,
+            bank_slot: slot,
+            replay_result: Some(Err(BlockstoreProcessorError::BlockComponentProcessor(
+                BlockComponentProcessorError::AbandonedBank(update_parent),
+            ))),
+        };
+
+        ReplayStage::process_replay_results(
+            &process_active_banks_context,
+            &mut progress,
+            &mut Vec::new(),
+            &mut LatestValidatorVotesForFrozenBanks::default(),
+            &mut DuplicateSlotsToRepair::default(),
+            &mut PurgeRepairSlotCounter::default(),
+            None,
+            &[replay_result],
+            &Pubkey::new_unique(),
+        );
+
+        assert!(progress.get(&slot).is_none());
+        assert!(bank_forks.read().unwrap().get(slot).is_none());
+        assert_eq!(
+            replay_vote_receiver.try_recv(),
+            Ok(ReplayVoteMessage::InvalidBank {
+                replay_bank_id: bank.bank_id(),
+                replay_slot: slot,
+            })
+        );
+    }
+
     // Given a shred and a fatal expected error, check that replaying that shred causes causes the fork to be
     // marked as dead. Returns the error for caller to verify.
     fn check_dead_fork<F>(shred_to_insert: F) -> result::Result<(), BlockstoreProcessorError>
@@ -6577,6 +6722,7 @@ pub(crate) mod tests {
                         rpc_subscriptions: rpc_subscriptions.as_deref(),
                         slot_status_notifier: slot_status_notifier.as_ref(),
                         replay_vote_sender: &replay_vote_sender,
+                        soft_dead_slot_sender: None,
                     },
                     duplicate: DeadSlotDuplicateContext {
                         root: 0,
@@ -8163,17 +8309,28 @@ pub(crate) mod tests {
             .unwrap();
         }
 
+        let cleared_bank_id = bank_forks.read().unwrap().get(1).unwrap().bank_id();
+        let (replay_vote_sender, replay_vote_receiver) = unbounded();
         ReplayStage::interrupt_update_parent_slots(
             &Pubkey::new_unique(),
             &blockstore,
             &bank_forks,
             &mut progress,
             &rx,
+            &replay_vote_sender,
             &post_migration_status_for_tests(),
         );
 
         assert!(progress.get(&1).is_none()); // cleared: 5 < 10
         assert!(progress.get(&2).is_some()); // skipped: 15 >= 10
+        assert_eq!(
+            replay_vote_receiver.try_recv(),
+            Ok(ReplayVoteMessage::InvalidBank {
+                replay_bank_id: cleared_bank_id,
+                replay_slot: 1,
+            })
+        );
+        assert!(replay_vote_receiver.try_recv().is_err());
     }
 
     #[test]
@@ -8210,12 +8367,14 @@ pub(crate) mod tests {
         })
         .unwrap();
 
+        let (replay_vote_sender, _replay_vote_receiver) = unbounded();
         ReplayStage::interrupt_update_parent_slots(
             &Pubkey::new_unique(),
             &blockstore,
             &bank_forks,
             &mut progress,
             &rx,
+            &replay_vote_sender,
             &MigrationStatus::default(),
         );
 
@@ -8259,12 +8418,14 @@ pub(crate) mod tests {
         })
         .unwrap();
 
+        let (replay_vote_sender, _replay_vote_receiver) = unbounded();
         ReplayStage::interrupt_update_parent_slots(
             &Pubkey::new_unique(),
             &blockstore,
             &bank_forks,
             &mut progress,
             &rx,
+            &replay_vote_sender,
             &post_migration_status_for_tests(),
         );
 
@@ -8298,6 +8459,7 @@ pub(crate) mod tests {
         progress.insert(slot, p);
 
         let (replay_vote_sender, replay_vote_receiver) = unbounded();
+        let (soft_dead_slot_sender, soft_dead_slot_receiver) = unbounded();
         let (ancestor_hashes_replay_update_sender, _) = unbounded();
         let mut duplicate_slots_to_repair = DuplicateSlotsToRepair::default();
         let mut purge_repair_slot_counter = PurgeRepairSlotCounter::default();
@@ -8311,6 +8473,7 @@ pub(crate) mod tests {
             &mut purge_repair_slot_counter,
             &mut tbft_structs,
             &migration_status,
+            Some(&soft_dead_slot_sender),
         );
         ReplayStage::mark_replay_dead_slot(
             &bank,
@@ -8331,6 +8494,7 @@ pub(crate) mod tests {
                 replay_slot: slot,
             })
         );
+        assert_eq!(soft_dead_slot_receiver.try_recv(), Ok(slot));
     }
 
     #[test]
@@ -8371,6 +8535,7 @@ pub(crate) mod tests {
             &mut purge_repair_slot_counter,
             &mut tbft_structs,
             &migration_status,
+            None,
         );
         ReplayStage::mark_replay_dead_slot(
             &bank,
@@ -8424,6 +8589,7 @@ pub(crate) mod tests {
             &mut purge_repair_slot_counter,
             &mut tbft_structs,
             &migration_status,
+            None,
         );
         ReplayStage::mark_replay_dead_slot(
             &bank,
@@ -8466,6 +8632,7 @@ pub(crate) mod tests {
         progress.insert(slot, p);
 
         let (replay_vote_sender, _replay_vote_receiver) = unbounded();
+        let (soft_dead_slot_sender, _soft_dead_slot_receiver) = unbounded();
         ReplayStage::process_soft_dead_update_parent_slots(
             &Pubkey::new_unique(),
             &blockstore,
@@ -8474,6 +8641,7 @@ pub(crate) mod tests {
             None,
             &mut progress,
             &replay_vote_sender,
+            &soft_dead_slot_sender,
             &post_migration_status_for_tests(),
         );
 
@@ -8510,6 +8678,7 @@ pub(crate) mod tests {
         bank_forks.write().unwrap().clear_bank(slot, false);
 
         let (replay_vote_sender, _replay_vote_receiver) = unbounded();
+        let (soft_dead_slot_sender, _soft_dead_slot_receiver) = unbounded();
         ReplayStage::process_soft_dead_update_parent_slots(
             &Pubkey::new_unique(),
             &blockstore,
@@ -8518,6 +8687,7 @@ pub(crate) mod tests {
             None,
             &mut progress,
             &replay_vote_sender,
+            &soft_dead_slot_sender,
             &post_migration_status_for_tests(),
         );
 
@@ -8551,6 +8721,7 @@ pub(crate) mod tests {
         progress.insert(slot, p);
 
         let (replay_vote_sender, _replay_vote_receiver) = unbounded();
+        let (soft_dead_slot_sender, _soft_dead_slot_receiver) = unbounded();
         ReplayStage::process_soft_dead_update_parent_slots(
             &Pubkey::new_unique(),
             &blockstore,
@@ -8559,6 +8730,7 @@ pub(crate) mod tests {
             None,
             &mut progress,
             &replay_vote_sender,
+            &soft_dead_slot_sender,
             &post_migration_status_for_tests(),
         );
 

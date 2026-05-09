@@ -192,9 +192,33 @@ impl SlotMetrics {
     }
 
     pub(crate) fn reset(&mut self, slot: Slot) {
-        let leader_handover_fast = self.slot == slot;
+        let same_slot = self.slot == slot;
+        let leader_handover_fast = same_slot && self.leader_handover_fast;
+        let leader_handover_sad = same_slot && self.leader_handover_sad;
         *self = Self::default();
         self.leader_handover_fast = leader_handover_fast;
+        self.leader_handover_sad = leader_handover_sad;
         self.slot = slot;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_slot_metrics_handover() {
+        let mut metrics = SlotMetrics::default();
+        metrics.reset(42);
+        metrics.mark_leader_handover_fast();
+        metrics.mark_leader_handover_sad();
+
+        metrics.reset(42);
+        assert!(metrics.leader_handover_fast);
+        assert!(metrics.leader_handover_sad);
+
+        metrics.reset(43);
+        assert!(!metrics.leader_handover_fast);
+        assert!(!metrics.leader_handover_sad);
     }
 }
