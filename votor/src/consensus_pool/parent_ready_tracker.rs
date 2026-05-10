@@ -415,4 +415,58 @@ mod tests {
             BlockProductionParent::Parent(genesis)
         );
     }
+
+    /// Variant 3 of the optimistic-handover analysis: slot 6 has a notar-fallback
+    /// (the last "finalized" ancestor), slot 7 has no certificate at all, and a
+    /// skip certificate arrives for slot 8. The leader at slot 9 must be stuck
+    /// (`ParentNotReady`) because:
+    ///   - block 6's notar-fallback only propagates forward to slot 7 and stops
+    ///     there (slot 7 has no skip), so slot 9 never inherits block_6.
+    ///   - skip(8) consults slot 7's status; slot 7 has empty `notar_fallbacks`
+    ///     and `skip=false`, so `potential_parents` is empty and the function
+    ///     returns early without touching slot 9.
+    #[test]
+    fn stuck_when_intermediate_slot_lacks_any_cert() {
+        let cluster_info = get_cluster_info(Keypair::new());
+        let genesis = Block::default();
+        let mut tracker = ParentReadyTracker::new(cluster_info, genesis);
+        let mut events = vec![];
+
+        let block_6 = (6, Hash::new_unique());
+        tracker.add_new_notar_fallback_or_stronger(block_6, &mut events);
+
+        assert!(
+            tracker.parent_ready(7, block_6),
+            "block_6 should propagate forward exactly one slot to slot 7"
+        );
+        assert!(
+            !tracker.parent_ready(8, block_6),
+            "block_6 must NOT reach slot 8: propagation breaks because slot 7 lacks skip"
+        );
+        assert!(
+            !tracker.parent_ready(9, block_6),
+            "block_6 must NOT reach slot 9 for the same reason"
+        );
+
+        // Slot 7 intentionally has no cert. Only slot 8 receives a skip.
+        tracker.add_new_skip(8, &mut events);
+
+        assert!(
+            !tracker.parent_ready(9, block_6),
+            "skip(8) must not retroactively pull block_6 into slot 9: slot 7 \
+             is not skipped, so the chain cannot extend past it"
+        );
+        assert!(
+            !tracker.parent_ready(9, genesis),
+            "genesis is also unreachable: nothing connects slot 0 to slot 9 \
+             through the gap at slot 7"
+        );
+
+        assert_eq!(
+            tracker.block_production_parent(9),
+            BlockProductionParent::ParentNotReady,
+            "leader at slot 9 must be stuck: no valid parent is reachable while \
+             slot 7 has neither notar-fallback nor skip certificate"
+        );
+    }
 }

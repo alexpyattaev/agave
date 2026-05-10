@@ -14012,4 +14012,228 @@ pub mod tests {
         assert!(!blockstore.meta(60).unwrap().unwrap().is_connected());
         assert!(!blockstore.meta(70).unwrap().unwrap().is_connected());
     }
+
+    /// Build a block with the structure
+    ///   BlockHeader → Entries → Entries → UpdateParent → Entries → Entries → BlockFooter
+    /// Each component lands in its own FEC set with proper chained-merkle-root
+    /// linkage. Shred PARENT_OFFSET is constant at `old_parent_slot` for every
+    /// shred; the UpdateParent marker carries the new parent in its payload.
+    fn make_block_with_update_parent_shreds(
+        slot: Slot,
+        old_parent_slot: Slot,
+        old_parent_block_id: Hash,
+        new_parent_slot: Slot,
+        new_parent_block_id: Hash,
+    ) -> Vec<Vec<Shred>> {
+        use solana_entry::{
+            block_component::{BlockFooterV1, BlockHeaderV1, UpdateParentV1},
+            entry::create_ticks,
+        };
+
+        let keypair = Keypair::new();
+        let cache = ReedSolomonCache::default();
+        let mut stats = ProcessShredsStats::default();
+
+        let components: Vec<(BlockComponent, bool)> = vec![
+            (
+                BlockComponent::new_block_marker(VersionedBlockMarker::new_block_header(
+                    BlockHeaderV1 {
+                        parent_slot: old_parent_slot,
+                        parent_block_id: old_parent_block_id,
+                    },
+                )),
+                false,
+            ),
+            (
+                BlockComponent::new_entry_batch(create_ticks(3, 0, Hash::new_unique())).unwrap(),
+                false,
+            ),
+            (
+                BlockComponent::new_entry_batch(create_ticks(3, 0, Hash::new_unique())).unwrap(),
+                false,
+            ),
+            (
+                BlockComponent::new_block_marker(VersionedBlockMarker::new_update_parent(
+                    UpdateParentV1 {
+                        new_parent_slot,
+                        new_parent_block_id,
+                    },
+                )),
+                false,
+            ),
+            (
+                BlockComponent::new_entry_batch(create_ticks(3, 0, Hash::new_unique())).unwrap(),
+                false,
+            ),
+            (
+                BlockComponent::new_entry_batch(create_ticks(3, 0, Hash::new_unique())).unwrap(),
+                false,
+            ),
+            (
+                BlockComponent::new_block_marker(VersionedBlockMarker::new_block_footer(
+                    BlockFooterV1 {
+                        bank_hash: Hash::new_unique(),
+                        block_producer_time_nanos: 0,
+                        block_user_agent: vec![],
+                        final_cert: None,
+                        skip_reward_cert: None,
+                        notar_reward_cert: None,
+                    },
+                )),
+                true,
+            ),
+        ];
+
+        let mut chained_merkle_root = Hash::new_unique();
+        let mut next_data_index: u32 = 0;
+        let mut next_code_index: u32 = 0;
+        let mut fec_sets: Vec<Vec<Shred>> = Vec::with_capacity(components.len());
+
+        for (component, is_last) in &components {
+            let shreds: Vec<Shred> = Shredder::new(slot, old_parent_slot, 0, 0)
+                .unwrap()
+                .make_merkle_shreds_from_component(
+                    &keypair,
+                    component,
+                    *is_last,
+                    chained_merkle_root,
+                    next_data_index,
+                    next_code_index,
+                    &cache,
+                    &mut stats,
+                )
+                .collect();
+
+            // Mirror StandardBroadcastRun: chain the next FEC set off this
+            // one's last data-shred merkle root.
+            if let Some(last_root) = shreds
+                .iter()
+                .filter(|s| s.is_data())
+                .max_by_key(|s| s.fec_set_index())
+                .and_then(|s| s.merkle_root().ok())
+            {
+                chained_merkle_root = last_root;
+            }
+            for s in &shreds {
+                let idx = s.index();
+                if s.is_data() {
+                    next_data_index = next_data_index.max(idx + 1);
+                } else {
+                    next_code_index = next_code_index.max(idx + 1);
+                }
+            }
+            fec_sets.push(shreds);
+        }
+
+        fec_sets
+    }
+
+    fn assert_block_admitted_cleanly(
+        blockstore: &Blockstore,
+        slot: Slot,
+        expected_parent_slot: Slot,
+        case: &str,
+    ) {
+        assert!(
+            !blockstore.is_dead(slot),
+            "[{case}] slot {slot} was marked dead",
+        );
+        let meta = blockstore
+            .meta(slot)
+            .expect("blockstore meta read failed")
+            .unwrap_or_else(|| panic!("[{case}] slot {slot} has no SlotMeta"));
+        assert!(
+            meta.is_full(),
+            "[{case}] slot {slot} not full: received={} last_index={:?}",
+            meta.received,
+            meta.last_index,
+        );
+        assert_eq!(
+            meta.parent_slot,
+            Some(expected_parent_slot),
+            "[{case}] slot {slot} parent_slot expected {expected_parent_slot}, got {:?}",
+            meta.parent_slot,
+        );
+    }
+
+    /// Invariant: regardless of the order in which shreds for a slot with
+    /// UpdateParent are presented to the blockstore, once every shred has been
+    /// inserted the slot must be `is_full`, NOT `is_dead`, and
+    /// `SlotMeta.parent_slot` must equal the post-UpdateParent parent.
+    #[test]
+    fn test_block_with_update_parent_admitted_under_arbitrary_order() {
+        agave_logger::setup();
+
+        const SLOT: Slot = 12;
+        const OLD_PARENT_SLOT: Slot = 10;
+        const NEW_PARENT_SLOT: Slot = 7;
+        let old_parent_block_id = Hash::new_unique();
+        let new_parent_block_id = Hash::new_unique();
+
+        let fec_sets = make_block_with_update_parent_shreds(
+            SLOT,
+            OLD_PARENT_SLOT,
+            old_parent_block_id,
+            NEW_PARENT_SLOT,
+            new_parent_block_id,
+        );
+        assert_eq!(fec_sets.len(), 7, "expected 7 FEC sets");
+
+        // FEC-set-level reorderings.
+        let fec_orderings: Vec<(&str, Vec<usize>)> = vec![
+            ("chronological", vec![0, 1, 2, 3, 4, 5, 6]),
+            ("reverse_chronological", vec![6, 5, 4, 3, 2, 1, 0]),
+            ("markers_first", vec![0, 3, 6, 1, 2, 4, 5]),
+            ("markers_last", vec![1, 2, 4, 5, 0, 3, 6]),
+            ("update_parent_first", vec![3, 0, 1, 2, 4, 5, 6]),
+            ("footer_first", vec![6, 0, 1, 2, 3, 4, 5]),
+            ("post_marker_content_first", vec![4, 5, 6, 3, 0, 1, 2]),
+            ("pre_marker_content_first", vec![0, 1, 2, 4, 5, 6, 3]),
+        ];
+
+        for (case, ordering) in &fec_orderings {
+            let ledger_path = get_tmp_ledger_path_auto_delete!();
+            let blockstore = Blockstore::open(ledger_path.path()).unwrap();
+            enable_block_markers(&blockstore);
+            for &fec_idx in ordering {
+                let shreds: Vec<Shred> = fec_sets[fec_idx]
+                    .iter()
+                    .filter(|s| s.is_data())
+                    .cloned()
+                    .collect();
+                blockstore
+                    .insert_shreds(shreds, None, false)
+                    .unwrap_or_else(|e| {
+                        panic!("[{case}] insert FEC set {fec_idx} failed: {e:?}")
+                    });
+            }
+            assert_block_admitted_cleanly(&blockstore, SLOT, NEW_PARENT_SLOT, case);
+        }
+
+        // Shred-level shuffle with multiple seeds.
+        use rand::{SeedableRng, rngs::StdRng, seq::SliceRandom};
+        let all_data_shreds: Vec<Shred> = fec_sets
+            .iter()
+            .flat_map(|fec| fec.iter().filter(|s| s.is_data()).cloned())
+            .collect();
+
+        for seed in [0xFA57_1EAD_u64, 0xDEAD_BEEF, 0x0123_4567] {
+            let mut rng = StdRng::seed_from_u64(seed);
+            let mut shuffled = all_data_shreds.clone();
+            shuffled.shuffle(&mut rng);
+
+            let ledger_path = get_tmp_ledger_path_auto_delete!();
+            let blockstore = Blockstore::open(ledger_path.path()).unwrap();
+            enable_block_markers(&blockstore);
+            for shred in shuffled {
+                blockstore
+                    .insert_shreds(vec![shred], None, false)
+                    .unwrap_or_else(|e| {
+                        panic!("[shred_shuffle seed={seed:#x}] insert failed: {e:?}")
+                    });
+            }
+            let case = format!("shred_shuffle_seed_{seed:#x}");
+            assert_block_admitted_cleanly(&blockstore, SLOT, NEW_PARENT_SLOT, &case);
+        }
+    }
 }

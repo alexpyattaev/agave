@@ -1673,4 +1673,152 @@ mod tests {
 
         drop(leader_window_info_sender);
     }
+
+    /// Variant 3 of the optimistic-handover analysis: the leader is mid-production
+    /// with `optimistic_parent = Some(..)` and no `ProduceWindow` ever arrives
+    /// (because the intermediate ancestor lacks any cert, so the parent-ready
+    /// tracker cannot advance). The loop must NOT return at the block timeout —
+    /// it must stall in the "records-drained, poll every 100ms" branch. The
+    /// only way out is the cluster making progress past us, which advances
+    /// `highest_parent_ready` and forces `WindowMovedOn`.
+    #[test]
+    fn test_stuck_optimistic_parent_eventually_window_moves_on() {
+        let ledger_path = get_tmp_ledger_path_auto_delete!();
+        let blockstore = Arc::new(Blockstore::open(ledger_path.path()).unwrap());
+        let my_pubkey = Pubkey::new_unique();
+        let genesis = create_genesis_config_with_leader(10_000, &my_pubkey, 1_000);
+        let root_bank = Bank::new_for_tests(&genesis.genesis_config);
+        root_bank.set_block_id(Some(Hash::new_unique()));
+        root_bank.freeze();
+        let bank_forks = BankForks::new_rw_arc(root_bank);
+        let root_bank = bank_forks.read().unwrap().root_bank();
+        let leader_schedule_cache = fixed_leader_schedule(my_pubkey, &root_bank);
+
+        let optimistic_parent_slot = 3;
+        let optimistic_parent_hash = Hash::new_unique();
+        let optimistic_parent = Bank::new_from_parent_with_bank_forks(
+            &bank_forks,
+            root_bank.clone(),
+            SlotLeader::new_unique(),
+            optimistic_parent_slot,
+        );
+        optimistic_parent.freeze();
+        optimistic_parent.set_block_id(Some(optimistic_parent_hash));
+
+        let exit = Arc::new(AtomicBool::new(false));
+        let poh_config = PohConfig::default();
+        let (mut poh_recorder, _entry_receiver) = PohRecorder::new(
+            root_bank.tick_height(),
+            root_bank.last_blockhash(),
+            root_bank.clone(),
+            Some((4, 7)),
+            root_bank.ticks_per_slot(),
+            blockstore.clone(),
+            &leader_schedule_cache,
+            &poh_config,
+            exit.clone(),
+        );
+        poh_recorder.enable_alpenglow();
+        let poh_recorder = Arc::new(RwLock::new(poh_recorder));
+
+        // Keep senders alive in the test scope (their drop would disconnect
+        // channels and cause the function under test to bail with
+        // `ChannelDisconnected`, masking the stall behavior we're testing).
+        let (_record_sender, record_receiver) = record_channels(false);
+        let (_leader_window_info_sender, leader_window_info_receiver) = unbounded();
+        let (build_reward_certs_sender, _build_reward_certs_receiver) = unbounded();
+        let (reward_certs_sender, reward_certs_receiver) = unbounded();
+        let (banking_stage_sender, _banking_stage_receiver) = BankingTracer::channel_for_test();
+
+        let leader_slot = 4;
+        // Tracker stays at slot 0 — caller has not advanced it for `leader_slot`.
+        let highest_parent_ready = Arc::new(RwLock::new((0, (0, Hash::default()))));
+
+        let mut ctx = LeaderContext {
+            exit,
+            my_pubkey,
+            leader_window_info_receiver,
+            pending_parent_ready: None,
+            highest_parent_ready: highest_parent_ready.clone(),
+            highest_finalized: Arc::new(RwLock::new(None)),
+            blockstore,
+            record_receiver,
+            poh_recorder,
+            leader_schedule_cache,
+            bank_forks,
+            rpc_subscriptions: None,
+            slot_status_notifier: None,
+            banking_tracer: BankingTracer::new_disabled(),
+            replay_highest_frozen: Arc::new(ReplayHighestFrozen::default()),
+            build_reward_certs_sender,
+            reward_certs_receiver,
+            banking_stage_sender,
+            metrics: LoopMetrics::default(),
+            slot_metrics: SlotMetrics::default(),
+            genesis_cert: test_genesis_certificate(),
+        };
+
+        create_and_insert_leader_bank(leader_slot, optimistic_parent, &mut ctx);
+
+        let block_timeout = Duration::from_millis(200);
+
+        // Run the loop on a worker thread so we can observe the stall.
+        let stall_handle = thread::spawn(move || {
+            let mut block_timer = Instant::now();
+            record_and_complete_block(
+                &mut ctx,
+                leader_slot,
+                Some((optimistic_parent_slot, optimistic_parent_hash)),
+                &mut block_timer,
+                block_timeout,
+            )
+        });
+
+        // Wait well past the block timeout. The function must still be running:
+        // optimistic_parent.is_some() and no ProduceWindow → no exit condition
+        // satisfied, only the records-drained / poll-every-100ms branch.
+        thread::sleep(Duration::from_millis(500));
+        assert!(
+            !stall_handle.is_finished(),
+            "record_and_complete_block returned at the block timeout — \
+             expected it to stall while optimistic_parent.is_some() and no \
+             ProduceWindow has arrived"
+        );
+
+        // Provide a reward-cert response for `leader_slot`. The window-moved-on
+        // exit calls `recv_reward_certs(bank_slot)` before `abort_working_bank`,
+        // so without this the function would block on that recv. Sending it
+        // here (after stall is observed) is past `drain_stale_reward_certs`,
+        // so it survives in the channel until the abort path consumes it.
+        reward_certs_sender
+            .send(BuildRewardCertsResponse {
+                bank_slot: leader_slot,
+                result: Ok(BuildRewardCertsRespSucc {
+                    validators: vec![my_pubkey],
+                    ..BuildRewardCertsRespSucc::default()
+                }),
+            })
+            .unwrap();
+
+        // Cluster moves past us: tracker advances `highest_parent_ready` to
+        // `leader_slot + 1`. The `:632` check now fires on the next poll tick.
+        *highest_parent_ready.write().unwrap() =
+            (leader_slot + 1, (leader_slot + 1, Hash::new_unique()));
+
+        // Loop must exit via the WindowMovedOn path within a few poll cycles.
+        let join_deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < join_deadline && !stall_handle.is_finished() {
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert!(
+            stall_handle.is_finished(),
+            "loop did not exit after highest_parent_ready advanced past bank_slot"
+        );
+
+        let result = stall_handle.join().expect("stall thread panicked");
+        assert!(
+            matches!(result, Err(PohRecorderError::WindowMovedOn(s)) if s == leader_slot),
+            "expected Err(WindowMovedOn({leader_slot})), got {result:?}"
+        );
+    }
 }
