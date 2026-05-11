@@ -2841,6 +2841,12 @@ impl ReplayStage {
             if replayed_shreds >= u64::from(slot_meta.replay_fec_set_index) {
                 return false;
             }
+            match blockstore.update_parent_replay_status(slot, BlockLocation::Original) {
+                Ok(UpdateParentReplayStatus::Ready | UpdateParentReplayStatus::NotAvailable) => {}
+                // Once the UpdateParent metadata is known invalid, no future
+                // shred can make the optimistic prefix recoverable.
+                Ok(UpdateParentReplayStatus::Invalid) | Err(_) => return false,
+            }
         } else if slot_meta.is_full() {
             // The slot is complete and no `UpdateParent` marker was observed, so
             // the replay failure is terminal.
@@ -5824,7 +5830,7 @@ pub(crate) mod tests {
         solana_clock::NUM_CONSECUTIVE_LEADER_SLOTS,
         solana_entry::{
             block_component::{
-                BlockComponent, BlockHeaderV1, UpdateParentV1, VersionedBlockMarker,
+                BlockComponent, BlockFooterV1, BlockHeaderV1, UpdateParentV1, VersionedBlockMarker,
             },
             entry::{self, Entry},
         },
@@ -5897,13 +5903,29 @@ pub(crate) mod tests {
         marker: VersionedBlockMarker,
         shred_index: u32,
     ) -> Vec<Shred> {
+        block_marker_shreds_with_last(
+            slot,
+            shred_parent_slot,
+            marker,
+            shred_index,
+            false, // is_last_in_slot
+        )
+    }
+
+    fn block_marker_shreds_with_last(
+        slot: Slot,
+        shred_parent_slot: Slot,
+        marker: VersionedBlockMarker,
+        shred_index: u32,
+        is_last_in_slot: bool,
+    ) -> Vec<Shred> {
         let component = BlockComponent::new_block_marker(marker);
         Shredder::new(slot, shred_parent_slot, 0, 0)
             .unwrap()
             .make_merkle_shreds_from_component(
                 &Keypair::new(),
                 &component,
-                false,
+                is_last_in_slot,
                 Hash::new_unique(),
                 shred_index,
                 shred_index,
@@ -8767,30 +8789,58 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn test_defer_update_no_header() {
-        let (vote_simulator, blockstore) = setup_forks_from_tree(tr(0), 1, None::<GenerateVotes>);
+    fn test_bad_update_header_dead() {
+        let ReplayBlockstoreComponents {
+            blockstore,
+            vote_simulator,
+            leader_schedule_cache,
+            ..
+        } = replay_blockstore_components(Some(tr(0)), 1, None::<GenerateVotes>);
         let VoteSimulator {
             bank_forks,
             mut progress,
             validator_keypairs,
             ..
         } = vote_simulator;
-        let my_pubkey = *validator_keypairs.keys().next().unwrap();
-        let root_bank = bank_forks.read().unwrap().root_bank();
-        let leader_schedule_cache = Arc::new(LeaderScheduleCache::new_from_bank(&root_bank));
+        let my_keypairs = validator_keypairs.values().next().unwrap();
+        let my_pubkey = my_keypairs.node_keypair.pubkey();
         let slot = 1;
+        let migration_status = post_migration_status_for_tests();
 
-        let (shreds, _) = make_slot_entries(slot, 0, 8);
-        blockstore.insert_shreds(shreds, None, false).unwrap();
-        let mut slot_meta = blockstore.meta(slot).unwrap().unwrap();
-        slot_meta.parent_slot = Some(0);
-        slot_meta.parent_block_id = Hash::new_unique();
-        slot_meta.replay_fec_set_index = 10;
-        blockstore.put_meta(slot, &slot_meta).unwrap();
-        assert!(
-            !blockstore
-                .can_replay_from_update_parent(slot, BlockLocation::Original)
-                .unwrap()
+        blockstore.set_block_markers_enabled(true);
+        let footer_marker = || {
+            VersionedBlockMarker::new_block_footer(BlockFooterV1 {
+                bank_hash: Hash::new_unique(),
+                block_producer_time_nanos: 0,
+                block_user_agent: vec![],
+                final_cert: None,
+                skip_reward_cert: None,
+                notar_reward_cert: None,
+            })
+        };
+        let update_parent = VersionedBlockMarker::new_update_parent(UpdateParentV1 {
+            new_parent_slot: 0,
+            new_parent_block_id: Hash::default(),
+        });
+
+        let mut shreds = block_marker_shreds(slot, 0, footer_marker(), 0);
+        shreds.extend(block_marker_shreds(slot, 0, update_parent, 32));
+        shreds.extend(block_marker_shreds_with_last(
+            slot,
+            0,
+            footer_marker(),
+            64,
+            true,
+        ));
+        blockstore.insert_shreds(shreds, None, true).unwrap();
+        let slot_meta = blockstore.meta(slot).unwrap().unwrap();
+        assert!(blockstore.is_full(slot), "{slot_meta:?}");
+        assert!(slot_meta.has_update_parent());
+        assert_eq!(
+            blockstore
+                .update_parent_replay_status(slot, BlockLocation::Original)
+                .unwrap(),
+            UpdateParentReplayStatus::Invalid
         );
         assert!(bank_forks.read().unwrap().get(slot).is_none());
 
@@ -8802,7 +8852,7 @@ pub(crate) mod tests {
                 leader_schedule_cache: &leader_schedule_cache,
                 rpc_subscriptions: None,
                 slot_status_notifier: &None,
-                migration_status: &post_migration_status_for_tests(),
+                migration_status: &migration_status,
                 my_pubkey: &my_pubkey,
             },
             &mut progress,
@@ -8810,9 +8860,34 @@ pub(crate) mod tests {
         );
 
         assert!(
-            bank_forks.read().unwrap().get(slot).is_none(),
-            "replay must wait for a compatible header before creating an UpdateParent bank"
+            bank_forks.read().unwrap().get(slot).is_some(),
+            "invalid UpdateParent metadata must create a bank so replay can hard-dead the slot"
         );
+
+        let (replay_vote_sender, _replay_vote_receiver) = unbounded();
+        let (finalization_cert_sender, _finalization_cert_receiver) = unbounded();
+        let mut process_active_banks_context = ProcessActiveBanksContext::new_for_tests(
+            bank_forks.clone(),
+            blockstore.clone(),
+            replay_vote_sender,
+        );
+        process_active_banks_context.migration_status = Arc::new(migration_status);
+        ReplayStage::process_active_banks(
+            &process_active_banks_context,
+            &mut progress,
+            &mut Vec::new(),
+            &mut LatestValidatorVotesForFrozenBanks::default(),
+            &mut DuplicateSlotsToRepair::default(),
+            &mut PurgeRepairSlotCounter::default(),
+            None,
+            &Pubkey::new_unique(),
+            &Pubkey::new_unique(),
+            &mut replay_timing,
+            &finalization_cert_sender,
+        );
+
+        assert!(blockstore.is_dead(slot));
+        assert_eq!(progress.dead_reason(slot), Some(&DeadSlotReason::Hard));
     }
 
     #[test]
@@ -9048,7 +9123,7 @@ pub(crate) mod tests {
             blockstore,
             vote_simulator,
             ..
-        } = replay_blockstore_components(Some(tr(0) / tr(1)), 1, None::<GenerateVotes>);
+        } = replay_blockstore_components(Some(tr(0)), 1, None::<GenerateVotes>);
         let VoteSimulator {
             bank_forks,
             mut progress,
@@ -9056,12 +9131,29 @@ pub(crate) mod tests {
         } = vote_simulator;
 
         let slot = 1;
-        let mut meta = blockstore.meta(slot).unwrap().unwrap();
-        meta.replay_fec_set_index = 10;
-        meta.last_index = None;
-        blockstore.put_meta(slot, &meta).unwrap();
+        let bank0 = bank_forks.read().unwrap().get(0).unwrap();
+        let bank = Bank::new_from_parent(bank0, SlotLeader::default(), slot);
+        let bank = bank_forks.write().unwrap().insert(bank);
+        blockstore.set_block_markers_enabled(true);
+        let header = VersionedBlockMarker::new_block_header(BlockHeaderV1 {
+            parent_slot: 0,
+            parent_block_id: Hash::default(),
+        });
+        let update_parent = VersionedBlockMarker::new_update_parent(UpdateParentV1 {
+            new_parent_slot: 0,
+            new_parent_block_id: Hash::default(),
+        });
+        let mut shreds = block_marker_shreds(slot, 0, header, 0);
+        shreds.retain(|shred| !shred.is_data() || shred.index() != 0);
+        shreds.extend(block_marker_shreds(slot, 0, update_parent, 32));
+        blockstore.insert_shreds(shreds, None, true).unwrap();
+        assert_eq!(
+            blockstore
+                .update_parent_replay_status(slot, BlockLocation::Original)
+                .unwrap(),
+            UpdateParentReplayStatus::NotAvailable
+        );
 
-        let bank = bank_forks.read().unwrap().get(slot).unwrap();
         let p = ForkProgress::new(bank.last_blockhash(), Some(0), None, 0, 0, None);
         p.replay_progress.write().unwrap().num_shreds = 5;
         progress.insert(slot, p);

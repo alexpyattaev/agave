@@ -522,7 +522,7 @@ pub enum UpdateParentReplayStatus {
     /// SlotMeta contains UpdateParent metadata and shred 0 contains a compatible header.
     Ready,
     /// UpdateParent replay is not available. This can be a normal block with no
-    /// UpdateParent marker, or an out-of-order slot still waiting on shreds.
+    /// UpdateParent marker, or an out-of-order slot still waiting on shred 0.
     NotAvailable,
     /// Both pieces are present but malformed or incompatible.
     Invalid,
@@ -3441,9 +3441,10 @@ impl Blockstore {
     ///
     /// `NotAvailable` is not a block-validity verdict. It is returned for
     /// ordinary blocks without an observed UpdateParent marker, and for
-    /// out-of-order arrival where replay may need to wait for more shreds.
-    /// `Invalid` is terminal for the local ledger data: the header and
-    /// UpdateParent are both present but cannot describe one legal block.
+    /// out-of-order arrival where replay may need to wait for shred 0.
+    /// `Invalid` is terminal for the local ledger data: once shred 0 is
+    /// present, it must contain a compatible block header for the observed
+    /// UpdateParent.
     pub fn update_parent_replay_status(
         &self,
         slot: Slot,
@@ -3465,7 +3466,7 @@ impl Blockstore {
             return Ok(UpdateParentReplayStatus::Invalid);
         };
         let Some(block_header_info) = ParentInfo::maybe_parse_block_header(&header_shred) else {
-            return Ok(UpdateParentReplayStatus::NotAvailable);
+            return Ok(UpdateParentReplayStatus::Invalid);
         };
         let Ok(shred_parent_slot) = header_shred.parent() else {
             return Ok(UpdateParentReplayStatus::Invalid);
@@ -13622,7 +13623,7 @@ pub mod tests {
             blockstore
                 .update_parent_replay_status(invalid_header_slot, BlockLocation::Original)
                 .unwrap(),
-            UpdateParentReplayStatus::NotAvailable
+            UpdateParentReplayStatus::Invalid
         );
         assert!(
             !blockstore
