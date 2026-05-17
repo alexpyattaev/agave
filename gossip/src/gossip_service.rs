@@ -157,6 +157,18 @@ pub fn discover_validators(
     Ok(validators)
 }
 
+/// Selects which advertisement style the local discovery node uses.
+enum DiscoverMode<'a> {
+    /// Spy or gossip node depending on whether `gossip_addr` is provided.
+    Normal { gossip_addr: Option<&'a SocketAddr> },
+    /// Fake-spy: advertises valid-looking validator ports built from
+    /// `gossip_addr`, optionally pinning TVU UDP to `tvu_udp_addr`.
+    FakeSpy {
+        gossip_addr: &'a SocketAddr,
+        tvu_udp_addr: Option<SocketAddr>,
+    },
+}
+
 pub fn discover_peers(
     keypair: Option<Keypair>,
     entrypoints: &[SocketAddr],
@@ -171,17 +183,101 @@ pub fn discover_peers(
     Vec<ContactInfo>, // all gossip peers
     Vec<ContactInfo>, // tvu peers (validators)
 )> {
-    let keypair = keypair.unwrap_or_else(Keypair::new);
-    let exit = Arc::new(AtomicBool::new(false));
-    let (gossip_service, ip_echo, spy_ref) = make_node(
+    discover_peers_inner(
         keypair,
         entrypoints,
-        exit.clone(),
-        my_gossip_addr,
+        num_nodes,
+        timeout,
+        find_nodes_by_pubkey,
+        find_nodes_by_gossip_addr,
         my_shred_version,
-        true, // should_check_duplicate_instance,
         socket_addr_space,
-    );
+        DiscoverMode::Normal {
+            gossip_addr: my_gossip_addr,
+        },
+    )
+}
+
+/// Same as [`discover_peers`], but the local node is a fake-spy: it spies on
+/// gossip while advertising valid-looking TVU / repair / TPU ports so peers
+/// treat it as a normal unstaked validator. Requires `my_gossip_addr` to
+/// have a real, routable bind IP.
+///
+/// `tvu_udp_addr`, when set, is used verbatim as the advertised TVU UDP
+/// address (point peers at a real listener if you have one). When `None`,
+/// a random port in [`solana_net_utils::VALIDATOR_PORT_RANGE`] on the
+/// gossip IP is advertised.
+#[allow(clippy::too_many_arguments)]
+pub fn discover_peers_fake_spy(
+    keypair: Option<Keypair>,
+    entrypoints: &[SocketAddr],
+    num_nodes: Option<usize>,
+    timeout: Duration,
+    find_nodes_by_pubkey: Option<&[Pubkey]>,
+    find_nodes_by_gossip_addr: &[SocketAddr],
+    my_gossip_addr: &SocketAddr,
+    tvu_udp_addr: Option<SocketAddr>,
+    my_shred_version: u16,
+    socket_addr_space: SocketAddrSpace,
+) -> std::io::Result<(Vec<ContactInfo>, Vec<ContactInfo>)> {
+    discover_peers_inner(
+        keypair,
+        entrypoints,
+        num_nodes,
+        timeout,
+        find_nodes_by_pubkey,
+        find_nodes_by_gossip_addr,
+        my_shred_version,
+        socket_addr_space,
+        DiscoverMode::FakeSpy {
+            gossip_addr: my_gossip_addr,
+            tvu_udp_addr,
+        },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn discover_peers_inner(
+    keypair: Option<Keypair>,
+    entrypoints: &[SocketAddr],
+    num_nodes: Option<usize>,
+    timeout: Duration,
+    find_nodes_by_pubkey: Option<&[Pubkey]>,
+    find_nodes_by_gossip_addr: &[SocketAddr],
+    my_shred_version: u16,
+    socket_addr_space: SocketAddrSpace,
+    mode: DiscoverMode,
+) -> std::io::Result<(Vec<ContactInfo>, Vec<ContactInfo>)> {
+    let keypair = keypair.unwrap_or_else(Keypair::new);
+    let exit = Arc::new(AtomicBool::new(false));
+    let my_gossip_addr = match &mode {
+        DiscoverMode::Normal { gossip_addr } => *gossip_addr,
+        DiscoverMode::FakeSpy { gossip_addr, .. } => Some(*gossip_addr),
+    };
+    let (gossip_service, ip_echo, spy_ref) = match mode {
+        DiscoverMode::Normal { gossip_addr } => make_node(
+            keypair,
+            entrypoints,
+            exit.clone(),
+            gossip_addr,
+            my_shred_version,
+            true, // should_check_duplicate_instance,
+            socket_addr_space,
+        ),
+        DiscoverMode::FakeSpy {
+            gossip_addr,
+            tvu_udp_addr,
+        } => make_fake_spy_node(
+            keypair,
+            entrypoints,
+            exit.clone(),
+            gossip_addr,
+            tvu_udp_addr,
+            my_shred_version,
+            true, // should_check_duplicate_instance,
+            socket_addr_space,
+        ),
+    };
 
     let id = spy_ref.id();
     info!("Entrypoints: {entrypoints:?}");
@@ -314,6 +410,59 @@ pub fn make_node(
     } else {
         ClusterInfo::spy_node(keypair.pubkey(), shred_version)
     };
+    finish_make_node(
+        keypair,
+        entrypoints,
+        exit,
+        node,
+        gossip_socket,
+        ip_echo,
+        should_check_duplicate_instance,
+        socket_addr_space,
+    )
+}
+
+/// Bring up a gossip service for a fake-spy node — a spy disguised as an
+/// unstaked validator. The advertised contact info is built via
+/// [`ClusterInfo::fake_spy_node`], so peers will not classify it as a spy.
+///
+/// `tvu_udp_addr`, when set, is forwarded to [`ClusterInfo::fake_spy_node`]
+/// and used verbatim as the advertised TVU UDP address.
+#[allow(clippy::too_many_arguments)]
+pub fn make_fake_spy_node(
+    keypair: Keypair,
+    entrypoints: &[SocketAddr],
+    exit: Arc<AtomicBool>,
+    gossip_addr: &SocketAddr,
+    tvu_udp_addr: Option<SocketAddr>,
+    shred_version: u16,
+    should_check_duplicate_instance: bool,
+    socket_addr_space: SocketAddrSpace,
+) -> (GossipService, Option<TcpListener>, Arc<ClusterInfo>) {
+    let (node, gossip_socket, ip_echo) =
+        ClusterInfo::fake_spy_node(keypair.pubkey(), gossip_addr, tvu_udp_addr, shred_version);
+    finish_make_node(
+        keypair,
+        entrypoints,
+        exit,
+        node,
+        gossip_socket,
+        ip_echo,
+        should_check_duplicate_instance,
+        socket_addr_space,
+    )
+}
+
+fn finish_make_node(
+    keypair: Keypair,
+    entrypoints: &[SocketAddr],
+    exit: Arc<AtomicBool>,
+    node: ContactInfo,
+    gossip_socket: UdpSocket,
+    ip_echo: Option<TcpListener>,
+    should_check_duplicate_instance: bool,
+    socket_addr_space: SocketAddrSpace,
+) -> (GossipService, Option<TcpListener>, Arc<ClusterInfo>) {
     let cluster_info = ClusterInfo::new(node, Arc::new(keypair), socket_addr_space);
 
     cluster_info.set_entrypoints(

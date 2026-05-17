@@ -2326,6 +2326,106 @@ impl ClusterInfo {
         );
         (contact_info, gossip_socket, None)
     }
+
+    /// A spy node that disguises itself as a normal (unstaked) validator.
+    ///
+    /// The returned `ContactInfo` advertises a valid (non-loopback) gossip
+    /// address plus valid-looking TVU, serve-repair and TPU ports — drawn
+    /// from [`VALIDATOR_PORT_RANGE`] on `gossip_addr.ip()` — so peers running
+    /// [`is_spy_node`] do not flag it as a spy.
+    ///
+    /// `tvu_udp_addr` overrides the advertised TVU UDP address verbatim
+    /// (useful when the caller is running a real listener and wants peers
+    /// to reach it). When `None`, a random port in [`VALIDATOR_PORT_RANGE`]
+    /// on `gossip_addr.ip()` is used.
+    ///
+    /// Only the gossip socket is bound; the other advertised ports are
+    /// placeholders with no listener behind them.
+    pub fn fake_spy_node(
+        id: Pubkey,
+        gossip_addr: &SocketAddr,
+        tvu_udp_addr: Option<SocketAddr>,
+        shred_version: u16,
+    ) -> (ContactInfo, UdpSocket, Option<TcpListener>) {
+        let bind_ip_addr = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+        let (gossip_port, (gossip_socket, ip_echo)) =
+            bind_gossip_port_in_range(gossip_addr, VALIDATOR_PORT_RANGE, bind_ip_addr);
+        let advertised_ip = gossip_addr.ip();
+
+        // Reserve free ports from the validator range for each advertised
+        // service. We hold the sockets until the end of this function so
+        // the OS does not hand the same port back on the next call; the
+        // ports are released when this function returns. Nothing actually
+        // listens on them — they exist only to look real to peers.
+        let mut reserved_sockets: Vec<UdpSocket> = Vec::new();
+        let mut pick_port = || -> u16 {
+            let (port, sock) = bind_in_range(bind_ip_addr, VALIDATOR_PORT_RANGE)
+                .expect("bind_in_range should find a free port for fake spy advert");
+            reserved_sockets.push(sock);
+            port
+        };
+
+        let tvu_udp = tvu_udp_addr.unwrap_or_else(|| SocketAddr::new(advertised_ip, pick_port()));
+        let tvu_quic = pick_port();
+        let serve_repair_udp = pick_port();
+        let tpu_quic = pick_port();
+        let tpu_forwards_quic = pick_port();
+
+        let mut contact_info = ContactInfo::new(id, timestamp(), shred_version);
+        contact_info
+            .set_gossip(SocketAddr::new(advertised_ip, gossip_port))
+            .expect("set_gossip on fake spy contact info");
+        contact_info
+            .set_tvu(contact_info::Protocol::UDP, tvu_udp)
+            .expect("set_tvu UDP on fake spy contact info");
+        contact_info
+            .set_tvu(
+                contact_info::Protocol::QUIC,
+                SocketAddr::new(advertised_ip, tvu_quic),
+            )
+            .expect("set_tvu QUIC on fake spy contact info");
+        contact_info
+            .set_serve_repair(
+                contact_info::Protocol::UDP,
+                SocketAddr::new(advertised_ip, serve_repair_udp),
+            )
+            .expect("set_serve_repair UDP on fake spy contact info");
+        // Port 1 placeholder, mirroring Node::new_with_external_ip — keeps
+        // legacy peers from inferring that repair is unsupported.
+        contact_info
+            .set_serve_repair(
+                contact_info::Protocol::QUIC,
+                SocketAddr::new(advertised_ip, 1),
+            )
+            .expect("set_serve_repair QUIC placeholder on fake spy contact info");
+        contact_info
+            .set_tpu(
+                contact_info::Protocol::QUIC,
+                SocketAddr::new(advertised_ip, tpu_quic),
+            )
+            .expect("set_tpu QUIC on fake spy contact info");
+        contact_info
+            .set_tpu(
+                contact_info::Protocol::UDP,
+                SocketAddr::new(advertised_ip, 1),
+            )
+            .expect("set_tpu UDP placeholder on fake spy contact info");
+        contact_info
+            .set_tpu_forwards(
+                contact_info::Protocol::QUIC,
+                SocketAddr::new(advertised_ip, tpu_forwards_quic),
+            )
+            .expect("set_tpu_forwards QUIC on fake spy contact info");
+        contact_info
+            .set_tpu_forwards(
+                contact_info::Protocol::UDP,
+                SocketAddr::new(advertised_ip, 1),
+            )
+            .expect("set_tpu_forwards UDP placeholder on fake spy contact info");
+
+        drop(reserved_sockets);
+        (contact_info, gossip_socket, Some(ip_echo))
+    }
 }
 
 #[derive(Debug)]
@@ -2606,6 +2706,56 @@ mod tests {
         let (node, _, _) =
             ClusterInfo::gossip_node(solana_pubkey::new_rand(), &"1.1.1.1:0".parse().unwrap(), 0);
         assert!(ClusterInfo::is_spy_node(
+            &node,
+            &SocketAddrSpace::Unspecified
+        ));
+    }
+
+    #[test]
+    fn test_fake_spy_node_disguises_as_validator() {
+        let (node, _gossip_socket, ip_echo) = ClusterInfo::fake_spy_node(
+            solana_pubkey::new_rand(),
+            &"1.1.1.1:0".parse().unwrap(),
+            /*tvu_udp_addr=*/ None,
+            0,
+        );
+        assert!(
+            ip_echo.is_some(),
+            "fake_spy_node must bind an ip-echo listener like gossip_node"
+        );
+        assert!(
+            !ClusterInfo::is_spy_node(&node, &SocketAddrSpace::Unspecified),
+            "fake_spy_node ContactInfo must not be classified as a spy"
+        );
+        // The disguise advertises tvu/serve_repair on the same IP as gossip.
+        let gossip = node.gossip().expect("gossip address advertised");
+        let tvu = node
+            .tvu(contact_info::Protocol::UDP)
+            .expect("tvu UDP advertised");
+        let serve_repair = node
+            .serve_repair(contact_info::Protocol::UDP)
+            .expect("serve_repair UDP advertised");
+        assert_eq!(tvu.ip(), gossip.ip());
+        assert_eq!(serve_repair.ip(), gossip.ip());
+        assert_ne!(tvu.port(), 0);
+        assert_ne!(serve_repair.port(), 0);
+    }
+
+    #[test]
+    fn test_fake_spy_node_honors_tvu_override() {
+        let tvu_override: SocketAddr = "2.2.2.2:9123".parse().unwrap();
+        let (node, _gossip_socket, _ip_echo) = ClusterInfo::fake_spy_node(
+            solana_pubkey::new_rand(),
+            &"1.1.1.1:0".parse().unwrap(),
+            Some(tvu_override),
+            0,
+        );
+        assert_eq!(
+            node.tvu(contact_info::Protocol::UDP),
+            Some(tvu_override),
+            "explicit tvu_udp_addr must be advertised verbatim"
+        );
+        assert!(!ClusterInfo::is_spy_node(
             &node,
             &SocketAddrSpace::Unspecified
         ));

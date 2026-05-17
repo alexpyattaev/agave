@@ -1,6 +1,9 @@
 //! A command-line executable for monitoring a cluster's gossip plane.
 #[allow(deprecated)]
-use solana_gossip::{contact_info::ContactInfo, gossip_service::discover_peers};
+use solana_gossip::{
+    contact_info::ContactInfo,
+    gossip_service::{discover_peers, discover_peers_fake_spy},
+};
 use {
     clap::{
         App, AppSettings, Arg, ArgMatches, SubCommand, crate_description, crate_name, value_t,
@@ -147,6 +150,83 @@ fn get_clap_app<'ab, 'v>(name: &str, about: &'ab str, version: &'v str) -> App<'
                 .arg(&shred_version_arg)
                 .arg(&gossip_port_arg)
                 .arg(&bind_address_arg)
+                .arg(
+                    Arg::with_name("timeout")
+                        .long("timeout")
+                        .value_name("SECONDS")
+                        .takes_value(true)
+                        .help("Maximum time to wait in seconds [default: wait forever]"),
+                ),
+        )
+        .subcommand(
+            SubCommand::with_name("fake-spy")
+                .about(
+                    "Monitor the gossip entrypoint while disguised as an unstaked validator. \
+                     Publishes valid-looking TVU and serve-repair ports so peers do not flag \
+                     this node as a spy.",
+                )
+                .setting(AppSettings::DisableVersion)
+                .arg(
+                    Arg::with_name("entrypoint")
+                        .short("n")
+                        .long("entrypoint")
+                        .value_name("HOST:PORT")
+                        .takes_value(true)
+                        .multiple(true)
+                        .validator(solana_net_utils::is_host_port)
+                        .help("Rendezvous with the cluster at this entrypoint"),
+                )
+                .arg(
+                    Arg::with_name("identity")
+                        .short("i")
+                        .long("identity")
+                        .value_name("PATH")
+                        .takes_value(true)
+                        .validator(is_keypair_or_ask_keyword)
+                        .help("Identity keypair [default: ephemeral keypair]"),
+                )
+                .arg(
+                    Arg::with_name("num_nodes")
+                        .short("N")
+                        .long("num-nodes")
+                        .value_name("NUM")
+                        .takes_value(true)
+                        .conflicts_with("num_nodes_exactly")
+                        .help("Wait for at least NUM nodes to be visible"),
+                )
+                .arg(
+                    Arg::with_name("num_nodes_exactly")
+                        .short("E")
+                        .long("num-nodes-exactly")
+                        .value_name("NUM")
+                        .takes_value(true)
+                        .help("Wait for exactly NUM nodes to be visible"),
+                )
+                .arg(
+                    Arg::with_name("node_pubkey")
+                        .short("p")
+                        .long("pubkey")
+                        .value_name("PUBKEY")
+                        .takes_value(true)
+                        .validator(is_pubkey)
+                        .multiple(true)
+                        .help("Public key of a specific node to wait for"),
+                )
+                .arg(&shred_version_arg)
+                .arg(&gossip_port_arg)
+                .arg(&bind_address_arg)
+                .arg(
+                    Arg::with_name("tvu_address")
+                        .long("tvu-address")
+                        .value_name("HOST:PORT")
+                        .takes_value(true)
+                        .validator(solana_net_utils::is_host_port)
+                        .help(
+                            "Advertise this exact HOST:PORT as the TVU UDP address \
+                             [default: random port in the validator port range on the \
+                             gossip bind address]",
+                        ),
+                )
                 .arg(
                     Arg::with_name("timeout")
                         .long("timeout")
@@ -314,6 +394,65 @@ fn process_spy(matches: &ArgMatches, socket_addr_space: SocketAddrSpace) -> std:
     Ok(())
 }
 
+// See process_spy for why this whole body is marked allow(deprecated).
+#[allow(deprecated)]
+fn process_fake_spy(
+    matches: &ArgMatches,
+    socket_addr_space: SocketAddrSpace,
+) -> std::io::Result<()> {
+    let num_nodes_exactly = matches
+        .value_of("num_nodes_exactly")
+        .map(|num| num.to_string().parse().unwrap());
+    let num_nodes = matches
+        .value_of("num_nodes")
+        .map(|num| num.to_string().parse().unwrap())
+        .or(num_nodes_exactly);
+    let timeout = matches
+        .value_of("timeout")
+        .map(|secs| secs.to_string().parse().unwrap());
+    let pubkeys = pubkeys_of(matches, "node_pubkey");
+    let identity_keypair = keypair_of(matches, "identity");
+    let entrypoint_addrs = parse_entrypoints(matches);
+    let gossip_addr = get_gossip_address(matches, &entrypoint_addrs);
+
+    let mut shred_version = value_t_or_exit!(matches, "shred_version", u16);
+    if shred_version == 0 {
+        shred_version = get_entrypoint_shred_version(&entrypoint_addrs)
+            .expect("need non-zero shred-version to join the cluster");
+    }
+
+    let tvu_udp_addr = matches.value_of("tvu_address").map(|s| {
+        solana_net_utils::parse_host_port(s).unwrap_or_else(|e| {
+            eprintln!("failed to parse --tvu-address: {e}");
+            exit(1);
+        })
+    });
+
+    let discover_timeout = Duration::from_secs(timeout.unwrap_or(u64::MAX));
+    let (_all_peers, validators) = discover_peers_fake_spy(
+        identity_keypair,
+        &entrypoint_addrs,
+        num_nodes,
+        discover_timeout,
+        pubkeys.as_deref(),
+        &[],
+        &gossip_addr,
+        tvu_udp_addr,
+        shred_version,
+        socket_addr_space,
+    )?;
+
+    process_spy_results(
+        timeout,
+        validators,
+        num_nodes,
+        num_nodes_exactly,
+        pubkeys.as_deref(),
+    );
+
+    Ok(())
+}
+
 fn parse_entrypoints(matches: &ArgMatches) -> Vec<SocketAddr> {
     values_t!(matches, "entrypoint", String)
         .unwrap_or_default()
@@ -407,6 +546,9 @@ fn main() -> Result<(), Box<dyn error::Error>> {
     match matches.subcommand() {
         ("spy", Some(matches)) => {
             process_spy(matches, socket_addr_space)?;
+        }
+        ("fake-spy", Some(matches)) => {
+            process_fake_spy(matches, socket_addr_space)?;
         }
         ("rpc-url", Some(matches)) => {
             process_rpc_url(matches, socket_addr_space)?;
