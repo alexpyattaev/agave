@@ -12,7 +12,7 @@ use {
             SigVerifyWorkerSenders, SigVerifyWorkerState, SigVerifyWorkerStats,
         },
     },
-    agave_banking_stage_ingress_types::BankingPacketBatch,
+    agave_banking_stage_ingress_types::{BankingPacketBatch, SchedulerPriorityFloor},
     core::time::Duration,
     crossbeam_channel::{Receiver, Sender, unbounded},
     solana_perf::{deduper::Deduper, packet::PacketBatch},
@@ -61,6 +61,8 @@ struct SigVerifierStats {
     total_valid_packets: Arc<AtomicUsize>,
     total_dedup_time_us: Arc<AtomicUsize>,
     total_verify_time_us: Arc<AtomicUsize>,
+    total_dropped_below_priority_floor: Arc<AtomicUsize>,
+    total_priority_floor_time_us: Arc<AtomicUsize>,
 }
 
 struct ServicerState {
@@ -106,13 +108,24 @@ impl SigVerifierStats {
                 i64
             ),
             (
+                "total_dropped_below_priority_floor",
+                self.total_dropped_below_priority_floor
+                    .swap(0, Ordering::Relaxed),
+                i64
+            ),
+            (
+                "total_priority_floor_time_us",
+                self.total_priority_floor_time_us.swap(0, Ordering::Relaxed),
+                i64
+            ),
+            (
                 "total_valid_packets",
-                self.total_valid_packets.swap(0, Ordering::Relaxed) as i64,
+                self.total_valid_packets.swap(0, Ordering::Relaxed),
                 i64
             ),
             (
                 "total_verify_time_us",
-                self.total_verify_time_us.swap(0, Ordering::Relaxed) as i64,
+                self.total_verify_time_us.swap(0, Ordering::Relaxed),
                 i64
             ),
         );
@@ -129,6 +142,7 @@ impl SigVerifyStage {
         num_workers: NonZeroUsize,
         forward_non_votes: bool,
         sharable_banks: SharableBanks,
+        scheduler_priority_floor: Option<Arc<SchedulerPriorityFloor>>,
     ) -> (Self, GossipSigVerifyHandle) {
         let (gossip_verified_vote_sender, verified_vote_receiver) = unbounded();
         let non_vote_stats = SigVerifierStats::default();
@@ -157,7 +171,14 @@ impl SigVerifyStage {
                     total_dedup_time_us: non_vote_stats.total_dedup_time_us.clone(),
                     total_valid_packets: non_vote_stats.total_valid_packets.clone(),
                     total_verify_time_us: non_vote_stats.total_verify_time_us.clone(),
+                    total_dropped_below_priority_floor: non_vote_stats
+                        .total_dropped_below_priority_floor
+                        .clone(),
+                    total_priority_floor_time_us: non_vote_stats
+                        .total_priority_floor_time_us
+                        .clone(),
                 },
+                scheduler_priority_floor,
             ),
             SigVerifyWorkerState::new(
                 tpu_vote_sender,
@@ -169,7 +190,14 @@ impl SigVerifyStage {
                     total_dedup_time_us: tpu_vote_stats.total_dedup_time_us.clone(),
                     total_valid_packets: tpu_vote_stats.total_valid_packets.clone(),
                     total_verify_time_us: tpu_vote_stats.total_verify_time_us.clone(),
+                    total_dropped_below_priority_floor: tpu_vote_stats
+                        .total_dropped_below_priority_floor
+                        .clone(),
+                    total_priority_floor_time_us: tpu_vote_stats
+                        .total_priority_floor_time_us
+                        .clone(),
                 },
+                None, // votes are not dropped for priority-floor
             ),
         );
         let servicer_thread_hdl = Self::servicer(
@@ -378,6 +406,7 @@ mod tests {
             NonZeroUsize::new(4).unwrap(),
             false,
             sharable_banks,
+            None,
         );
 
         let now = Instant::now();
@@ -452,6 +481,7 @@ mod tests {
             NonZeroUsize::new(1).unwrap(),
             false,
             sharable_banks,
+            None,
         );
 
         let mut bytes_batch = BytesPacketBatch::with_capacity(1);
