@@ -30,6 +30,10 @@ use {
 /// Sized to fit all votes from a reasonably sized cluster for 1 slot, + margin.
 const VOTE_CHANNEL_CAPACITY: usize = 1024 * 8;
 
+/// Capacity of the non-vote (transaction) channel between sigverify and the banking-stage.
+/// Larger than the vote channel to absorb bursty TPU load.
+const NON_VOTE_CHANNEL_CAPACITY: usize = 1024 * 16;
+
 /// Period between metric emissions per channel from inside `TracedSender::send`.
 const STATS_REPORT_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -277,12 +281,12 @@ impl BankingTracer {
 
         let (tpu_vote_sender, tpu_vote_receiver) = Self::channel(
             ChannelLabel::TpuVote,
-            Some(VOTE_CHANNEL_CAPACITY),
+            VOTE_CHANNEL_CAPACITY,
             self.active_tracer.as_ref().cloned(),
         );
         let (gossip_vote_sender, gossip_vote_receiver) = Self::channel(
             ChannelLabel::GossipVote,
-            Some(VOTE_CHANNEL_CAPACITY),
+            VOTE_CHANNEL_CAPACITY,
             self.active_tracer.as_ref().cloned(),
         );
 
@@ -299,25 +303,21 @@ impl BankingTracer {
     pub fn create_channel_non_vote(&self) -> (BankingPacketSender, BankingPacketReceiver) {
         Self::channel(
             ChannelLabel::NonVote,
-            None,
+            NON_VOTE_CHANNEL_CAPACITY,
             self.active_tracer.as_ref().cloned(),
         )
     }
 
     pub fn channel_for_test() -> (TracedSender, Receiver<BankingPacketBatch>) {
-        Self::channel(ChannelLabel::Dummy, Some(VOTE_CHANNEL_CAPACITY), None)
+        Self::channel(ChannelLabel::Dummy, VOTE_CHANNEL_CAPACITY, None)
     }
 
     fn channel(
         label: ChannelLabel,
-        capacity: Option<usize>,
+        capacity: usize,
         active_tracer: Option<ActiveTracer>,
     ) -> (TracedSender, Receiver<BankingPacketBatch>) {
-        let (sender, receiver) = if let Some(capacity) = capacity {
-            bounded(capacity)
-        } else {
-            unbounded()
-        };
+        let (sender, receiver) = bounded(capacity);
         let evicting = EvictingSender::new(sender, receiver.clone());
 
         (TracedSender::new(label, evicting, active_tracer), receiver)
