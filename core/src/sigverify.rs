@@ -3,7 +3,10 @@
 //! cores.
 
 use {
-    crate::{banking_trace::BankingPacketSender, sigverify_stage::SigVerifyServiceError},
+    crate::{
+        banking_trace::{BankingPacketSender, SendOutcome},
+        sigverify_stage::SigVerifyServiceError,
+    },
     agave_banking_stage_ingress_types::BankingPacketBatch,
     crossbeam_channel::{Receiver, Sender, TrySendError, bounded},
     solana_measure::measure_us,
@@ -43,6 +46,10 @@ pub(crate) struct SigVerifyWorkerStats {
     pub(crate) total_dedup_time_us: Arc<AtomicUsize>,
     pub(crate) total_valid_packets: Arc<AtomicUsize>,
     pub(crate) total_verify_time_us: Arc<AtomicUsize>,
+    /// Max occupancy of the banking_stage channel sampled after each send.
+    pub(crate) max_post_send_len: Arc<AtomicUsize>,
+    /// Count of sends where the EvictingSender had to drop a batch to make room.
+    pub(crate) eviction_drops: Arc<AtomicUsize>,
 }
 
 #[derive(Clone)]
@@ -292,13 +299,23 @@ impl SigVerifyWorkerPool {
             .fetch_add(verify_time_us as usize, Ordering::Relaxed);
 
         let banking_packet_batch = BankingPacketBatch::new(vec![batch]);
-        if let Err(err) = state
+        match state
             .banking_stage_sender
             .send(banking_packet_batch.clone())
         {
-            error!("sigverify send failed: {err:?}");
-            return false;
+            Ok(SendOutcome::Queued) => {}
+            Ok(SendOutcome::Evicted) => {
+                state.stats.eviction_drops.fetch_add(1, Ordering::Relaxed);
+            }
+            Err(err) => {
+                error!("sigverify send to banking failed: {err:?}");
+                return false;
+            }
         }
+        state
+            .stats
+            .max_post_send_len
+            .fetch_max(state.banking_stage_sender.len(), Ordering::Relaxed);
         if should_forward {
             Self::try_forward(forward_stage_sender, banking_packet_batch, is_tpu_vote);
         }

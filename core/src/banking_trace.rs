@@ -9,16 +9,14 @@ use {
     serde::{Deserialize, Serialize},
     solana_clock::Slot,
     solana_hash::Hash,
-    solana_metrics::datapoint_info,
     solana_streamer::{evicting_sender::EvictingSender, streamer::ChannelSend},
-    solana_time_utils::timestamp,
     std::{
         fs::{create_dir_all, remove_dir_all},
         io::{self, Write},
         path::PathBuf,
         sync::{
             Arc,
-            atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+            atomic::{AtomicBool, Ordering},
         },
         thread::{self, JoinHandle, sleep},
         time::{Duration, SystemTime},
@@ -33,9 +31,6 @@ const VOTE_CHANNEL_CAPACITY: usize = 1024 * 8;
 /// Capacity of the non-vote (transaction) channel between sigverify and the banking-stage.
 /// Larger than the vote channel to absorb bursty TPU load.
 const NON_VOTE_CHANNEL_CAPACITY: usize = 1024 * 16;
-
-/// Period between metric emissions per channel from inside `TracedSender::send`.
-const STATS_REPORT_INTERVAL: Duration = Duration::from_secs(5);
 
 pub type BankingPacketSender = TracedSender;
 pub type TracerThreadResult = Result<(), TraceError>;
@@ -99,17 +94,6 @@ pub enum ChannelLabel {
     TpuVote,
     GossipVote,
     Dummy,
-}
-
-impl ChannelLabel {
-    fn metric_name(&self) -> &'static str {
-        match self {
-            ChannelLabel::NonVote => "banking_trace_channel_non_vote",
-            ChannelLabel::TpuVote => "banking_trace_channel_tpu_vote",
-            ChannelLabel::GossipVote => "banking_trace_channel_gossip_vote",
-            ChannelLabel::Dummy => "banking_trace_channel_dummy",
-        }
-    }
 }
 
 struct RollingConditionGrouped {
@@ -391,22 +375,22 @@ impl BankingTracer {
 /// and the flag are expected to be shared among all of traced sender instances, which will be used
 /// by the trio of sources respectively. This routing functionality is needed for unified scheduler
 /// and its runtime switching.
+
+/// Outcome of a `TracedSender::send` call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendOutcome {
+    /// Batch was queued without eviction.
+    Queued,
+    /// Channel was full; the underlying `EvictingSender` either evicted the
+    /// oldest entry to make room.
+    Evicted,
+}
+
 #[derive(Clone)]
 pub struct TracedSender {
     label: ChannelLabel,
     sender: EvictingSender<BankingPacketBatch>,
-    stats: Arc<TracedSenderStats>,
     active_tracer: Option<ActiveTracer>,
-}
-
-#[derive(Default)]
-struct TracedSenderStats {
-    /// Max queue length observed since last report.
-    max_len: AtomicUsize,
-    /// Number of batches the EvictingSender dropped due to a full channel since last report.
-    eviction_drops: AtomicU64,
-    /// `solana_time_utils::timestamp` of the last report.
-    last_report_ms: AtomicU64,
 }
 
 impl TracedSender {
@@ -418,12 +402,14 @@ impl TracedSender {
         Self {
             label,
             sender,
-            stats: Arc::new(TracedSenderStats::default()),
             active_tracer,
         }
     }
 
-    pub fn send(&self, batch: BankingPacketBatch) -> Result<(), SendError<BankingPacketBatch>> {
+    pub fn send(
+        &self,
+        batch: BankingPacketBatch,
+    ) -> Result<SendOutcome, SendError<BankingPacketBatch>> {
         if let Some(ActiveTracer { trace_sender, exit }) = &self.active_tracer {
             if !exit.load(Ordering::Relaxed) {
                 trace_sender
@@ -437,20 +423,11 @@ impl TracedSender {
                     })?;
             }
         }
-        let result = match self.sender.try_send(batch) {
-            // New batch queued; nothing was evicted.
-            Ok(()) => Ok(()),
-            // EvictingSender popped the oldest to make room.
-            Err(TrySendError::Full(_)) => {
-                self.stats.eviction_drops.fetch_add(1, Ordering::Relaxed);
-                Ok(())
-            }
+        match self.sender.try_send(batch) {
+            Ok(()) => Ok(SendOutcome::Queued),
+            Err(TrySendError::Full(_)) => Ok(SendOutcome::Evicted),
             Err(TrySendError::Disconnected(b)) => Err(SendError(b)),
-        };
-        let len = self.sender.len();
-        self.stats.max_len.fetch_max(len, Ordering::Relaxed);
-        self.maybe_report_stats();
-        result
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -459,29 +436,6 @@ impl TracedSender {
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
-    }
-
-    fn maybe_report_stats(&self) {
-        let now_ms = timestamp();
-        let last = self.stats.last_report_ms.load(Ordering::Relaxed);
-        if Duration::from_millis(now_ms.saturating_sub(last)) < STATS_REPORT_INTERVAL {
-            return;
-        }
-        if self
-            .stats
-            .last_report_ms
-            .compare_exchange(last, now_ms, Ordering::Relaxed, Ordering::Relaxed)
-            .is_err()
-        {
-            return;
-        }
-        let max_len = self.stats.max_len.swap(0, Ordering::Relaxed);
-        let eviction_drops = self.stats.eviction_drops.swap(0, Ordering::Relaxed);
-        datapoint_info!(
-            self.label.metric_name(),
-            ("max_len", max_len as i64, i64),
-            ("eviction_drops", eviction_drops as i64, i64),
-        );
     }
 }
 

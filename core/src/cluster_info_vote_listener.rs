@@ -1,6 +1,6 @@
 use {
     crate::{
-        banking_trace::BankingPacketSender,
+        banking_trace::{BankingPacketSender, SendOutcome},
         consensus::vote_stake_tracker::VoteStakeTracker,
         optimistic_confirmation_verifier::OptimisticConfirmationVerifier,
         replay_stage::DUPLICATE_THRESHOLD,
@@ -497,7 +497,11 @@ impl ClusterInfoVoteListener {
         verified_packets_sender: BankingPacketSender,
         verified_vote_transactions_sender: VerifiedVoteTransactionsSender,
     ) -> Result<()> {
+        const STATS_REPORT_INTERVAL: Duration = Duration::from_secs(5);
         let mut cursor = Cursor::default();
+        let mut last_report = Instant::now();
+        let mut max_post_send_len: usize = 0;
+        let mut eviction_drops: u64 = 0;
         while !exit.load(Ordering::Relaxed) {
             let votes = cluster_info.get_votes(&mut cursor);
             inc_new_counter_debug!("cluster_info_vote_listener-recv_count", votes.len());
@@ -505,7 +509,21 @@ impl ClusterInfoVoteListener {
                 let (vote_txs, packets) =
                     Self::verify_votes(votes, &mut gossip_sigverify_handle, &sharable_banks)?;
                 verified_vote_transactions_sender.send(vote_txs)?;
-                verified_packets_sender.send(BankingPacketBatch::new(packets))?;
+                let outcome = verified_packets_sender.send(BankingPacketBatch::new(packets))?;
+                if matches!(outcome, SendOutcome::Evicted) {
+                    eviction_drops += 1;
+                }
+                max_post_send_len = max_post_send_len.max(verified_packets_sender.len());
+            }
+            if last_report.elapsed() >= STATS_REPORT_INTERVAL {
+                datapoint_info!(
+                    "banking_trace_channel_gossip_vote",
+                    ("max_len", max_post_send_len as i64, i64),
+                    ("eviction_drops", eviction_drops as i64, i64),
+                );
+                max_post_send_len = 0;
+                eviction_drops = 0;
+                last_report = Instant::now();
             }
             sleep(Duration::from_millis(GOSSIP_SLEEP_MILLIS));
         }
