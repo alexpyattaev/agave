@@ -36,7 +36,6 @@ def parse_data(file_name: str):
     data = pd.DataFrame(arr)
     data["is_repair"] = np.array(arr["flags"] & 0b0001, dtype=bool)
     data["is_multicast"] = np.array(arr["flags"] & 0b0010, dtype=bool)
-
     return data
 
 
@@ -303,13 +302,20 @@ def main():
                         type=str, default=None)
     parser.add_argument("--gossip_state", help="file with gossip state (json)",
                         type=str, default=None)
+
+    parser.add_argument("--leader", help="filter slots by this leader (by pubkey)",
+                        type=str, default=None)
     args = parser.parse_args()
 
     leader_schedule = {}
+    tagged_leader_slots = []
     if args.leader_schedule is not None:
         with open(args.leader_schedule, "r") as f:
             leader_schedule = json.load(f)['leaderScheduleEntries']
             leader_schedule = {ls['slot']: ls['leader'] for ls in leader_schedule}
+    if args.leader is not None:
+        assert leader_schedule, "Leader schedule must be known"
+        tagged_leader_slots = [slot for slot, leader in leader_schedule.items() if args.leader == leader]
 
     gossip_state = {}
     if args.gossip_state is not None:
@@ -321,6 +327,8 @@ def main():
                 gossip_state[row['identityPubkey']] = row
     data = parse_data(args.path)
     all_slots = sorted(pd.unique(data["slot_number"]))
+    if tagged_leader_slots:
+        all_slots = [s for s in all_slots if s in tagged_leader_slots]
     start_index = all_slots.index(args.slot) if args.slot is not None else 0
     cursor = Cursor(all_slots, start_index)
     plt.style.use("dark_background")
