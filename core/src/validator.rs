@@ -95,7 +95,7 @@ use {
     },
     solana_measure::measure::Measure,
     solana_metrics::{datapoint_info, metrics::metrics_config_sanity_check},
-    solana_net_utils::SocketAddrSpace,
+    solana_net_utils::{SocketAddrSpace, banlist::Banlist},
     solana_poh::{
         poh_controller::PohController,
         poh_recorder::PohRecorder,
@@ -104,6 +104,7 @@ use {
         transaction_recorder::TransactionRecorder,
     },
     solana_pubkey::Pubkey,
+    solana_quic_datagram::{allowlist::StakedNodesAllowlist, endpoint::QuicDatagramEndpoint},
     solana_rpc::{
         max_slots::MaxSlots,
         optimistically_confirmed_bank_tracker::{
@@ -123,7 +124,7 @@ use {
             AbsRequestHandlers, AccountsBackgroundService, DroppedSlotsReceiver,
             PendingSnapshotPackages, PrunedBanksRequestHandler, SnapshotRequestHandler,
         },
-        bank::{Bank, MAX_ALPENGLOW_VOTE_ACCOUNTS},
+        bank::Bank,
         bank_forks::BankForks,
         bank_forks_controller::BankForksControllerHandle,
         commitment::BlockCommitmentCache,
@@ -1192,32 +1193,7 @@ impl Validator {
             ))
         };
 
-        let bls_connection_cache = Arc::new(ConnectionCache::new_with_max_connections(
-            "connection_cache_bls_quic",
-            // BLS consensus messaging is extremely low throughput (5 PPS). Even during standstill operations
-            // we wouldn't expect more than a 100 PPS. 1 connection is enough.
-            1, /* connection_pool_size */
-            // Overprovision to account for epoch boundary validator set rotations
-            MAX_ALPENGLOW_VOTE_ACCOUNTS * 2, /* max_connections */
-            Some(node.sockets.quic_alpenglow_client),
-            Some((
-                &identity_keypair,
-                node.info
-                    .alpenglow()
-                    .ok_or_else(|| {
-                        ValidatorError::Other(String::from(
-                            "Invalid QUIC address for Alpenglow BLS",
-                        ))
-                    })?
-                    .ip(),
-            )),
-            Some((&staked_nodes, &identity_keypair.pubkey())),
-        ));
         let key_notifiers = Arc::new(RwLock::new(KeyUpdaters::default()));
-        key_notifiers.write().unwrap().add(
-            KeyUpdaterType::BlsConnectionCache,
-            bls_connection_cache.clone(),
-        );
 
         // test-validator crate may start the validator in a tokio runtime
         // context which forces us to use the same runtime because a nested
@@ -1233,6 +1209,55 @@ impl Validator {
                 .build()
                 .unwrap()
         });
+
+        // Votor QUIC datagram endpoint creation.
+        let (votor_egress, votor_ingress, votor_banlist, votor_allowlist) = if matches!(
+            genesis_config.cluster_type,
+            ClusterType::Testnet | ClusterType::Development,
+        ) {
+            let votor_rt_handle = tpu_client_next_runtime
+                .as_ref()
+                .map(TokioRuntime::handle)
+                .unwrap_or_else(|| current_runtime_handle.as_ref().unwrap());
+            let (ingress_tx, ingress_rx) = bounded(crate::tvu::MAX_ALPENGLOW_PACKET_NUM);
+
+            let banlist = Arc::new(Banlist::default());
+            // Allowlist for votor is populated by the StakedValidatorsCache refresh, so we
+            // can initialize it empty here.
+            let allowlist = Arc::new(StakedNodesAllowlist::new(HashMap::new()));
+
+            let endpoint = QuicDatagramEndpoint::new(
+                votor_rt_handle,
+                &identity_keypair,
+                node.sockets.alpenglow,
+                ingress_tx,
+                allowlist.clone(),
+                banlist.clone(),
+            )
+            .map_err(|e| ValidatorError::Other(format!("alpenglow endpoint: {e:?}")))?;
+            key_notifiers
+                .write()
+                .unwrap()
+                .add(KeyUpdaterType::VotorDatagram, endpoint.key_updater.clone());
+            let egress = endpoint.egress.clone();
+            votor_rt_handle.spawn({
+                let cancel = cancel.clone();
+                async move {
+                    cancel.cancelled().await;
+                    endpoint.close();
+                }
+            });
+            (egress, ingress_rx, banlist, Some(allowlist))
+        } else {
+            // On Mainnet and Devnet we stub the channels so the BLS
+            // sigverifier can spawn but never receive anything.
+            let (votor_egress, _) = tokio::sync::mpsc::channel(1);
+            let (ingress_tx, votor_ingress) = bounded(1);
+            // Leak the sender so the sigverifier's recv_timeout never sees Disconnected.
+            Box::leak(Box::new(ingress_tx));
+            let votor_banlist = Arc::new(Banlist::default());
+            (votor_egress, votor_ingress, votor_banlist, None)
+        };
 
         let rpc_override_health_check =
             Arc::new(AtomicBool::new(config.rpc_config.disable_health_check));
@@ -1586,15 +1611,6 @@ impl Validator {
                 (None, None, None)
             };
 
-        // disable all2all tests if not allowed for a given cluster type
-        let alpenglow_socket = if genesis_config.cluster_type == ClusterType::Testnet
-            || genesis_config.cluster_type == ClusterType::Development
-        {
-            node.sockets.alpenglow
-        } else {
-            None
-        };
-
         let tvu = Tvu::new(
             vote_account,
             authorized_voter_keypairs,
@@ -1605,7 +1621,6 @@ impl Validator {
                 retransmit: node.sockets.retransmit_sockets,
                 fetch: node.sockets.tvu,
                 ancestor_hashes_requests: node.sockets.ancestor_hashes_requests,
-                alpenglow: alpenglow_socket,
                 block_id_repair: node.sockets.block_id_repair,
             },
             blockstore.clone(),
@@ -1666,10 +1681,12 @@ impl Validator {
                 bank_forks_controller_receiver,
                 votor_event_sender: votor_event_sender.clone(),
                 votor_event_receiver,
-                cancel: cancel.clone(),
-                staked_nodes: staked_nodes.clone(),
                 key_notifiers: key_notifiers.clone(),
-                bls_connection_cache,
+                votor_egress,
+                votor_ingress,
+                votor_banlist,
+                votor_allowlist,
+                #[cfg(feature = "dev-context-only-utils")]
                 voting_service_test_override: config.voting_service_test_override.clone(),
                 highest_finalized,
             },
