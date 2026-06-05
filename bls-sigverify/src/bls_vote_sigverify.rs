@@ -30,9 +30,9 @@ use {
     solana_gossip::cluster_info::ClusterInfo,
     solana_ledger::leader_schedule_cache::LeaderScheduleCache,
     solana_measure::{measure::Measure, measure_us},
+    solana_net_utils::banlist::Banlist,
     solana_pubkey::Pubkey,
     solana_runtime::bank::Bank,
-    solana_streamer::nonblocking::simple_qos::SimpleQosBanlist,
     std::{collections::HashMap, sync::Arc},
 };
 
@@ -94,7 +94,7 @@ pub(super) fn verify_and_send_votes(
     root_bank: &Bank,
     cluster_info: &ClusterInfo,
     leader_schedule: &LeaderScheduleCache,
-    banlist: &SimpleQosBanlist,
+    banlist: &Banlist<Pubkey>,
     thread_pool: &ThreadPool,
     channels: &SigVerifierChannels,
 ) -> Result<SigVerifyVoteStats, SigVerifyVoteError> {
@@ -201,7 +201,7 @@ fn verify_votes(
     root_bank: &Bank,
     votes_to_verify: Vec<UnverifiedVotePayload>,
     stats: &mut SigVerifyVoteStats,
-    banlist: &SimpleQosBanlist,
+    banlist: &Banlist<Pubkey>,
     thread_pool: &ThreadPool,
 ) -> Vec<VerifiedVotePayload> {
     // Filter votes too far in the future.

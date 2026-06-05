@@ -19,7 +19,7 @@ use {
         unverified_vote_message::{DecodedWireConsensusMessage, UnverifiedVoteMessage},
         wire::VersionedWireConsensusMessage,
     },
-    crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TryRecvError},
+    crossbeam_channel::{Receiver, Sender, TryRecvError},
     log::error,
     rayon::{ThreadPool, ThreadPoolBuilder},
     solana_bls_signatures::pubkey::{PopVerified, PubkeyAffine as BlsPubkeyAffine},
@@ -27,10 +27,11 @@ use {
     solana_gossip::cluster_info::ClusterInfo,
     solana_ledger::leader_schedule_cache::LeaderScheduleCache,
     solana_measure::measure_us,
-    solana_perf::packet::packet_config,
+    solana_net_utils::banlist::Banlist,
+    solana_perf::packet::{BytesPacket, Meta, PacketBatch, packet_config},
     solana_pubkey::Pubkey,
+    solana_quic_datagram::endpoint::Datagram,
     solana_runtime::{bank::Bank, bank_forks::SharableBanks},
-    solana_streamer::{nonblocking::simple_qos::SimpleQosBanlist, packet::PacketBatch},
     std::{
         collections::HashSet,
         sync::{
@@ -54,7 +55,7 @@ pub(super) const BAN_TIMEOUT: Duration = Duration::from_hours(48);
 
 pub struct SigVerifierContext {
     pub migration_status: Arc<MigrationStatus>,
-    pub banlist: Arc<SimpleQosBanlist>,
+    pub banlist: Arc<Banlist<Pubkey>>,
     pub sharable_banks: SharableBanks,
     pub cluster_info: Arc<ClusterInfo>,
     pub leader_schedule: Arc<LeaderScheduleCache>,
@@ -63,7 +64,7 @@ pub struct SigVerifierContext {
 }
 
 pub struct SigVerifierChannels {
-    pub packet_receiver: Receiver<PacketBatch>,
+    pub packet_receiver: Receiver<Datagram>,
     pub channel_to_repair: VerifiedVoterSlotsSender,
     pub channel_to_reward: Sender<AddVoteMessage>,
     pub channel_to_pool: Sender<SigVerifiedBatch>,
@@ -86,7 +87,7 @@ pub fn spawn_service(
 
 struct SigVerifier {
     migration_status: Arc<MigrationStatus>,
-    banlist: Arc<SimpleQosBanlist>,
+    banlist: Arc<Banlist<Pubkey>>,
     channels: SigVerifierChannels,
     /// Container to look up root banks from.
     sharable_banks: SharableBanks,
@@ -314,30 +315,53 @@ impl SigVerifier {
     }
 }
 
-/// Receives a `Vec<PacketBatch>` from the `receiver` while adhering to the `soft_receive_cap` limit.
+/// Wraps  [`Datagram`] as a one-packet [`PacketBatch`] so the
+/// rest of the sigverifier can keep operating on the `PacketBatch` abstraction.
+/// TODO: remove this in a later refactor.
+fn datagram_to_batch(datagram: Datagram) -> PacketBatch {
+    let Datagram {
+        peer_pubkey,
+        peer_address,
+        message,
+    } = datagram;
+    let mut meta = Meta::default();
+    meta.size = message.len();
+    meta.set_socket_addr(&peer_address);
+    meta.set_remote_pubkey(peer_pubkey);
+    PacketBatch::Single(BytesPacket::new(message, meta))
+}
+
+/// Receives a batch of [`Datagram`]s from the `receiver`, each wrapped as a
+/// single-packet [`PacketBatch`], up to the `soft_receive_cap` limit.
 ///
 /// Returns `Err(())` if the channel disconnected.
 fn recv_batches(
-    receiver: &Receiver<PacketBatch>,
+    receiver: &Receiver<Datagram>,
     soft_receive_cap: usize,
 ) -> Result<Vec<PacketBatch>, ()> {
-    let batch = match receiver.recv_timeout(Duration::from_secs(1)) {
-        Ok(b) => b,
-        Err(e) => match e {
-            RecvTimeoutError::Timeout => {
-                return Ok(vec![]);
+    let mut sleeps: u32 = 0;
+    let batch = loop {
+        if sleeps > 1000 {
+            return Ok(vec![]);
+        }
+        match receiver.try_recv() {
+            Ok(datagram) => break datagram_to_batch(datagram),
+            Err(TryRecvError::Empty) => {
+                sleeps = sleeps.saturating_add(1);
+                std::thread::sleep(Duration::from_millis(1))
             }
-            RecvTimeoutError::Disconnected => {
-                return Err(());
-            }
-        },
+            Err(TryRecvError::Disconnected) => return Err(()),
+        }
     };
-    let mut batches = Vec::with_capacity(soft_receive_cap);
+    // Size to what is actually queued (plus the batch we just took) rather than
+    // always reserving the full cap: the channel is usually far from full.
+    let capacity = receiver.len().saturating_add(1).min(soft_receive_cap);
+    let mut batches = Vec::with_capacity(capacity);
     batches.push(batch);
     while batches.len() < soft_receive_cap {
         match receiver.try_recv() {
             Ok(b) => {
-                batches.push(b);
+                batches.push(datagram_to_batch(b));
             }
             Err(e) => match e {
                 TryRecvError::Empty => return Ok(batches),
@@ -382,17 +406,16 @@ mod tests {
         solana_signer_store::encode_base2,
     };
 
-    fn new_test_banlist() -> Arc<SimpleQosBanlist> {
-        let (banlist, _banlist_eviction_receiver) = SimpleQosBanlist::new();
-        Arc::new(banlist)
+    fn new_test_banlist() -> Arc<Banlist<Pubkey>> {
+        Arc::new(Banlist::<Pubkey>::default())
     }
 
     struct TestContext {
         verifier: SigVerifier,
         validator_keypairs: Vec<ValidatorVoteKeypairs>,
-        banlist: Arc<SimpleQosBanlist>,
+        banlist: Arc<Banlist<Pubkey>>,
 
-        _packet_sender: Sender<PacketBatch>,
+        _packet_sender: Sender<Datagram>,
         repair_receiver: VerifiedVoterSlotsReceiver,
         _reward_receiver: Receiver<AddVoteMessage>,
         pool_receiver: Receiver<SigVerifiedBatch>,
