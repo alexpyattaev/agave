@@ -599,6 +599,7 @@ impl PartialEq for Bank {
             transaction_entries_count: _,
             transactions_per_entry_max: _,
             entry_bytes_consumed: _,
+            extra_staked_nodes: _,
             tick_height,
             signature_count,
             capitalization,
