@@ -100,7 +100,7 @@ def main() -> None:
     output = {"peers": peers}
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("w") as f:
-        json.dump(output, f, indent=4)
+        json.dump(output, f)
     print(f"Written {args.count} peers to {args.output}")
 
 

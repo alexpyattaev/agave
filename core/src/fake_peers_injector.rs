@@ -100,6 +100,7 @@ impl FakePeersInjector {
             let mut ci = ContactInfo::new(pubkey, now, shred_version);
             let ip = peer.ip;
             let p = peer.base_port;
+            warn!("Adding fake peer {pubkey} at {ip}:{p}");
             // Port offsets from ContactInfo::new_with_socketaddr convention.
             let _ = ci.set_gossip(SocketAddr::new(ip, p + 1));
             let _ = ci.set_tvu(Protocol::UDP, SocketAddr::new(ip, p + 2));
