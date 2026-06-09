@@ -55,8 +55,10 @@ impl EpochSpecsTrait for EpochSpecs {
 impl EpochSpecs {
     fn maybe_refresh_cache(cache: &mut EpochSpecsCache, shareable_banks: &SharableBanks) {
         let root_bank = shareable_banks.root();
+        // Always refresh — extra_staked_nodes can change mid-epoch.
+        cache.current_epoch_staked_nodes = root_bank.current_epoch_staked_nodes();
         if root_bank.epoch() == cache.epoch {
-            return; // still the same epoch. nothing to update.
+            return;
         }
         debug_assert_eq!(
             cache.epoch_schedule.get_epoch(root_bank.slot()),
@@ -64,7 +66,6 @@ impl EpochSpecs {
         );
         cache.epoch = root_bank.epoch();
         cache.epoch_schedule = root_bank.epoch_schedule().clone();
-        cache.current_epoch_staked_nodes = root_bank.current_epoch_staked_nodes();
         cache.epoch_duration = get_epoch_duration(&root_bank);
         cache.slots_in_epoch = root_bank.get_slots_in_epoch(root_bank.epoch());
     }

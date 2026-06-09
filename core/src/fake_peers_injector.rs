@@ -80,7 +80,10 @@ impl FakePeersInjector {
                 return;
             }
         };
-        warn!("fake-peers: loaded {} peers from {path:?}", file.peers.len());
+        warn!(
+            "fake-peers: loaded {} peers from {path:?}",
+            file.peers.len()
+        );
         let shred_version = cluster_info.my_shred_version();
         let now = timestamp();
         let mut new_stakes = HashMap::with_capacity(file.peers.len());
@@ -107,6 +110,7 @@ impl FakePeersInjector {
             let _ = ci.set_serve_repair(Protocol::UDP, SocketAddr::new(ip, p + 8));
             let _ = ci.set_tpu_vote(Protocol::QUIC, SocketAddr::new(ip, p + 9));
             let _ = ci.set_tpu_forwards(Protocol::QUIC, SocketAddr::new(ip, p + 11));
+            let _ = ci.set_alpenglow(SocketAddr::new(ip, p + 12));
             let _ = ci.set_rpc(SocketAddr::new(ip, 8899));
             let val = CrdsValue::new(CrdsData::ContactInfo(ci), &keypair);
             if let Err(e) = crds.insert(val, now, GossipRoute::LocalMessage) {
