@@ -137,6 +137,8 @@ args+=(
   --snapshot-interval-slots 200
   --no-incremental-snapshots
   --identity "$identity"
+  --fake-peers-file peers.json
+  --do-not-require-vote-history
   --vote-account "$vote_account"
   --rpc-faucet-address 127.0.0.1:9900
   --no-poh-speed-test

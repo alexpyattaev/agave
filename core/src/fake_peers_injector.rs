@@ -69,17 +69,18 @@ impl FakePeersInjector {
         let bytes = match std::fs::read(path) {
             Ok(b) => b,
             Err(e) => {
-                warn!("fake-peers: could not read {path:?}: {e}");
+                error!("fake-peers: could not read {path:?}: {e}");
                 return;
             }
         };
         let file: FakePeersFile = match serde_json::from_slice(&bytes) {
             Ok(f) => f,
             Err(e) => {
-                warn!("fake-peers: parse error in {path:?}: {e}");
+                error!("fake-peers: parse error in {path:?}: {e}");
                 return;
             }
         };
+        warn!("fake-peers: loaded {} peers from {path:?}", file.peers.len());
         let shred_version = cluster_info.my_shred_version();
         let now = timestamp();
         let mut new_stakes = HashMap::with_capacity(file.peers.len());
@@ -88,7 +89,7 @@ impl FakePeersInjector {
             let keypair = match Keypair::try_from(peer.keypair.as_slice()) {
                 Ok(k) => k,
                 Err(e) => {
-                    warn!("fake-peers: bad keypair bytes, skipping: {e}");
+                    error!("fake-peers: bad keypair bytes, skipping: {e}");
                     continue;
                 }
             };
