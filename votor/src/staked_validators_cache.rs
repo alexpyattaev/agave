@@ -46,6 +46,9 @@ pub struct StakedValidatorsCache {
 
     /// timestamp of the last alpenglow port override we read
     alpenglow_port_override_last_modified: Instant,
+
+    /// Extra pubkey → stake entries injected by FakePeersInjector; merged at cache-refresh time.
+    extra_staked_nodes: Arc<RwLock<HashMap<Pubkey, u64>>>,
 }
 
 impl StakedValidatorsCache {
@@ -55,6 +58,7 @@ impl StakedValidatorsCache {
         target_cache_size: usize,
         include_self: bool,
         alpenglow_port_override: Option<AlpenglowPortOverride>,
+        extra_staked_nodes: Arc<RwLock<HashMap<Pubkey, u64>>>,
     ) -> Self {
         Self {
             cache: LruCache::new(target_cache_size),
@@ -63,6 +67,7 @@ impl StakedValidatorsCache {
             include_self,
             alpenglow_port_override,
             alpenglow_port_override_last_modified: Instant::now(),
+            extra_staked_nodes,
         }
     }
 
@@ -87,16 +92,26 @@ impl StakedValidatorsCache {
             [bank_forks.root_bank(), bank_forks.working_bank()]
         };
 
-        let epoch_staked_nodes = banks
-            .iter()
-            .find_map(|bank| bank.epoch_staked_nodes(epoch))
-            .unwrap_or_else(|| {
-                error!(
-                    "StakedValidatorsCache::get: unknown Bank::epoch_staked_nodes for epoch: \
-                     {epoch}"
-                );
-                Arc::<HashMap<Pubkey, u64>>::default()
-            });
+        let epoch_staked_nodes = {
+            let base = banks
+                .iter()
+                .find_map(|bank| bank.epoch_staked_nodes(epoch))
+                .unwrap_or_else(|| {
+                    error!(
+                        "StakedValidatorsCache::get: unknown Bank::epoch_staked_nodes for epoch: \
+                         {epoch}"
+                    );
+                    Arc::<HashMap<Pubkey, u64>>::default()
+                });
+            let extra = self.extra_staked_nodes.read().unwrap();
+            if extra.is_empty() {
+                base
+            } else {
+                let mut merged = (*base).clone();
+                merged.extend(extra.iter().map(|(k, v)| (*k, *v)));
+                Arc::new(merged)
+            }
+        };
 
         struct Node {
             pubkey: Pubkey,
@@ -370,7 +385,14 @@ mod tests {
             create_bank_forks_and_cluster_info(num_nodes, num_zero_stake_nodes, slot_num);
 
         // Create our staked validators cache
-        let mut svc = StakedValidatorsCache::new(bank_forks, Duration::from_secs(5), 5, true, None);
+        let mut svc = StakedValidatorsCache::new(
+            bank_forks,
+            Duration::from_secs(5),
+            5,
+            true,
+            None,
+            Arc::new(RwLock::new(HashMap::new())),
+        );
 
         let now = Instant::now();
 
@@ -445,7 +467,14 @@ mod tests {
         let (bank_forks, cluster_info, _) = create_bank_forks_and_cluster_info(50, 7, base_slot);
 
         // Create our staked validators cache
-        let mut svc = StakedValidatorsCache::new(bank_forks, Duration::from_secs(5), 5, true, None);
+        let mut svc = StakedValidatorsCache::new(
+            bank_forks,
+            Duration::from_secs(5),
+            5,
+            true,
+            None,
+            Arc::new(RwLock::new(HashMap::new())),
+        );
 
         assert_eq!(0, svc.len());
         assert!(svc.is_empty());
@@ -517,7 +546,14 @@ mod tests {
             create_bank_forks_and_cluster_info(num_nodes, num_zero_stake_nodes, slot_num);
 
         // Create our staked validators cache
-        let mut svc = StakedValidatorsCache::new(bank_forks, Duration::from_secs(5), 5, true, None);
+        let mut svc = StakedValidatorsCache::new(
+            bank_forks,
+            Duration::from_secs(5),
+            5,
+            true,
+            None,
+            Arc::new(RwLock::new(HashMap::new())),
+        );
 
         let now = Instant::now();
 
@@ -546,8 +582,14 @@ mod tests {
             .unwrap();
 
         // Create our staked validators cache - set include_self to true
-        let mut svc =
-            StakedValidatorsCache::new(bank_forks.clone(), Duration::from_secs(5), 5, true, None);
+        let mut svc = StakedValidatorsCache::new(
+            bank_forks.clone(),
+            Duration::from_secs(5),
+            5,
+            true,
+            None,
+            Arc::new(RwLock::new(HashMap::new())),
+        );
 
         let (sockets, _) =
             svc.get_staked_validators_by_slot(slot_num, &cluster_info, Instant::now());
@@ -555,8 +597,14 @@ mod tests {
         assert!(sockets.contains(&my_socket_addr));
 
         // Create our staked validators cache - set include_self to false
-        let mut svc =
-            StakedValidatorsCache::new(bank_forks, Duration::from_secs(5), 5, false, None);
+        let mut svc = StakedValidatorsCache::new(
+            bank_forks,
+            Duration::from_secs(5),
+            5,
+            false,
+            None,
+            Arc::new(RwLock::new(HashMap::new())),
+        );
 
         let (sockets, _) =
             svc.get_staked_validators_by_slot(slot_num, &cluster_info, Instant::now());
@@ -581,6 +629,7 @@ mod tests {
             5,
             false,
             Some(alpenglow_port_override.clone()),
+            Arc::new(RwLock::new(HashMap::new())),
         );
         // Nothing in the override, so we should get the original socket addresses.
         let (sockets, _) = svc.get_staked_validators_by_slot(0, &cluster_info, Instant::now());

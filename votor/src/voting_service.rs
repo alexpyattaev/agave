@@ -125,6 +125,7 @@ impl VotingService {
         connection_cache: Arc<ConnectionCache>,
         bank_forks: Arc<RwLock<BankForks>>,
         test_override: Option<VotingServiceOverride>,
+        extra_staked_nodes: Arc<RwLock<HashMap<Pubkey, u64>>>,
     ) -> Self {
         let (additional_listeners, alpenglow_port_override) = match test_override {
             None => (Vec::new(), None),
@@ -143,6 +144,7 @@ impl VotingService {
                     STAKED_VALIDATORS_CACHE_NUM_EPOCH_TARGET,
                     false,
                     alpenglow_port_override,
+                    extra_staked_nodes,
                 );
 
                 info!("AlpenglowVotingService has started");
@@ -322,6 +324,7 @@ mod tests {
                     additional_listeners: vec![listener],
                     alpenglow_port_override: AlpenglowPortOverride::default(),
                 }),
+                Arc::new(RwLock::new(HashMap::new())),
             ),
             validator_keypairs,
         )

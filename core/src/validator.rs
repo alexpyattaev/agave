@@ -1580,6 +1580,9 @@ impl Validator {
             None
         };
 
+        let fake_peers_stakes: Arc<RwLock<HashMap<Pubkey, u64>>> =
+            Arc::new(RwLock::new(HashMap::new()));
+
         let tvu = Tvu::new(
             vote_account,
             authorized_voter_keypairs,
@@ -1657,6 +1660,7 @@ impl Validator {
                 bls_connection_cache,
                 voting_service_test_override: config.voting_service_test_override.clone(),
                 highest_finalized,
+                extra_staked_nodes: fake_peers_stakes.clone(),
             },
             reward_votes_sender,
         )
@@ -1739,15 +1743,10 @@ impl Validator {
         );
 
         let fake_peers_injector = config.fake_peers_path.as_ref().map(|path| {
-            let extra_staked_nodes = bank_forks
-                .read()
-                .unwrap()
-                .root_bank()
-                .extra_staked_nodes_arc();
             crate::fake_peers_injector::FakePeersInjector::new(
                 path.clone(),
                 cluster_info.clone(),
-                extra_staked_nodes,
+                fake_peers_stakes.clone(),
                 exit.clone(),
             )
         });

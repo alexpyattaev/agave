@@ -79,7 +79,7 @@ use {
     },
     solana_turbine::{XdpSender as TurbineXdpSender, retransmit_stage::RetransmitStage},
     std::{
-        collections::HashSet,
+        collections::{HashMap, HashSet},
         net::UdpSocket,
         num::NonZeroUsize,
         sync::{Arc, RwLock, atomic::AtomicBool},
@@ -187,6 +187,9 @@ pub struct AlpenglowInitializationState {
     // For BLS voting service
     pub bls_connection_cache: Arc<ConnectionCache>,
     pub voting_service_test_override: Option<VotingServiceOverride>,
+
+    /// Fake-peer stakes injected by FakePeersInjector; forwarded to StakedValidatorsCache.
+    pub extra_staked_nodes: Arc<RwLock<HashMap<Pubkey, u64>>>,
 }
 
 impl Tvu {
@@ -270,6 +273,7 @@ impl Tvu {
             bls_connection_cache,
             voting_service_test_override,
             highest_finalized,
+            extra_staked_nodes,
         } = votor_init;
 
         // streamer and sigverify for A2A BLS messages
@@ -598,6 +602,7 @@ impl Tvu {
             bls_connection_cache,
             bank_forks.clone(),
             voting_service_test_override,
+            extra_staked_nodes,
         );
 
         let warm_quic_cache_service = create_cache_warmer_if_needed(
@@ -906,6 +911,7 @@ pub mod tests {
                 highest_finalized: Arc::new(RwLock::new(None)),
                 bank_forks_controller,
                 bank_forks_controller_receiver,
+                extra_staked_nodes: Arc::new(RwLock::new(HashMap::new())),
             },
             reward_votes_sender,
         )
