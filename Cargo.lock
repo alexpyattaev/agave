@@ -7790,6 +7790,7 @@ dependencies = [
  "rustls",
  "serde",
  "serde_bytes",
+ "serde_json",
  "serial_test",
  "shaq",
  "signal-hook",

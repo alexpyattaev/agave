@@ -873,6 +873,7 @@ pub fn execute(
             "snapshot_packager_niceness_adj",
             i8
         ),
+        fake_peers_path: matches.value_of("fake_peers_file").map(PathBuf::from),
     };
     validator_config
         .block_production_method

@@ -24,7 +24,11 @@ use {
     solana_runtime::bank::Bank,
     solana_sha256_hasher::hashv,
     solana_time_utils::AtomicInterval,
-    std::{borrow::Cow, collections::VecDeque, sync::RwLock},
+    std::{
+        borrow::Cow,
+        collections::VecDeque,
+        sync::{Arc, RwLock},
+    },
 };
 
 // Expect blacklist events to be extremely rare, so we can tightly bound the

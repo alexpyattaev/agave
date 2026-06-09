@@ -800,6 +800,17 @@ pub fn add_args<'a>(app: App<'a, 'a>, default_args: &'a DefaultArgs) -> App<'a, 
             ),
     )
     .arg(
+        Arg::with_name("fake_peers_file")
+            .long("fake-peers-file")
+            .value_name("PATH")
+            .takes_value(true)
+            .help(
+                "Path to a JSON file of synthetic peers to inject into CRDS and the staked-nodes \
+                 map every 15s. Useful for testing TPU/turbine/gossip behavior with many peers \
+                 without running real validators.",
+            ),
+    )
+    .arg(
         Arg::with_name("bind_address")
             .long("bind-address")
             .value_name("HOST")

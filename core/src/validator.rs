@@ -397,6 +397,8 @@ pub struct ValidatorConfig {
     pub repair_handler_type: RepairHandlerType,
     // Thread niceness adjustment for snapshot packager service
     pub snapshot_packager_niceness_adj: i8,
+    /// If set, path to a JSON file of fake peers to inject into CRDS and staked-nodes every 15s
+    pub fake_peers_path: Option<PathBuf>,
 }
 
 impl ValidatorConfig {
@@ -481,6 +483,7 @@ impl ValidatorConfig {
             voting_service_test_override: None,
             repair_handler_type: RepairHandlerType::default(),
             snapshot_packager_niceness_adj: 0,
+            fake_peers_path: None,
         }
     }
 
@@ -674,6 +677,7 @@ pub struct Validator {
     // We don't wait for its JoinHandle here because ownership and shutdown
     // are managed elsewhere. This variable is intentionally unused.
     _tpu_client_next_runtime: Option<TokioRuntime>,
+    fake_peers_injector: Option<crate::fake_peers_injector::FakePeersInjector>,
 }
 
 impl Validator {
@@ -1734,6 +1738,20 @@ impl Validator {
             votor_event_sender.clone(),
         );
 
+        let fake_peers_injector = config.fake_peers_path.as_ref().map(|path| {
+            let extra_staked_nodes = bank_forks
+                .read()
+                .unwrap()
+                .root_bank()
+                .extra_staked_nodes_arc();
+            crate::fake_peers_injector::FakePeersInjector::new(
+                path.clone(),
+                cluster_info.clone(),
+                extra_staked_nodes,
+                exit.clone(),
+            )
+        });
+
         datapoint_info!(
             "validator-new",
             ("id", id.to_string(), String),
@@ -1800,6 +1818,7 @@ impl Validator {
             accounts_background_service,
             xdp_transmitter,
             _tpu_client_next_runtime: tpu_client_next_runtime,
+            fake_peers_injector,
         })
     }
 
@@ -1975,6 +1994,9 @@ impl Validator {
 
         if let Some(geyser_plugin_service) = self.geyser_plugin_service {
             geyser_plugin_service.join().expect("geyser_plugin_service");
+        }
+        if let Some(inj) = self.fake_peers_injector {
+            inj.join().expect("fake_peers_injector");
         }
     }
 }

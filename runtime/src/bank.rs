@@ -1015,6 +1015,10 @@ pub struct Bank {
     /// currently write to this during replay, as we process block components one at a time, and
     /// read from this once replay is complete.
     pub block_component_processor: RwLock<BlockComponentProcessor>,
+
+    /// Extra node-identity → stake entries merged into epoch_staked_nodes() at read time.
+    /// Shared via Arc across all child banks; written by FakePeersInjector when active.
+    extra_staked_nodes: Arc<RwLock<HashMap<Pubkey, u64>>>,
 }
 
 #[derive(Debug, Default)]
@@ -1229,6 +1233,7 @@ impl Bank {
             bank_hash_stats: AtomicBankHashStats::default(),
             epoch_rewards_calculation_cache: Arc::new(Mutex::new(HashMap::default())),
             block_component_processor: RwLock::new(BlockComponentProcessor::default()),
+            extra_staked_nodes: Arc::new(RwLock::new(HashMap::new())),
         };
 
         bank.transaction_processor =
@@ -1489,6 +1494,7 @@ impl Bank {
             bank_hash_stats: AtomicBankHashStats::default(),
             epoch_rewards_calculation_cache: parent.epoch_rewards_calculation_cache.clone(),
             block_component_processor: RwLock::new(BlockComponentProcessor::default()),
+            extra_staked_nodes: Arc::clone(&parent.extra_staked_nodes),
         };
 
         let (_, ancestors_time_us) = measure_us!({
@@ -2174,6 +2180,7 @@ impl Bank {
             epoch_rewards_calculation_cache: Arc::new(Mutex::new(HashMap::default())),
             expected_bank_hash: RwLock::new(None),
             block_component_processor: RwLock::new(BlockComponentProcessor::default()),
+            extra_staked_nodes: Arc::new(RwLock::new(HashMap::new())),
         };
 
         // Sanity assertions between bank snapshot and genesis config
@@ -5759,12 +5766,30 @@ impl Bank {
 
     /// Returns a mapping from validator [`Pubkey`] to stake in Lamports for the current Bank::epoch.
     pub fn current_epoch_staked_nodes(&self) -> Arc<HashMap<Pubkey, u64>> {
-        self.current_epoch_stakes().stakes().staked_nodes()
+        self.merge_extra_staked_nodes(self.current_epoch_stakes().stakes().staked_nodes())
     }
 
     /// Returns a mapping from validator [`Pubkey`] to stake in Lamports for the given epoch.
     pub fn epoch_staked_nodes(&self, epoch: Epoch) -> Option<Arc<HashMap<Pubkey, u64>>> {
-        Some(self.epoch_stakes.get(&epoch)?.stakes().staked_nodes())
+        Some(self.merge_extra_staked_nodes(self.epoch_stakes.get(&epoch)?.stakes().staked_nodes()))
+    }
+
+    fn merge_extra_staked_nodes(
+        &self,
+        base: Arc<HashMap<Pubkey, u64>>,
+    ) -> Arc<HashMap<Pubkey, u64>> {
+        let extra = self.extra_staked_nodes.read().unwrap();
+        if extra.is_empty() {
+            return base;
+        }
+        let mut merged = (*base).clone();
+        merged.extend(extra.iter().map(|(k, v)| (*k, *v)));
+        Arc::new(merged)
+    }
+
+    /// Returns the Arc used to inject extra node-identity → stake entries at read time.
+    pub fn extra_staked_nodes_arc(&self) -> Arc<RwLock<HashMap<Pubkey, u64>>> {
+        Arc::clone(&self.extra_staked_nodes)
     }
 
     /// Returns the total stake in Lamports for the given epoch.
