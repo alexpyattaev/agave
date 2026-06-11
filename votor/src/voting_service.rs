@@ -68,7 +68,7 @@ impl VotingService {
         cluster_info: Arc<ClusterInfo>,
         vote_history_storage: Arc<dyn VoteHistoryStorage>,
         egress: mpsc::Sender<Datagram>,
-        allowlist: Option<Arc<StakedNodesAllowlist>>,
+        allowlist: Arc<StakedNodesAllowlist>,
         bank_forks: Arc<RwLock<BankForks>>,
         #[cfg(feature = "dev-context-only-utils")] test_override: Option<VotingServiceOverride>,
     ) -> Self {
@@ -80,7 +80,7 @@ impl VotingService {
                     Duration::from_secs(STAKED_VALIDATORS_CACHE_TTL_S),
                     STAKED_VALIDATORS_CACHE_NUM_EPOCH_TARGET,
                     false,
-                    allowlist,
+                    Some(allowlist),
                     #[cfg(feature = "dev-context-only-utils")]
                     test_override
                         .map(|v| v.override_listeners)
@@ -304,7 +304,7 @@ mod tests {
                 Arc::new(cluster_info),
                 Arc::new(NullVoteHistoryStorage::default()),
                 egress,
-                None, // no allowlist gating in this unit test
+                Arc::new(StakedNodesAllowlist::new(HashMap::new())),
                 bank_forks,
                 Some(VotingServiceOverride {
                     override_listeners: Arc::new(ArcSwap::from_pointee(HashMap::from_iter([

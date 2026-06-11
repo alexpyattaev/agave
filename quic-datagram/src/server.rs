@@ -53,46 +53,6 @@ pub(crate) enum InboundEvent {
     },
 }
 
-impl InboundLoop {
-    /// Live inbound connections (each pubkey may hold several).
-    fn incoming_len(&self) -> u64 {
-        self.incoming.values().map(ArrayVec::len).sum::<usize>() as u64
-    }
-
-    /// Install a `connection` for `peer`. We keep up to
-    /// [`MAX_INBOUND_CONNECTIONS_PER_PEER`] connections per pubkey.
-    ///  Returns:
-    /// - `Ok(())` if the connection took a slot (a fresh pubkey, or an
-    ///   additional connection for a pubkey already present).
-    /// - `Err(())` if this pubkey already holds the per-peer maximum.
-    ///   This should be rare in normal operation.
-    fn insert_inbound(&mut self, peer: Pubkey, connection: Connection) -> Result<(), ()> {
-        match self.incoming.entry(peer) {
-            Entry::Vacant(slot) => {
-                let mut v = ArrayVec::new();
-                v.push(connection);
-                slot.insert(v);
-                Ok(())
-            }
-            Entry::Occupied(mut slot) => slot.get_mut().try_push(connection).map_err(|_| ()),
-        }
-    }
-
-    /// Remove the connection with the given `stable_id` from `peer`'s inbound
-    /// set; drop the map entry once its last connection is gone.
-    /// Called by the read loop on exit. No-op if the
-    /// connection was already removed (e.g. by an identity rotation).
-    fn reap_incoming(&mut self, peer: &Pubkey, stable_id: usize) {
-        if let Entry::Occupied(mut slot) = self.incoming.entry(*peer) {
-            let conns = slot.get_mut();
-            conns.retain(|c| c.stable_id() != stable_id);
-            if conns.is_empty() {
-                slot.remove();
-            }
-        }
-    }
-}
-
 /// An inbound accept: run the handshake and hand the connection (plus its
 /// attested pubkey) to the control loop for admission.
 pub(crate) struct ServerConnection {
@@ -263,6 +223,44 @@ pub(crate) struct InboundLoop {
 }
 
 impl InboundLoop {
+    /// Live inbound connections (each pubkey may hold several).
+    fn incoming_len(&self) -> u64 {
+        self.incoming.values().map(ArrayVec::len).sum::<usize>() as u64
+    }
+
+    /// Install a `connection` for `peer`. We keep up to
+    /// [`MAX_INBOUND_CONNECTIONS_PER_PEER`] connections per pubkey.
+    ///  Returns:
+    /// - `Ok(())` if the connection took a slot (a fresh pubkey, or an
+    ///   additional connection for a pubkey already present).
+    /// - `Err(())` if this pubkey already holds the per-peer maximum.
+    ///   This should be rare in normal operation.
+    fn insert_inbound(&mut self, peer: Pubkey, connection: Connection) -> Result<(), ()> {
+        match self.incoming.entry(peer) {
+            Entry::Vacant(slot) => {
+                let mut v = ArrayVec::new();
+                v.push(connection);
+                slot.insert(v);
+                Ok(())
+            }
+            Entry::Occupied(mut slot) => slot.get_mut().try_push(connection).map_err(|_| ()),
+        }
+    }
+
+    /// Remove the connection with the given `stable_id` from `peer`'s inbound
+    /// set; drop the map entry once its last connection is gone.
+    /// Called by the read loop on exit. No-op if the
+    /// connection was already removed (e.g. by an identity rotation).
+    fn reap_incoming(&mut self, peer: &Pubkey, stable_id: usize) {
+        if let Entry::Occupied(mut slot) = self.incoming.entry(*peer) {
+            let conns = slot.get_mut();
+            conns.retain(|c| c.stable_id() != stable_id);
+            if conns.is_empty() {
+                slot.remove();
+            }
+        }
+    }
+
     pub(crate) async fn run(mut self) {
         let mut prune = interval(BANLIST_PRUNE_INTERVAL);
         prune.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -291,13 +289,15 @@ impl InboundLoop {
                 // accept so a flood of inbounds can't starve the reaping of
                 // dead connections.
                 Some(event) = self.events_rx.recv() => self.handle_event(event),
+                // Metrics are quite handy to have even if we are flooded with incoming.
+                _ = metrics.tick() => stats::report_server(&self.stats, self.incoming_len()),
+                // We admit more load only when we're done with everything important.
                 maybe_incoming = self.endpoint.accept() => {
                     let Some(incoming) = maybe_incoming else { break };
                     self.maybe_accept_connection(incoming);
                 }
                 // When idle we can take care of bookkeeping.
                 _ = prune.tick() => self.banlist.prune(),
-                _ = metrics.tick() => stats::report_server(&self.stats, self.incoming_len()),
                 // Shutdown is never done in a hurry
                 _ = self.shutdown.cancelled() => break,
             }

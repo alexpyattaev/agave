@@ -180,7 +180,7 @@ pub struct AlpenglowInitializationState {
     pub votor_egress: TokioSender<Datagram>,
     pub votor_ingress: Receiver<Datagram>,
     pub votor_banlist: Arc<Banlist<Pubkey>>,
-    pub votor_allowlist: Option<Arc<StakedNodesAllowlist>>,
+    pub votor_allowlist: Arc<StakedNodesAllowlist>,
     #[cfg(feature = "dev-context-only-utils")]
     pub voting_service_test_override: Option<agave_votor::voting_service::VotingServiceOverride>,
 }
@@ -686,7 +686,10 @@ pub mod tests {
         solana_runtime::{bank::Bank, bank_forks_controller::BankForksControllerHandle},
         solana_signer::Signer,
         solana_tpu_client::tpu_client::{DEFAULT_TPU_CONNECTION_POOL_SIZE, DEFAULT_VOTE_USE_QUIC},
-        std::sync::atomic::{AtomicU64, Ordering},
+        std::{
+            collections::HashMap,
+            sync::atomic::{AtomicU64, Ordering},
+        },
     };
 
     #[test]
@@ -842,7 +845,7 @@ pub mod tests {
                 votor_egress,
                 votor_ingress,
                 votor_banlist,
-                votor_allowlist: None,
+                votor_allowlist: Arc::new(StakedNodesAllowlist::new(HashMap::new())),
                 voting_service_test_override: None,
                 highest_finalized: Arc::new(RwLock::new(None)),
                 bank_forks_controller,

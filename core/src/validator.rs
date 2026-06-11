@@ -50,7 +50,6 @@ use {
     },
     solana_client::connection_cache::{ConnectionCache, Protocol},
     solana_clock::Slot,
-    solana_cluster_type::ClusterType,
     solana_entry::poh::compute_hash_time,
     solana_epoch_schedule::MAX_LEADER_SCHEDULE_EPOCH_OFFSET,
     solana_genesis_config::GenesisConfig,
@@ -1211,53 +1210,36 @@ impl Validator {
         });
 
         // Votor QUIC datagram endpoint creation.
-        let (votor_egress, votor_ingress, votor_banlist, votor_allowlist) = if matches!(
-            genesis_config.cluster_type,
-            ClusterType::Testnet | ClusterType::Development,
-        ) {
-            let votor_rt_handle = tpu_client_next_runtime
-                .as_ref()
-                .map(TokioRuntime::handle)
-                .unwrap_or_else(|| current_runtime_handle.as_ref().unwrap());
-            let (ingress_tx, ingress_rx) = bounded(crate::tvu::MAX_ALPENGLOW_PACKET_NUM);
-
-            let banlist = Arc::new(Banlist::default());
-            // Allowlist for votor is populated by the StakedValidatorsCache refresh, so we
-            // can initialize it empty here.
-            let allowlist = Arc::new(StakedNodesAllowlist::new(HashMap::new()));
-
-            let endpoint = QuicDatagramEndpoint::new(
-                votor_rt_handle,
-                &identity_keypair,
-                node.sockets.alpenglow,
-                ingress_tx,
-                allowlist.clone(),
-                banlist.clone(),
-            )
-            .map_err(|e| ValidatorError::Other(format!("alpenglow endpoint: {e:?}")))?;
-            key_notifiers
-                .write()
-                .unwrap()
-                .add(KeyUpdaterType::VotorDatagram, endpoint.key_updater.clone());
-            let egress = endpoint.egress.clone();
-            votor_rt_handle.spawn({
-                let cancel = cancel.clone();
-                async move {
-                    cancel.cancelled().await;
-                    endpoint.close();
-                }
-            });
-            (egress, ingress_rx, banlist, Some(allowlist))
-        } else {
-            // On Mainnet and Devnet we stub the channels so the BLS
-            // sigverifier can spawn but never receive anything.
-            let (votor_egress, _) = tokio::sync::mpsc::channel(1);
-            let (ingress_tx, votor_ingress) = bounded(1);
-            // Leak the sender so the sigverifier's recv_timeout never sees Disconnected.
-            Box::leak(Box::new(ingress_tx));
-            let votor_banlist = Arc::new(Banlist::default());
-            (votor_egress, votor_ingress, votor_banlist, None)
-        };
+        let votor_rt_handle = tpu_client_next_runtime
+            .as_ref()
+            .map(TokioRuntime::handle)
+            .unwrap_or_else(|| current_runtime_handle.as_ref().unwrap());
+        let (ingress_tx, votor_ingress) = bounded(crate::tvu::MAX_ALPENGLOW_PACKET_NUM);
+        let votor_banlist = Arc::new(Banlist::default());
+        // Allowlist for votor is populated by the StakedValidatorsCache refresh, so we
+        // can initialize it empty here.
+        let votor_allowlist = Arc::new(StakedNodesAllowlist::new(HashMap::new()));
+        let endpoint = QuicDatagramEndpoint::new(
+            votor_rt_handle,
+            &identity_keypair,
+            node.sockets.alpenglow,
+            ingress_tx,
+            votor_allowlist.clone(),
+            votor_banlist.clone(),
+        )
+        .map_err(|e| ValidatorError::Other(format!("alpenglow endpoint: {e:?}")))?;
+        key_notifiers
+            .write()
+            .unwrap()
+            .add(KeyUpdaterType::VotorDatagram, endpoint.key_updater.clone());
+        let votor_egress = endpoint.egress.clone();
+        votor_rt_handle.spawn({
+            let cancel = cancel.clone();
+            async move {
+                cancel.cancelled().await;
+                endpoint.close();
+            }
+        });
 
         let rpc_override_health_check =
             Arc::new(AtomicBool::new(config.rpc_config.disable_health_check));

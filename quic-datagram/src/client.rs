@@ -34,66 +34,6 @@ pub(crate) enum OutgoingEntry {
     Established(Connection),
 }
 
-impl OutboundLoop {
-    /// Outbound packet dispatch. Returns `true` if the
-    /// caller must spawn a dial task.
-    ///
-    /// Internally tihs runs the 4-case decision:
-    /// * vacant -> initiate new connection (-> true),
-    /// * dial in progress -> drop (-> false),
-    /// * established to `addr`
-    ///     * send success (-> false),
-    ///     * send failed due to dead connection (-> true),
-    /// * established to a different addr -> evict (`PEER_MOVED`) (-> true).
-    fn send_outbound(&mut self, peer: Pubkey, addr: SocketAddr, bytes: &Bytes) -> bool {
-        match self.outgoing.entry(peer) {
-            Entry::Vacant(slot) => {
-                slot.insert(OutgoingEntry::Dialing);
-                true
-            }
-            Entry::Occupied(mut slot) => match slot.get() {
-                OutgoingEntry::Dialing => {
-                    self.stats
-                        .egress_dropped_dial_in_progress
-                        .fetch_add(1, Ordering::Relaxed);
-                    false
-                }
-                OutgoingEntry::Established(conn) if conn.remote_address() == addr => {
-                    match conn.send_datagram(bytes.clone()) {
-                        Ok(()) => {
-                            add(&self.stats.datagrams_sent);
-                            false
-                        }
-                        Err(SendDatagramError::ConnectionLost(_)) => {
-                            // Connection is dead; swap to Dialing so the
-                            // caller re-dials with this datagram as trigger.
-                            *slot.get_mut() = OutgoingEntry::Dialing;
-                            true
-                        }
-                        Err(e) => {
-                            record_error(&Error::from(e), &self.stats);
-                            false
-                        }
-                    }
-                }
-                OutgoingEntry::Established(_) => {
-                    // Peer moved - swap the slot to `Dialing`...
-                    let old = mem::replace(slot.get_mut(), OutgoingEntry::Dialing);
-                    // ... and close the displaced connection with PEER_MOVED.
-                    if let OutgoingEntry::Established(old_conn) = old {
-                        close_codes::PEER_MOVED.close(&old_conn);
-                        self.stats
-                            .connection_evicted_peer_moved
-                            .fetch_add(1, Ordering::Relaxed);
-                        info!("peer {peer} moved; re-dialing at {addr}");
-                    }
-                    true
-                }
-            },
-        }
-    }
-}
-
 /// Event reported by a dial task or close-watcher to the outbound control loop.
 pub(crate) enum OutboundEvent {
     /// Dial result: `Ok(conn)` on success, `Err(())` if the dial or identity
@@ -186,6 +126,64 @@ pub(crate) struct OutboundLoop {
 }
 
 impl OutboundLoop {
+    /// Outbound packet dispatch. Returns `true` if the
+    /// caller must spawn a dial task.
+    ///
+    /// Internally tihs runs the 4-case decision:
+    /// * vacant -> initiate new connection (-> true),
+    /// * dial in progress -> drop (-> false),
+    /// * established to `addr`
+    ///     * send success (-> false),
+    ///     * send failed due to dead connection (-> true),
+    /// * established to a different addr -> evict (`PEER_MOVED`) (-> true).
+    fn send_outbound(&mut self, peer: Pubkey, addr: SocketAddr, bytes: &Bytes) -> bool {
+        match self.outgoing.entry(peer) {
+            Entry::Vacant(slot) => {
+                slot.insert(OutgoingEntry::Dialing);
+                true
+            }
+            Entry::Occupied(mut slot) => match slot.get() {
+                OutgoingEntry::Dialing => {
+                    self.stats
+                        .egress_dropped_dial_in_progress
+                        .fetch_add(1, Ordering::Relaxed);
+                    false
+                }
+                OutgoingEntry::Established(conn) if conn.remote_address() == addr => {
+                    match conn.send_datagram(bytes.clone()) {
+                        Ok(()) => {
+                            add(&self.stats.datagrams_sent);
+                            false
+                        }
+                        Err(SendDatagramError::ConnectionLost(_)) => {
+                            // Connection is dead; swap to Dialing so the
+                            // caller re-dials with this datagram as trigger.
+                            *slot.get_mut() = OutgoingEntry::Dialing;
+                            true
+                        }
+                        Err(e) => {
+                            record_error(&Error::from(e), &self.stats);
+                            false
+                        }
+                    }
+                }
+                OutgoingEntry::Established(_) => {
+                    // Peer moved - swap the slot to `Dialing`...
+                    let old = mem::replace(slot.get_mut(), OutgoingEntry::Dialing);
+                    // ... and close the displaced connection with PEER_MOVED.
+                    if let OutgoingEntry::Established(old_conn) = old {
+                        close_codes::PEER_MOVED.close(&old_conn);
+                        self.stats
+                            .connection_evicted_peer_moved
+                            .fetch_add(1, Ordering::Relaxed);
+                        info!("peer {peer} moved; re-dialing at {addr}");
+                    }
+                    true
+                }
+            },
+        }
+    }
+
     pub(crate) async fn run(mut self) {
         let mut metrics = interval(METRICS_INTERVAL);
         metrics.set_missed_tick_behavior(MissedTickBehavior::Skip);
