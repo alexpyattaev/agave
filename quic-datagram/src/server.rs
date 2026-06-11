@@ -28,7 +28,7 @@ use {
     tokio::{
         spawn,
         sync::{mpsc, watch},
-        time::{MissedTickBehavior, interval},
+        time::{Instant, MissedTickBehavior, interval, sleep},
     },
     tokio_util::sync::CancellationToken,
 };
@@ -268,6 +268,11 @@ impl InboundLoop {
         let mut metrics = interval(METRICS_INTERVAL);
         metrics.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
+        // Gate for the accept branch: when armed, accept is disabled until the
+        // sleep fires (at which point a fresh token should be available).
+        let mut accept_gate = Box::pin(sleep(Duration::ZERO)); // starts open
+        let mut gate_armed = false;
+
         // TODO: this flag is a workaround for some local-cluster tests that are a
         // nightmare to refactor. But they really should be.
         let mut id_closed = false;
@@ -291,10 +296,29 @@ impl InboundLoop {
                 Some(event) = self.events_rx.recv() => self.handle_event(event),
                 // Metrics are quite handy to have even if we are flooded with incoming.
                 _ = metrics.tick() => stats::report_server(&self.stats, self.incoming_len()),
-                // We admit more load only when we're done with everything important.
-                maybe_incoming = self.endpoint.accept() => {
+                // Re-open the accept gate when the bucket has refilled.
+                _ = &mut accept_gate, if gate_armed => {
+                    gate_armed = false;
+                }
+                // We admit more load only when we're done with everything important,
+                // and only as fast as the global handshake token bucket allows.
+                maybe_incoming = self.endpoint.accept(), if !gate_armed => {
                     let Some(incoming) = maybe_incoming else { break };
-                    self.maybe_accept_connection(incoming);
+                    let ip = incoming.remote_address().ip();
+                    if !ip.is_loopback() && self.handshake_global_limiter.consume_tokens(1).is_err() {
+                        add(&self.stats.handshake_rejected_global_limit);
+                        let wait_us = self.handshake_global_limiter
+                            .us_to_have_tokens(1)
+                            .expect("requested amount is < bucket capacity");
+                        let now = Instant::now();
+                        accept_gate
+                            .as_mut()
+                            .reset(now.checked_add( Duration::from_micros(wait_us.max(1))).unwrap_or(now));
+                        gate_armed = true;
+                        incoming.ignore();
+                    } else {
+                        self.maybe_accept_connection(incoming);
+                    }
                 }
                 // When idle we can take care of bookkeeping.
                 _ = prune.tick() => self.banlist.prune(),
@@ -356,6 +380,7 @@ impl InboundLoop {
 
     /// Performs the admission control checks of incoming connection, if
     /// they pass spawns the task to handle the handshake and serve connection.
+    /// Caller is responsible for rate-limiting via the global handshake token bucket.
     fn maybe_accept_connection(&mut self, incoming: Incoming) {
         let remote_addr = incoming.remote_address();
         if remote_addr.is_ipv6() || remote_addr.ip().is_multicast() {
@@ -363,14 +388,6 @@ impl InboundLoop {
             return;
         }
         // TODO: add Retry challenge here.
-        let ip = remote_addr.ip();
-        // Apply rate-limit before spending TLS CPU.
-        // Loopback is exempt (for local-cluster / tests).
-        if !ip.is_loopback() && self.handshake_global_limiter.consume_tokens(1).is_err() {
-            add(&self.stats.handshake_rejected_global_limit);
-            incoming.ignore();
-            return;
-        }
         spawn(
             ServerConnection {
                 incoming,

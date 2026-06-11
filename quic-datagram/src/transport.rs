@@ -66,6 +66,9 @@ const MIN_MTU: u16 = 1280;
 /// Allow this many bytes to be in flight towards any other peer
 const NOP_CONGESTION_WINDOW: u64 = 8 * 1024 * 1024;
 
+/// Max number of in-flight connection requests we will look at
+const MAX_INCOMING: usize = 400;
+
 #[derive(Clone)]
 struct NopCongestion;
 
@@ -119,6 +122,7 @@ pub(crate) fn new_transport_config() -> TransportConfig {
 }
 
 /// Build the rustls + quinn server config.
+#[allow(clippy::arithmetic_side_effects)]
 pub(crate) fn new_server_config(
     cert: CertificateDer<'static>,
     key: PrivateKeyDer<'static>,
@@ -131,8 +135,12 @@ pub(crate) fn new_server_config(
     let quic = QuicServerConfig::try_from(tls)
         .expect("TLS 1.3-only config yields an initial cipher suite");
     let mut cfg = ServerConfig::with_crypto(Arc::new(quic));
-    cfg.transport_config(Arc::new(new_transport_config()))
-        .migration(false);
+    cfg.incoming_buffer_size((MIN_MTU * 2) as u64);
+    cfg.incoming_buffer_size_total(MAX_INCOMING as u64 * MIN_MTU as u64);
+    cfg.max_incoming(MAX_INCOMING);
+    cfg.retry_token_lifetime(MAX_IDLE_TIMEOUT);
+    cfg.transport_config(Arc::new(new_transport_config()));
+    cfg.migration(false);
     cfg
 }
 

@@ -679,6 +679,10 @@ pub struct Validator {
     // We don't wait for its JoinHandle here because ownership and shutdown
     // are managed elsewhere. This variable is intentionally unused.
     _tpu_client_next_runtime: Option<TokioRuntime>,
+    // This runtime is used to run the votor QUIC implementation.
+    // We don't wait for its JoinHandle here because ownership and shutdown
+    // are managed elsewhere. This variable is intentionally unused.
+    _votor_runtime: Option<TokioRuntime>,
 }
 
 impl Validator {
@@ -1210,17 +1214,26 @@ impl Validator {
         });
 
         // Votor QUIC datagram endpoint creation.
-        let votor_rt_handle = tpu_client_next_runtime
-            .as_ref()
-            .map(TokioRuntime::handle)
-            .unwrap_or_else(|| current_runtime_handle.as_ref().unwrap());
+        let (votor_runtime, votor_rt_handle) = match &current_runtime_handle {
+            Ok(handle) => (None, handle.clone()),
+            Err(_) => {
+                let rt = tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .worker_threads(4)
+                    .thread_name("solVotorQuicRt")
+                    .build()
+                    .unwrap();
+                let handle = rt.handle().clone();
+                (Some(rt), handle)
+            }
+        };
         let (ingress_tx, votor_ingress) = bounded(crate::tvu::MAX_ALPENGLOW_PACKET_NUM);
         let votor_banlist = Arc::new(Banlist::default());
         // Allowlist for votor is populated by the StakedValidatorsCache refresh, so we
         // can initialize it empty here.
         let votor_allowlist = Arc::new(StakedNodesAllowlist::new(HashMap::new()));
         let endpoint = QuicDatagramEndpoint::new(
-            votor_rt_handle,
+            &votor_rt_handle,
             &identity_keypair,
             node.sockets.alpenglow,
             ingress_tx,
@@ -1818,6 +1831,7 @@ impl Validator {
             accounts_background_service,
             xdp_transmitter,
             _tpu_client_next_runtime: tpu_client_next_runtime,
+            _votor_runtime: votor_runtime,
         })
     }
 
