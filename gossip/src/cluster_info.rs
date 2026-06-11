@@ -2350,7 +2350,7 @@ pub struct Sockets {
     /// Client-side socket for ForwardingStage non-vote transactions
     pub tpu_transaction_forwarding_clients: Box<[UdpSocket]>, // quic write only
     /// Socket for alpenglow consensus logic
-    pub alpenglow: UdpSocket, // udp read/write
+    pub alpenglow: UdpSocket, // quic read/write
     /// Connection cache endpoint for QUIC-based Vote
     pub quic_vote_client: UdpSocket, // quic write only
     /// Client-side socket for RPC/SendTransactionService.
