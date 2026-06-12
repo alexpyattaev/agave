@@ -56,5 +56,8 @@ pub const HANDSHAKE_GLOBAL_RATE: f64 = 400.0;
 /// in the allowlist and closes any remaining connections.
 pub const ALLOWLIST_CHECK_INTERVAL: Duration = Duration::from_secs(10);
 
+/// An outbound connection untouched by upstream for this long is closed.
+pub const EGRESS_IDLE_REAP_THRESHOLD: Duration = Duration::from_mins(10);
+
 /// ALPN protocol identifier for the Alpenglow votor datagram transport.
 pub const ALPENGLOW_ALPN: &[u8] = b"alpenglow-v1";

@@ -711,8 +711,7 @@ mod tests {
         let server = spawn_node(&rt, Arc::new(AllowAll), Keypair::new());
         let client = spawn_node(&rt, Arc::new(AllowAll), Keypair::new());
 
-        // Establish the connection: retry the probe until one lands (first one
-        // triggers the dial, gets dropped; followers ride the Established slot).
+        // Establish the connection: retry the probe until one lands.
         let probe = Bytes::from_static(b"probe");
         send_until_received(
             &rt,

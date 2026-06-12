@@ -1,7 +1,7 @@
 //! Outbound (client) direction: we-dial, send-only.
 use {
     crate::{
-        ALPENGLOW_ALPN, close_codes,
+        ALPENGLOW_ALPN, EGRESS_IDLE_REAP_THRESHOLD, close_codes,
         endpoint::{Datagram, METRICS_INTERVAL},
         error::Error,
         stats::{self, QuicDatagramStats, add, record_error},
@@ -22,7 +22,7 @@ use {
     tokio::{
         spawn,
         sync::{mpsc, watch},
-        time::{MissedTickBehavior, interval},
+        time::{Instant, MissedTickBehavior, interval},
     },
     tokio_util::sync::CancellationToken,
 };
@@ -31,7 +31,11 @@ use {
 pub(crate) enum OutgoingEntry {
     /// Dialing attempt in progress.
     Dialing,
-    Established(Connection),
+    Established {
+        conn: Connection,
+        /// When we last sent a datagram on the connection
+        last_used: Instant,
+    },
 }
 
 /// Event reported by a dial task or close-watcher to the outbound control loop.
@@ -149,10 +153,15 @@ impl OutboundLoop {
                         .fetch_add(1, Ordering::Relaxed);
                     false
                 }
-                OutgoingEntry::Established(conn) if conn.remote_address() == addr => {
+                OutgoingEntry::Established { conn, .. } if conn.remote_address() == addr => {
                     match conn.send_datagram(bytes.clone()) {
                         Ok(()) => {
                             add(&self.stats.datagrams_sent);
+                            // Mark the connection as freshly used so the idle
+                            // reaper leaves it alone.
+                            if let OutgoingEntry::Established { last_used, .. } = slot.get_mut() {
+                                *last_used = Instant::now();
+                            }
                             false
                         }
                         Err(SendDatagramError::ConnectionLost(_)) => {
@@ -167,11 +176,11 @@ impl OutboundLoop {
                         }
                     }
                 }
-                OutgoingEntry::Established(_) => {
+                OutgoingEntry::Established { .. } => {
                     // Peer moved - swap the slot to `Dialing`...
                     let old = mem::replace(slot.get_mut(), OutgoingEntry::Dialing);
                     // ... and close the displaced connection with PEER_MOVED.
-                    if let OutgoingEntry::Established(old_conn) = old {
+                    if let OutgoingEntry::Established { conn: old_conn, .. } = old {
                         close_codes::PEER_MOVED.close(&old_conn);
                         self.stats
                             .connection_evicted_peer_moved
@@ -184,9 +193,31 @@ impl OutboundLoop {
         }
     }
 
+    /// Close established outbound connections that upstream is not using.
+    fn close_idle_connections(&mut self) {
+        let now = Instant::now();
+        let mut reaped = 0u64;
+        self.outgoing.retain(|_peer, entry| {
+            if let OutgoingEntry::Established { conn, last_used } = entry
+                && now.duration_since(*last_used) >= EGRESS_IDLE_REAP_THRESHOLD
+            {
+                close_codes::IDLE.close(conn);
+                reaped = reaped.saturating_add(1);
+                return false;
+            }
+            true
+        });
+        if reaped > 0 {
+            self.stats
+                .connection_evicted_idle
+                .fetch_add(reaped, Ordering::Relaxed);
+            info!("Closed {reaped} idle outbound connection(s)");
+        }
+    }
+
     pub(crate) async fn run(mut self) {
-        let mut metrics = interval(METRICS_INTERVAL);
-        metrics.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        let mut bookkeeping_timer = interval(METRICS_INTERVAL);
+        bookkeeping_timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
         // The identity arm tolerates the `KeyUpdater` sender being dropped (some
         // local-cluster tests drop it); once closed we stop polling that arm.
@@ -214,8 +245,11 @@ impl OutboundLoop {
                     let Some(datagram) = maybe_datagram else { break };
                     self.handle_datagram(datagram);
                 }
-                // Metrics are best effort
-                _ = metrics.tick() => stats::report_client(&self.stats, self.outgoing.len() as u64),
+                // Bookkeeping is best effort
+                _ = bookkeeping_timer.tick() => {
+                    self.close_idle_connections();
+                    stats::report_client(&self.stats, self.outgoing.len() as u64);
+                }
                 // Shutdown is never something we do in a hurry
                 _ = self.shutdown.cancelled() => break,
             }
@@ -237,7 +271,7 @@ impl OutboundLoop {
             .outgoing
             .drain()
             .map(|(_, entry)| {
-                if let OutgoingEntry::Established(conn) = entry {
+                if let OutgoingEntry::Established { conn, .. } = entry {
                     close_codes::IDENTITY_ROTATED.close(&conn);
                 }
             })
@@ -307,7 +341,12 @@ impl OutboundLoop {
                 outcome: Ok(conn), ..
             } => match self.outgoing.get_mut(&peer) {
                 Some(slot @ OutgoingEntry::Dialing) => {
-                    *slot = OutgoingEntry::Established(conn.clone());
+                    // The dial task already sent the trigger datagram, so the
+                    // connection is freshly used as of now.
+                    *slot = OutgoingEntry::Established {
+                        conn: conn.clone(),
+                        last_used: Instant::now(),
+                    };
                     self.stats
                         .record_connection_count(self.outgoing.len() as u64);
                     self.spawn_close_watcher(peer, conn);
@@ -330,7 +369,7 @@ impl OutboundLoop {
             // re-dial may have already replaced it.
             OutboundEvent::Closed { stable_id, .. } => {
                 if let Entry::Occupied(slot) = self.outgoing.entry(peer)
-                    && matches!(slot.get(), OutgoingEntry::Established(c) if c.stable_id() == stable_id)
+                    && matches!(slot.get(), OutgoingEntry::Established { conn, .. } if conn.stable_id() == stable_id)
                 {
                     slot.remove();
                 }
