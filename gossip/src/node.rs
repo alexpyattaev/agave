@@ -299,6 +299,15 @@ impl Node {
         let (alpenglow_port, alpenglow) =
             bind_in_range_with_config(bind_ip_addr, port_range, socket_configs.read_write)
                 .expect("Alpenglow port bind should succeed");
+        // Bind several sockets to the same port (SO_REUSEPORT) so the
+        // quic-datagram endpoint can stand up one quinn driver per socket and
+        // pull packets from the kernel concurrently, mirroring the TPU streamer.
+        let alpenglow = bind_more_with_config(
+            alpenglow,
+            num_quic_endpoints.get(),
+            socket_configs.read_write,
+        )
+        .expect("Alpenglow multi_bind should succeed");
 
         let (_, block_id_repair) =
             bind_in_range_with_config(bind_ip_addr, port_range, socket_configs.read_write)

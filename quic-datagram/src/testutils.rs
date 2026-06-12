@@ -52,7 +52,7 @@ pub fn spawn_node<A: Allowlist>(rt: &Runtime, allowlist: Arc<A>, keypair: Keypai
     let endpoint = QuicDatagramEndpoint::new(
         rt.handle(),
         &keypair,
-        socket,
+        vec![socket],
         ingress_tx,
         allowlist,
         banlist.clone(),

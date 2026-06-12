@@ -14,15 +14,19 @@ use {
     },
     arrayvec::ArrayVec,
     crossbeam_channel::{Sender, TrySendError},
+    futures::{StreamExt as _, stream::FuturesUnordered},
     log::{debug, info, warn},
-    quinn::{Connection, Endpoint, Incoming},
+    quinn::{Accept, Connection, Endpoint, Incoming},
     solana_net_utils::{banlist::Banlist, token_bucket::TokenBucket},
     solana_pubkey::{Pubkey, PubkeyHasherBuilder},
     solana_tls_utils::get_remote_pubkey,
     std::{
         collections::{HashMap, hash_map::Entry},
+        future::Future,
         net::SocketAddr,
+        pin::Pin,
         sync::{Arc, atomic::Ordering},
+        task::{Context, Poll},
         time::Duration,
     },
     tokio::{
@@ -196,7 +200,10 @@ pub(crate) async fn read_datagram_loop(
 
 /// Inbound control loop: we-accept, receive-only.
 pub(crate) struct InboundLoop {
-    pub(crate) endpoint: Endpoint,
+    /// One quinn endpoint per backing socket. The control loop accepts across
+    /// all of them at once (see [`EndpointAccept`]), so several socket drivers
+    /// pull inbound packets from the kernel concurrently.
+    pub(crate) endpoints: Vec<Endpoint>,
     /// Identity-rotation counter
     pub(crate) generation: u64,
     pub(crate) ingress: Sender<Datagram>,
@@ -273,6 +280,23 @@ impl InboundLoop {
         let mut accept_gate = Box::pin(sleep(Duration::ZERO)); // starts open
         let mut gate_armed = false;
 
+        // Accept across every endpoint at once. Each backing socket has its own
+        // quinn driver, so polling them all here lets several workers feed the
+        // accept path concurrently. We move the endpoints into a local so the
+        // borrow held by the in-flight accept futures stays disjoint from the
+        // `&mut self` calls below; the set is read back via `&endpoints`.
+        let endpoints = std::mem::take(&mut self.endpoints);
+        let mut accepts: FuturesUnordered<Pin<Box<EndpointAccept>>> = endpoints
+            .iter()
+            .enumerate()
+            .map(|(i, endpoint)| {
+                Box::pin(EndpointAccept {
+                    accept: endpoint.accept(),
+                    endpoint: i,
+                })
+            })
+            .collect();
+
         // TODO: this flag is a workaround for some local-cluster tests that are a
         // nightmare to refactor. But they really should be.
         let mut id_closed = false;
@@ -287,7 +311,7 @@ impl InboundLoop {
                     }
                     let snap = self.identity_rx.borrow_and_update().clone();
                     if let Some(snap) = snap {
-                        self.apply_identity_change(snap);
+                        self.apply_identity_change(snap, &endpoints);
                     }
                 }
                 // Lifecycle results keep the table coherent; drained above
@@ -302,8 +326,13 @@ impl InboundLoop {
                 }
                 // We admit more load only when we're done with everything important,
                 // and only as fast as the global handshake token bucket allows.
-                maybe_incoming = self.endpoint.accept(), if !gate_armed => {
+                Some((maybe_incoming, i)) = accepts.next(), if !gate_armed => {
                     let Some(incoming) = maybe_incoming else { break };
+                    // Keep pulling from the endpoint that just produced a connection.
+                    accepts.push(Box::pin(EndpointAccept {
+                        accept: endpoints[i].accept(),
+                        endpoint: i,
+                    }));
                     let ip = incoming.remote_address().ip();
                     if !ip.is_loopback() && self.handshake_global_limiter.consume_tokens(1).is_err() {
                         add(&self.stats.handshake_rejected_global_limit);
@@ -330,10 +359,12 @@ impl InboundLoop {
 
     /// Rebuild the server TLS config against the new identity, swap it into the
     /// quinn endpoint, and evict the inbound table so peers re-handshake.
-    fn apply_identity_change(&mut self, snap: Arc<IdentitySnapshot>) {
+    fn apply_identity_change(&mut self, snap: Arc<IdentitySnapshot>, endpoints: &[Endpoint]) {
         let server_config =
             new_server_config(snap.cert.clone(), snap.key.clone_key(), ALPENGLOW_ALPN);
-        self.endpoint.set_server_config(Some(server_config));
+        for endpoint in endpoints {
+            endpoint.set_server_config(Some(server_config.clone()));
+        }
         // Bump first so any in-flight accept that completes after this point is
         // dropped at the event boundary (its event carries the old generation).
         self.generation = self.generation.wrapping_add(1);
@@ -434,6 +465,28 @@ impl InboundLoop {
             self.events_tx.clone(),
             self.stats.clone(),
         ));
+    }
+}
+
+/// Future that polls a single endpoint's [`Accept`] while remembering which
+/// endpoint it belongs to, so the control loop can re-arm the right one. Lets a
+/// [`FuturesUnordered`] accept across all endpoints concurrently (mirrors the
+/// TPU streamer's multi-endpoint accept wiring).
+struct EndpointAccept<'a> {
+    accept: Accept<'a>,
+    endpoint: usize,
+}
+
+impl Future for EndpointAccept<'_> {
+    type Output = (Option<Incoming>, usize);
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+        let i = self.endpoint;
+        // Safety: `self` is pinned and `accept` is a field, so it cannot be
+        // moved out. See the safety docs of `map_unchecked_mut`.
+        unsafe { self.map_unchecked_mut(|this| &mut this.accept) }
+            .poll(cx)
+            .map(|r| (r, i))
     }
 }
 

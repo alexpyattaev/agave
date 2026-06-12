@@ -2349,8 +2349,10 @@ pub struct Sockets {
     pub tpu_vote_forwarding_client: UdpSocket, // udp write only
     /// Client-side socket for ForwardingStage non-vote transactions
     pub tpu_transaction_forwarding_clients: Box<[UdpSocket]>, // quic write only
-    /// Socket for alpenglow consensus logic
-    pub alpenglow: UdpSocket, // quic read/write
+    /// Sockets for alpenglow consensus logic. Several sockets are bound to the
+    /// same address (`SO_REUSEPORT`) so the quic-datagram endpoint can run one
+    /// quinn driver per socket and pull packets concurrently.
+    pub alpenglow: Vec<UdpSocket>, // quic read/write
     /// Connection cache endpoint for QUIC-based Vote
     pub quic_vote_client: UdpSocket, // quic write only
     /// Client-side socket for RPC/SendTransactionService.
@@ -2893,7 +2895,7 @@ mod tests {
 
     fn check_node_sockets(node: &Node, ip: IpAddr, range: (u16, u16)) {
         check_socket(&node.sockets.repair, ip, range);
-        check_socket(&node.sockets.alpenglow, ip, range);
+        check_sockets(&node.sockets.alpenglow, ip, range);
         check_sockets(&node.sockets.gossip, ip, range);
         check_sockets(&node.sockets.tvu, ip, range);
         check_sockets(&node.sockets.tpu_quic, ip, range);

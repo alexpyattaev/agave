@@ -68,39 +68,56 @@ pub struct QuicDatagramEndpoint {
 }
 
 impl QuicDatagramEndpoint {
-    /// Construct a datagram-only QUIC endpoint bound to `socket`. Spawns the
-    /// unified control loop on `runtime`. Received datagrams flow into
-    /// `ingress` via `try_send`; full ingress channel results in a drop
-    /// (counted in `datagram_ingress_dropped_channel_full`).
+    /// Construct a datagram-only QUIC endpoint backed by one or more
+    /// `sockets`. Spawns the unified control loop on `runtime`. Received
+    /// datagrams flow into `ingress` via `try_send`; full ingress channel
+    /// results in a drop (counted in `datagram_ingress_dropped_channel_full`).
+    ///
+    /// Passing several sockets bound to the same address (`SO_REUSEPORT`)
+    /// stands up one quinn [`Endpoint`] per socket, mirroring the multi-endpoint
+    /// wiring of the TPU streamer: each endpoint runs its own driver task, so
+    /// several quinn workers pull packets from the kernel socket buffers
+    /// concurrently. The kernel load-balances inbound flows across the sockets;
+    /// outbound dials are spread round-robin across the endpoints.
     ///
     /// `allowlist` is consulted once per new connection in either direction.
     /// `banlist` is consulted on every send and at handshake.
     pub fn new(
         runtime: &Handle,
         keypair: &Keypair,
-        socket: UdpSocket,
+        sockets: Vec<UdpSocket>,
         ingress: Sender<Datagram>,
         allowlist: Arc<dyn Allowlist>,
         banlist: Arc<Banlist<Pubkey>>,
     ) -> Result<Self, Error> {
+        assert!(
+            !sockets.is_empty(),
+            "QuicDatagramEndpoint requires at least one socket"
+        );
         let local_pubkey = keypair.pubkey();
         let (cert, key) = new_dummy_x509_certificate(keypair);
         let server_config = new_server_config(cert.clone(), key.clone_key(), ALPENGLOW_ALPN);
         let client_config = new_client_config(cert, key, ALPENGLOW_ALPN);
 
-        let mut endpoint = {
+        let endpoints: Vec<Endpoint> = {
             // Endpoint::new requires being inside the runtime context, else it
             // panics on its first internal `tokio::spawn`.
             let _guard = runtime.enter();
-            Endpoint::new(
-                EndpointConfig::default(),
-                Some(server_config),
-                socket,
-                Arc::new(TokioRuntime),
-            )
-            .map_err(Error::Endpoint)?
+            sockets
+                .into_iter()
+                .map(|socket| {
+                    let mut endpoint = Endpoint::new(
+                        EndpointConfig::default(),
+                        Some(server_config.clone()),
+                        socket,
+                        Arc::new(TokioRuntime),
+                    )
+                    .map_err(Error::Endpoint)?;
+                    endpoint.set_default_client_config(client_config.clone());
+                    Ok(endpoint)
+                })
+                .collect::<Result<_, Error>>()?
         };
-        endpoint.set_default_client_config(client_config);
 
         // Independent stats instances: each loop owns one and reports it under
         // its own datapoint, so the two directions share no atomics.
@@ -122,7 +139,8 @@ impl QuicDatagramEndpoint {
         );
 
         let outbound = OutboundLoop {
-            endpoint: endpoint.clone(),
+            endpoints: endpoints.clone(),
+            next_endpoint: 0,
             local_pubkey,
             generation: 0,
             egress_rx,
@@ -136,7 +154,7 @@ impl QuicDatagramEndpoint {
         };
         runtime.spawn(outbound.run());
         let inbound = InboundLoop {
-            endpoint: endpoint.clone(),
+            endpoints,
             generation: 0,
             ingress,
             banlist,

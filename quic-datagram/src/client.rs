@@ -112,7 +112,11 @@ impl ClientConnection {
 /// Outbound control loop: client egress (we-dial, send-only). Owns the outgoing
 /// table and the dial-task event channel.
 pub(crate) struct OutboundLoop {
-    pub(crate) endpoint: Endpoint,
+    /// One quinn endpoint per backing socket. Dials are spread round-robin
+    /// across them so several socket drivers share the egress load.
+    pub(crate) endpoints: Vec<Endpoint>,
+    /// Round-robin cursor into `endpoints`, advanced once per dial.
+    pub(crate) next_endpoint: usize,
     pub(crate) local_pubkey: Pubkey,
     /// Identity-rotation counter, local to this loop.
     pub(crate) generation: u64,
@@ -130,6 +134,14 @@ pub(crate) struct OutboundLoop {
 }
 
 impl OutboundLoop {
+    /// Pick the endpoint to dial the next outbound connection on, advancing the
+    /// round-robin cursor. Spreads dials across all backing sockets.
+    fn next_dial_endpoint(&mut self) -> Endpoint {
+        let endpoint = self.endpoints[self.next_endpoint].clone();
+        self.next_endpoint = (self.next_endpoint + 1) % self.endpoints.len();
+        endpoint
+    }
+
     /// Outbound packet dispatch. Returns `true` if the
     /// caller must spawn a dial task.
     ///
@@ -263,7 +275,9 @@ impl OutboundLoop {
         let client_config =
             new_client_config(snap.cert.clone(), snap.key.clone_key(), ALPENGLOW_ALPN);
         self.local_pubkey = snap.pubkey;
-        self.endpoint.set_default_client_config(client_config);
+        for endpoint in &mut self.endpoints {
+            endpoint.set_default_client_config(client_config.clone());
+        }
         // Bump first so any in-flight dial that completes after this point is
         // dropped at the event boundary (its event carries the old generation).
         self.generation = self.generation.wrapping_add(1);
@@ -300,9 +314,10 @@ impl OutboundLoop {
             return;
         }
 
+        let endpoint = self.next_dial_endpoint();
         spawn(
             ClientConnection {
-                endpoint: self.endpoint.clone(),
+                endpoint,
                 peer,
                 addr,
                 generation: self.generation,
