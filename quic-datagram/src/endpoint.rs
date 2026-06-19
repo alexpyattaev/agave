@@ -1,7 +1,7 @@
 //! QUIC datagram endpoint
 use {
     crate::{
-        ALPENGLOW_ALPN, EGRESS_CHANNEL_CAP,
+        ALPENGLOW_ALPN, MAX_ALPENGLOW_VOTE_ACCOUNTS,
         allowlist::Allowlist,
         client::OutboundLoop,
         error::Error,
@@ -100,7 +100,17 @@ impl QuicDatagramEndpoint {
         // its own datapoint, so the two directions share no atomics.
         let client_stats = Arc::default();
         let server_stats: Arc<QuicDatagramStats> = Arc::default();
-        let (egress_tx, egress_rx) = mpsc::channel(EGRESS_CHANNEL_CAP);
+        // The egress buffer must absorb an entire standstill-refresh broadcast
+        // (and a concurrent fresh-vote broadcast) without dropping: the voting
+        // thread fans a full second's worth of messages out to every peer in a
+        // synchronous burst, while the outbound loop drains them one datagram at
+        // a time. Size it to one second of the admissible per-peer send rate
+        // across the full peer set, with a floor of one full single-message
+        // broadcast.
+        let egress_cap = (max_datagrams_per_second_per_peer.ceil() as usize)
+            .saturating_mul(MAX_ALPENGLOW_VOTE_ACCOUNTS)
+            .max(MAX_ALPENGLOW_VOTE_ACCOUNTS);
+        let (egress_tx, egress_rx) = mpsc::channel(egress_cap);
         let shutdown = CancellationToken::new();
         let (id_tx, identity_rx) = watch::channel(None);
         let key_updater = Arc::new(KeyUpdater { tx: id_tx });

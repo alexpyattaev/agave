@@ -9,7 +9,7 @@ use {
         close_codes,
         endpoint::Datagram,
         error::Error,
-        stats::{self, QuicDatagramStats, add, record_error},
+        stats::{self, QuicDatagramStats, record_error},
         transport::{IdentitySnapshot, new_server_config},
     },
     arrayvec::ArrayVec,
@@ -389,10 +389,13 @@ impl InboundLoop {
             // tombstone so the depleted rate limiter persists on reconnect.
             InboundEvent::FloodDetected { peer } => {
                 if let Some(entry) = self.peer_state.get_mut(&peer) {
+                    let closed = entry.connections.len() as u64;
                     for connection in entry.connections.drain(..) {
                         close_codes::BANNED.close(&connection);
                     }
-                    add(&self.stats.connection_lost);
+                    self.stats
+                        .connection_lost
+                        .fetch_add(closed, Ordering::Relaxed);
                 }
             }
         }

@@ -342,8 +342,11 @@ impl OutboundLoop {
                         .record_connection_count(self.peer_state.len() as u64);
                 }
                 _ => {
+                    // Dial succeeded but the slot is no longer waiting for it
+                    // (peer LRU-evicted mid-dial, or a newer dial already
+                    // installed a connection). The connection is redundant;
+                    // close it. This is vanishingly rare and not worth a metric.
                     close_codes::IDENTITY_ROTATED.close(&connection);
-                    record_error(&Error::IdentityRotated(peer), &self.stats);
                 }
             },
             Err(()) => {
