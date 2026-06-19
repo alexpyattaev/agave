@@ -55,6 +55,10 @@ const STANDSTILL_REFRESH_BATCH_SIZE: usize = VOTOR_RATE_LIMIT_PPS as usize - NEW
 /// How often we should refresh messages from the standstill queue
 const STANDSTILL_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 
+/// How often the inbound admission allowlist is refreshed from the current
+/// epoch's staked set.
+const ALLOWLIST_REFRESH_INTERVAL: Duration = Duration::from_secs(STAKED_VALIDATORS_CACHE_TTL_S);
+
 #[derive(Debug)]
 pub enum BLSOp {
     PushVote {
@@ -235,7 +239,15 @@ impl VotingService {
                 );
 
                 info!("AlpenglowVotingService has started");
+                // Populate the allowlist immediately so inbound admission works
+                // from startup, then refresh it on the heartbeat below.
+                staked_validators_cache.refresh_allowlist();
+                let mut last_allowlist_refresh = Instant::now();
                 loop {
+                    if last_allowlist_refresh.elapsed() >= ALLOWLIST_REFRESH_INTERVAL {
+                        staked_validators_cache.refresh_allowlist();
+                        last_allowlist_refresh = Instant::now();
+                    }
                     Self::maybe_handle_standstill_queue(
                         &mut standstill_queue,
                         highest_finalized.as_ref(),

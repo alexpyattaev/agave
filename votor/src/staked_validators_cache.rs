@@ -15,6 +15,11 @@ use {
     },
 };
 
+/// Slots on either side of an epoch boundary during which the adjacent epoch's
+/// staked set is merged into the inbound allowlist, so peers transitioning
+/// across the boundary are not transiently rejected.
+const EPOCH_BOUNDARY_SLOTS: u64 = 100;
+
 struct StakedValidatorsCacheEntry {
     /// (Pubkey, Alpenglow socket) pairs for the staked validators. The pubkey
     /// is the validator's node identity (same one signing TLS certs on the
@@ -76,13 +81,76 @@ impl StakedValidatorsCache {
         }
     }
 
-    /// Republish the allowlist consumed by the votor datagram endpoint: the
-    /// pubkey-to-stake map for currently staked peers.
-    fn refresh_allowlist(&mut self, epoch_staked_nodes: Arc<HashMap<Pubkey, u64>>) {
+    /// Lookup an epoch's staked node set. `None` if neither the root
+    /// nor working bank knows this epoch.
+    fn epoch_staked_nodes_raw(&self, epoch: Epoch) -> Option<Arc<HashMap<Pubkey, u64>>> {
+        let banks = [self.sharable_banks.root(), self.sharable_banks.working()];
+        banks.iter().find_map(|bank| bank.epoch_staked_nodes(epoch))
+    }
+
+    /// Clone an epoch's staked node set, falling back to an empty set
+    /// if the epoch is unknown.
+    fn epoch_staked_nodes_cloned(&self, epoch: Epoch) -> HashMap<Pubkey, u64> {
+        self.epoch_staked_nodes_raw(epoch)
+            .map(|nodes| (*nodes).clone())
+            .unwrap_or_else(|| {
+                error!(
+                    "StakedValidatorsCache: unknown Bank::epoch_staked_nodes for epoch: {epoch}"
+                );
+                HashMap::default()
+            })
+    }
+
+    /// Inject the test-only override pubkeys into `map` (dev builds only).
+    /// Overrides are not epoch-specific, so this applies uniformly
+    /// to whatever staked set was assembled. Entries carry a stake of 1,
+    /// they exist only to exercise the network stack in tests.
+    #[cfg_attr(
+        not(feature = "dev-context-only-utils"),
+        allow(unused_variables, clippy::unused_self)
+    )]
+    fn inject_overrides(&self, map: &mut HashMap<Pubkey, u64>) {
+        #[cfg(feature = "dev-context-only-utils")]
+        for (pk, _) in self.test_overrides.load().iter() {
+            map.entry(*pk).or_insert(1);
+        }
+    }
+
+    /// Publish the inbound admission allowlist for QUIC endpoint.
+    /// This is driven on the voting-service heartbeat so it stays fresh.
+    ///
+    /// Near an epoch boundary (within [`EPOCH_BOUNDARY_SLOTS`] on either side)
+    /// the adjacent epoch's staked set is merged in so peers transitioning
+    /// across the boundary are not transiently rejected.
+    pub fn refresh_allowlist(&self) {
         let Some(allowlist) = self.allowlist.as_ref() else {
             return;
         };
-        allowlist.swap(epoch_staked_nodes);
+        let working = self.sharable_banks.working();
+        let epoch_schedule = working.epoch_schedule();
+        let (epoch, slot_index) = epoch_schedule.get_epoch_and_slot_index(working.slot());
+        let slots_in_epoch = epoch_schedule.get_slots_in_epoch(epoch);
+
+        let near_start = slot_index < EPOCH_BOUNDARY_SLOTS;
+        let near_end = slot_index >= slots_in_epoch.saturating_sub(EPOCH_BOUNDARY_SLOTS);
+
+        let mut staked = self.epoch_staked_nodes_cloned(epoch);
+        if near_start && epoch > 0 {
+            if let Some(prev) = self.epoch_staked_nodes_raw(epoch.saturating_sub(1)) {
+                for (pubkey, stake) in prev.iter() {
+                    staked.entry(*pubkey).or_insert(*stake);
+                }
+            }
+        }
+        if near_end {
+            if let Some(next) = self.epoch_staked_nodes_raw(epoch.saturating_add(1)) {
+                for (pubkey, stake) in next.iter() {
+                    staked.entry(*pubkey).or_insert(*stake);
+                }
+            }
+        }
+        self.inject_overrides(&mut staked);
+        allowlist.swap(Arc::new(staked));
     }
 
     #[inline]
@@ -99,32 +167,8 @@ impl StakedValidatorsCache {
         cluster_info: &ClusterInfo,
         update_time: Instant,
     ) {
-        // Drive the allowlist refresh from here — same cadence, same Bank
-        // reads, and `cluster_info` is in hand for gossip IP resolution.
-
-        let banks = [self.sharable_banks.root(), self.sharable_banks.working()];
-
-        let epoch_staked_nodes = banks
-            .iter()
-            .find_map(|bank| bank.epoch_staked_nodes(epoch))
-            .unwrap_or_else(|| {
-                error!(
-                    "StakedValidatorsCache::get: unknown Bank::epoch_staked_nodes for epoch: \
-                     {epoch}"
-                );
-                Arc::<HashMap<Pubkey, u64>>::default()
-            });
-
-        #[cfg(feature = "dev-context-only-utils")]
-        let epoch_staked_nodes = {
-            let mut map = Arc::unwrap_or_clone(epoch_staked_nodes);
-            // override entries carry stake of 1 lamport - they are only for tests of network stack
-            for (pk, _) in self.test_overrides.load().iter() {
-                map.entry(*pk).or_insert(1);
-            }
-            Arc::new(map)
-        };
-        self.refresh_allowlist(epoch_staked_nodes.clone());
+        let mut epoch_staked_nodes = self.epoch_staked_nodes_cloned(epoch);
+        self.inject_overrides(&mut epoch_staked_nodes);
 
         struct Node {
             pubkey: Pubkey,
