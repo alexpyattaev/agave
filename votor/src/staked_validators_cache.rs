@@ -77,7 +77,7 @@ impl StakedValidatorsCache {
     }
 
     /// Republish the allowlist consumed by the votor datagram endpoint: the
-    /// pubkey map plus the gossip-advertised alpenglow IPs of those peers.
+    /// pubkey-to-stake map for currently staked peers.
     fn refresh_allowlist(&mut self, epoch_staked_nodes: Arc<HashMap<Pubkey, u64>>) {
         let Some(allowlist) = self.allowlist.as_ref() else {
             return;
