@@ -44,6 +44,13 @@ pub(crate) mod close_codes {
         reason: b"TABLE_FULL",
     };
 
+    /// Peer exhausted its flood-control budget. Not a ban: the rate-limiter
+    /// tombstone persists, so a reconnecting flooder is throttled again quickly.
+    pub(crate) const FLOODING: Spec = Spec {
+        code: VarInt::from_u32(6),
+        reason: b"FLOODING",
+    };
+
     pub(crate) const IDENTITY_ROTATED: Spec = Spec {
         code: VarInt::from_u32(11),
         reason: b"IDENTITY_ROTATED",

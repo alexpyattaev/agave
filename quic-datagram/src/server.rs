@@ -404,7 +404,7 @@ impl InboundLoop {
                 if let Some(entry) = self.peer_state.get_mut(&peer) {
                     let closed = entry.connections.len() as u64;
                     for connection in entry.connections.drain(..) {
-                        close_codes::BANNED.close(&connection);
+                        close_codes::FLOODING.close(&connection);
                     }
                     self.stats
                         .connection_lost
