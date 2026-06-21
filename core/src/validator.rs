@@ -1242,9 +1242,18 @@ impl Validator {
                 };
                 let (ingress_tx, votor_ingress) = bounded(crate::tvu::MAX_ALPENGLOW_PACKET_NUM);
                 let votor_banlist = Arc::new(Banlist::default());
-                // Allowlist for votor is populated by the StakedValidatorsCache refresh, so
-                // we can initialize it empty here.
+                // Seed the allowlist from the last rooted bank so inbound votor
+                // connections from staked peers are admitted during ledger
+                // replay and wait_for_supermajority.
                 let votor_allowlist = Arc::new(StakedNodesAllowlist::new(HashMap::new()));
+                {
+                    let root_bank = bank_forks.read().unwrap().root_bank();
+                    if let Some(epoch_staked_nodes) =
+                        root_bank.epoch_staked_nodes(root_bank.epoch())
+                    {
+                        votor_allowlist.swap(epoch_staked_nodes);
+                    }
+                }
                 let endpoint = QuicDatagramEndpoint::new(
                     &votor_rt_handle,
                     &identity_keypair,
