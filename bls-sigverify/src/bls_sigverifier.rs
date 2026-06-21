@@ -336,7 +336,10 @@ fn recv_batches(
             }
         },
     };
-    let mut batches = Vec::with_capacity(soft_receive_cap);
+    // Size to what is actually queued (plus the batch we just took) rather than
+    // always reserving the full cap: the channel is usually far from full.
+    let capacity = receiver.len().saturating_add(1).min(soft_receive_cap);
+    let mut batches = Vec::with_capacity(capacity);
     batches.push(batch);
     while batches.len() < soft_receive_cap {
         match receiver.try_recv() {
