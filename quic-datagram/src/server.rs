@@ -94,107 +94,120 @@ impl ServerConnection {
     }
 }
 
-/// Drive the per-connection read loop for an incoming connection.
-/// Returns when the connection closes. On exit it reliably reports
-/// [`InboundEvent::Closed`] so the control loop can reap the table entry.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn read_datagram_loop(
-    connection: Connection,
-    peer: Pubkey,
-    remote_addr: SocketAddr,
-    generation: u64,
-    ingress: Sender<Datagram>,
-    allowlist: Arc<dyn Allowlist>,
-    banlist: Arc<Banlist<Pubkey>>,
-    rate_limiter: Arc<TokenBucket>,
-    events: mpsc::Sender<InboundEvent>,
-    stats: Arc<QuicDatagramStats>,
-) {
-    let stable_id = connection.stable_id();
-    // Use the same bucket to be reused for both shaping and flood control
-    const RATE_LIMIT_WATERMARK: u64 = PEER_RATE_LIMIT_BURST_DOS - PEER_RATE_LIMIT_BURST;
-    let mut allowlist_check = interval(ALLOWLIST_CHECK_INTERVAL);
-    allowlist_check.tick().await; // skip the immediate first fire
-    loop {
-        tokio::select! {
-            result = connection.read_datagram() => {
-                match result {
-                    Ok(bytes) => {
-                        // Banlist check happens AFTER the read so a ban that
-                        // lands while we're awaiting can't let a follow-up
-                        // datagram leak through to ingress.
-                        if banlist.is_banned(&peer) {
-                            close_codes::BANNED.close(&connection);
+/// Per-connection read loop for an accepted inbound connection.
+pub(crate) struct ConnectionReader {
+    pub(crate) connection: Connection,
+    pub(crate) peer: Pubkey,
+    pub(crate) remote_addr: SocketAddr,
+    pub(crate) generation: u64,
+    pub(crate) ingress: Sender<Datagram>,
+    pub(crate) allowlist: Arc<dyn Allowlist>,
+    pub(crate) banlist: Arc<Banlist<Pubkey>>,
+    pub(crate) rate_limiter: Arc<TokenBucket>,
+    pub(crate) events: mpsc::Sender<InboundEvent>,
+    pub(crate) stats: Arc<QuicDatagramStats>,
+}
+
+impl ConnectionReader {
+    async fn run(self) {
+        let Self {
+            connection,
+            peer,
+            remote_addr,
+            generation,
+            ingress,
+            allowlist,
+            banlist,
+            rate_limiter,
+            events,
+            stats,
+        } = self;
+        let stable_id = connection.stable_id();
+        // Use the same bucket to be reused for both shaping and flood control
+        const RATE_LIMIT_WATERMARK: u64 = PEER_RATE_LIMIT_BURST_DOS - PEER_RATE_LIMIT_BURST;
+        let mut allowlist_check = interval(ALLOWLIST_CHECK_INTERVAL);
+        allowlist_check.tick().await; // skip the immediate first fire
+        loop {
+            tokio::select! {
+                result = connection.read_datagram() => {
+                    match result {
+                        Ok(bytes) => {
+                            // Banlist check happens AFTER the read so a ban that
+                            // lands while we're awaiting can't let a follow-up
+                            // datagram leak through to ingress.
+                            if banlist.is_banned(&peer) {
+                                close_codes::BANNED.close(&connection);
+                                break;
+                            }
+                            match rate_limiter.consume_tokens(1) {
+                                // normal operation
+                                Ok(remaining) if remaining > RATE_LIMIT_WATERMARK => {}
+                                // drop excess packets if peer exceeds normal rate
+                                Ok(_) => {
+                                    drop(bytes);
+                                    stats.datagram_rate_limited.fetch_add(1, Ordering::Relaxed);
+                                    continue;
+                                }
+                                // peer drained bucket dry - kick them
+                                Err(_) => {
+                                    drop(bytes);
+                                    let _ = events
+                                        .send(InboundEvent::FloodDetected { peer })
+                                        .await;
+                                    break;
+                                }
+                            }
+
+                            match ingress.try_send(Datagram {
+                                peer_pubkey: peer,
+                                peer_address: remote_addr,
+                                message: bytes,
+                            }) {
+                                Ok(()) => {
+                                    stats.datagrams_received.fetch_add(1, Ordering::Relaxed);
+                                }
+                                Err(TrySendError::Full(_)) => {
+                                    stats
+                                        .datagram_ingress_dropped_channel_full
+                                        .fetch_add(1, Ordering::Relaxed);
+                                }
+                                Err(TrySendError::Disconnected(_)) => {
+                                    debug!("ingress disconnected; reader for {peer} exiting");
+                                    break;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            // The peer (or we) closed this inbound, or it timed
+                            // out. Record and exit; the control loop reaps the
+                            // table slot from the `Closed` event below.
+                            record_error(&Error::from(e), &stats);
                             break;
                         }
-                        match rate_limiter.consume_tokens(1) {
-                            // normal operation
-                            Ok(remaining) if remaining > RATE_LIMIT_WATERMARK => {}
-                            // drop excess packets if peer exceeds normal rate
-                            Ok(_) => {
-                                drop(bytes);
-                                stats.datagram_rate_limited.fetch_add(1, Ordering::Relaxed);
-                                continue;
-                            }
-                            // peer drained bucket dry - kick them
-                            Err(_) => {
-                                drop(bytes);
-                                let _ = events
-                                    .send(InboundEvent::FloodDetected { peer })
-                                    .await;
-                                break;
-                            }
-                        }
-
-                        match ingress.try_send(Datagram {
-                            peer_pubkey: peer,
-                            peer_address: remote_addr,
-                            message: bytes,
-                        }) {
-                            Ok(()) => {
-                                stats.datagrams_received.fetch_add(1, Ordering::Relaxed);
-                            }
-                            Err(TrySendError::Full(_)) => {
-                                stats
-                                    .datagram_ingress_dropped_channel_full
-                                    .fetch_add(1, Ordering::Relaxed);
-                            }
-                            Err(TrySendError::Disconnected(_)) => {
-                                debug!("ingress disconnected; reader for {peer} exiting");
-                                break;
-                            }
-                        }
                     }
-                    Err(e) => {
-                        // The peer (or we) closed this inbound, or it timed
-                        // out. Record and exit; the control loop reaps the
-                        // table slot from the `Closed` event below.
-                        record_error(&Error::from(e), &stats);
+                }
+                _ = allowlist_check.tick() => {
+                    if !allowlist.allow(&peer) {
+                        close_codes::NOT_ADMITTED.close(&connection);
+                        stats.connection_evicted_allowlist.fetch_add(1, Ordering::Relaxed);
+                        break;
+                    }
+                    if banlist.is_banned(&peer) {
+                        close_codes::BANNED.close(&connection);
                         break;
                     }
                 }
             }
-            _ = allowlist_check.tick() => {
-                if !allowlist.allow(&peer) {
-                    close_codes::NOT_ADMITTED.close(&connection);
-                    stats.connection_evicted_allowlist.fetch_add(1, Ordering::Relaxed);
-                    break;
-                }
-                if banlist.is_banned(&peer) {
-                    close_codes::BANNED.close(&connection);
-                    break;
-                }
-            }
         }
+        // Send the notification to control that this connection died.
+        let _ = events
+            .send(InboundEvent::Closed {
+                peer,
+                generation,
+                stable_id,
+            })
+            .await;
     }
-    // Send the notification to control that this connection died.
-    let _ = events
-        .send(InboundEvent::Closed {
-            peer,
-            generation,
-            stable_id,
-        })
-        .await;
 }
 
 /// Inbound control loop: we-accept, receive-only.
@@ -468,17 +481,20 @@ impl InboundLoop {
         self.stats.record_connection_count(self.connection_count());
         // The read loop reports [`InboundEvent::Closed`] when it exits so this
         // loop can reap the table slot.
-        spawn(read_datagram_loop(
-            connection,
-            peer,
-            remote_addr,
-            self.generation,
-            self.ingress.clone(),
-            self.allowlist.clone(),
-            self.banlist.clone(),
-            rate_limiter,
-            self.events_tx.clone(),
-            self.stats.clone(),
-        ));
+        spawn(
+            ConnectionReader {
+                connection,
+                peer,
+                remote_addr,
+                generation: self.generation,
+                ingress: self.ingress.clone(),
+                allowlist: self.allowlist.clone(),
+                banlist: self.banlist.clone(),
+                rate_limiter,
+                events: self.events_tx.clone(),
+                stats: self.stats.clone(),
+            }
+            .run(),
+        );
     }
 }
