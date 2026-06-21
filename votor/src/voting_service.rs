@@ -568,7 +568,7 @@ mod tests {
         let addr = socket.local_addr().expect("local addr");
         let (ingress_tx, ingress_rx) = bounded(4096);
         let banlist = Arc::new(Banlist::<Pubkey>::default());
-        let endpoint = QuicDatagramEndpoint::new(
+        let endpoint = QuicDatagramEndpoint::spawn(
             rt.handle(),
             &keypair,
             socket,
@@ -577,7 +577,7 @@ mod tests {
             banlist,
             VOTOR_RATE_LIMIT_PPS as f64,
         )
-        .expect("QuicDatagramEndpoint::new");
+        .expect("QuicDatagramEndpoint::spawn");
         (endpoint, ingress_rx, addr, rt)
     }
 

@@ -603,7 +603,7 @@ pub fn start_datagram_listener_for_alpenglow_votor(
         .expect("tokio runtime");
     let (sender, receiver) = bounded(1024);
     let banlist = Arc::new(Banlist::<Pubkey>::default());
-    let endpoint = QuicDatagramEndpoint::new(
+    let endpoint = QuicDatagramEndpoint::spawn(
         rt.handle(),
         &listener_keypair,
         vote_listener_socket,

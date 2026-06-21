@@ -1254,7 +1254,7 @@ impl Validator {
                         votor_allowlist.swap(epoch_staked_nodes);
                     }
                 }
-                let endpoint = QuicDatagramEndpoint::new(
+                let endpoint = QuicDatagramEndpoint::spawn(
                     &votor_rt_handle,
                     &identity_keypair,
                     node.sockets.alpenglow,

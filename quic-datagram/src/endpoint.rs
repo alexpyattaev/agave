@@ -63,12 +63,13 @@ pub struct QuicDatagramEndpoint {
 
 impl QuicDatagramEndpoint {
     /// Construct a datagram-only QUIC endpoint bound to `socket`. Spawns the
-    /// unified control loop on `runtime`. Received datagrams flow into
+    /// inbound and outbound loops on `runtime`; dropping the handle (or calling
+    /// [`close`](Self::close)) cancels them. Received datagrams flow into
     /// `ingress` via `try_send`; full ingress channel results in a drop
     /// (counted in `datagram_ingress_dropped_channel_full`).
     ///
     /// `allowlist` and `banlist` define admission policy.
-    pub fn new(
+    pub fn spawn(
         runtime: &Handle,
         keypair: &Keypair,
         socket: UdpSocket,
@@ -147,6 +148,13 @@ impl QuicDatagramEndpoint {
 
     /// Initiate endpoint shutdown.
     pub fn close(&self) {
+        self.shutdown.cancel();
+    }
+}
+
+impl Drop for QuicDatagramEndpoint {
+    /// Cancel the spawned loops so a dropped handle can't leak them.
+    fn drop(&mut self) {
         self.shutdown.cancel();
     }
 }
