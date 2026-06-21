@@ -172,6 +172,16 @@ impl Default for TvuConfig {
 }
 
 /// Shared state from validator necessary to instantiate votor and related services
+/// Votor QUIC datagram transport handles, threaded together from the endpoint
+/// setup in `validator.rs` down to the sigverify (`ingress`/`banlist`) and
+/// voting (`egress`/`allowlist`) sides.
+pub struct VotorDatagramHandles {
+    pub egress: TokioSender<Datagram>,
+    pub ingress: Receiver<Datagram>,
+    pub banlist: Arc<Banlist<Pubkey>>,
+    pub allowlist: Arc<StakedNodesAllowlist>,
+}
+
 pub struct AlpenglowInitializationState {
     // Shared with block creation loop
     pub leader_window_info_sender: Sender<LeaderWindowInfo>,
@@ -190,11 +200,7 @@ pub struct AlpenglowInitializationState {
     pub key_notifiers: Arc<RwLock<KeyUpdaters>>,
 
     pub alpenglow_allowed: bool,
-    // Votor QUIC datagram transport handles.
-    pub votor_egress: TokioSender<Datagram>,
-    pub votor_ingress: Receiver<Datagram>,
-    pub votor_banlist: Arc<Banlist<Pubkey>>,
-    pub votor_allowlist: Arc<StakedNodesAllowlist>,
+    pub votor_datagram: VotorDatagramHandles,
     #[cfg(feature = "dev-context-only-utils")]
     pub voting_service_test_override: Option<agave_votor::voting_service::VotingServiceOverride>,
 }
@@ -275,14 +281,17 @@ impl Tvu {
             votor_event_receiver,
             key_notifiers: _key_notifiers, // registered in validator.rs at endpoint creation
             alpenglow_allowed,
-            votor_egress,
-            votor_ingress,
-            votor_banlist,
-            votor_allowlist,
+            votor_datagram,
             #[cfg(feature = "dev-context-only-utils")]
             voting_service_test_override,
             highest_finalized,
         } = votor_init;
+        let VotorDatagramHandles {
+            egress: votor_egress,
+            ingress: votor_ingress,
+            banlist: votor_banlist,
+            allowlist: votor_allowlist,
+        } = votor_datagram;
 
         // streamer and sigverify for A2A BLS messages
         let (consensus_message_sender, consensus_message_receiver) =
@@ -869,10 +878,12 @@ pub mod tests {
                 votor_event_receiver,
                 key_notifiers,
                 alpenglow_allowed: false,
-                votor_egress,
-                votor_ingress,
-                votor_banlist,
-                votor_allowlist: Arc::new(StakedNodesAllowlist::new(HashMap::new())),
+                votor_datagram: VotorDatagramHandles {
+                    egress: votor_egress,
+                    ingress: votor_ingress,
+                    banlist: votor_banlist,
+                    allowlist: Arc::new(StakedNodesAllowlist::new(HashMap::new())),
+                },
                 voting_service_test_override: None,
                 highest_finalized: Arc::new(RwLock::new(None)),
                 bank_forks_controller,
