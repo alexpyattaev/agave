@@ -25,11 +25,12 @@ use {
         collections::{HashMap, hash_map::Entry},
         net::SocketAddr,
         sync::{Arc, atomic::Ordering},
+        time::Duration,
     },
     tokio::{
         spawn,
         sync::{mpsc, watch},
-        time::{MissedTickBehavior, interval, timeout},
+        time::{Instant, MissedTickBehavior, interval, sleep, timeout},
     },
     tokio_util::sync::CancellationToken,
 };
@@ -93,11 +94,13 @@ impl AcceptLoop {
     }
 
     pub(crate) async fn run(mut self) {
-        // Global admission limiter on how fast we *start* handshakes. Bounds the
-        // rate of handshake crypto across all peers; over-rate attempts are shed
-        // (ignored) before any crypto runs.
+        // Paces how fast we *start* handshakes across all peers.
         let handshake_limiter =
             TokenBucket::new(HANDSHAKE_BURST, HANDSHAKE_BURST, HANDSHAKE_GLOBAL_RATE);
+        // Accept gate: while closed the `endpoint.accept()` arm is disabled. The
+        // timer arm re-opens it once the limiter has refilled.
+        let mut accept_gate = Box::pin(sleep(Duration::ZERO));
+        let mut accept_allowed = true;
 
         // Stores all in-flight handshakes for polling
         let mut handshakes = FuturesUnordered::new();
@@ -126,11 +129,18 @@ impl AcceptLoop {
                 Some((generation, outcome)) = handshakes.next(), if !handshakes.is_empty() => {
                     self.process_handshake_result(generation, outcome).await;
                 }
-                // Pull a new connection attempt only while we have handshake
-                // headroom; otherwise the Incoming stays buffered in quinn.
-                maybe_incoming = self.endpoint.accept(), if handshakes.len() < MAX_INFLIGHT_HANDSHAKES => {
+                // Rate gate refilled: resume pulling connection attempts.
+                _ = &mut accept_gate, if !accept_allowed => {
+                    accept_allowed = true;
+                }
+                // Pull a new connection attempt only while the rate gate is open
+                // and we have handshake headroom; otherwise the Incoming stays
+                // buffered in quinn.
+                maybe_incoming = self.endpoint.accept(),
+                    if accept_allowed && handshakes.len() < MAX_INFLIGHT_HANDSHAKES =>
+                {
                     let Some(incoming) = maybe_incoming else { break };
-                    if let Some(connecting) = self.accept_incoming(incoming, &handshake_limiter) {
+                    if let Some(connecting) = self.accept_incoming(incoming) {
                         self.stats.handshakes_started.fetch_add(1, Ordering::Relaxed);
                         // Stamp with the generation at accept time so a handshake
                         // that completes across an identity rotation is rejected.
@@ -138,6 +148,17 @@ impl AcceptLoop {
                         handshakes.push(async move {
                             (generation, timeout(HANDSHAKE_TIMEOUT, connecting).await)
                         });
+                        if handshake_limiter.consume_tokens(1).is_err() {
+                            let wait_us = handshake_limiter.us_to_have_tokens(1).unwrap_or(1000);
+                            let deadline = Instant::now()
+                                .checked_add(Duration::from_micros(wait_us))
+                                .expect("accept-gate deadline should never overflow");
+                            accept_gate.as_mut().reset(deadline);
+                            accept_allowed = false;
+                            self.stats
+                                .handshake_rate_limited
+                                .fetch_add(1, Ordering::Relaxed);
+                        }
                     }
                 }
                 _ = self.shutdown.cancelled() => break,
@@ -159,16 +180,9 @@ impl AcceptLoop {
     /// `None` if the attempt was shed. Sheds are always `ignore()` (silent, no
     /// reply) and never `refuse()`, so a spoofed source address can't make us
     /// reflect a CONNECTION_CLOSE back at a victim.
-    fn accept_incoming(&self, incoming: Incoming, limiter: &TokenBucket) -> Option<Connecting> {
+    fn accept_incoming(&self, incoming: Incoming) -> Option<Connecting> {
         let remote_addr = incoming.remote_address();
         if remote_addr.is_ipv6() || remote_addr.ip().is_multicast() {
-            incoming.ignore();
-            return None;
-        }
-        if limiter.consume_tokens(1).is_err() {
-            self.stats
-                .handshake_rate_limited
-                .fetch_add(1, Ordering::Relaxed);
             incoming.ignore();
             return None;
         }
