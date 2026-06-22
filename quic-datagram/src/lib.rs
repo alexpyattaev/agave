@@ -38,10 +38,20 @@ pub const PEER_RATE_LIMIT_BURST: u64 = 100;
 /// connection is closed.
 pub const PEER_RATE_LIMIT_BURST_DOS: u64 = 1000;
 
+/// Sustained rate at which we start inbound TLS handshakes across all peers
+/// (handshakes/second). Feeds a token bucket consulted before we call
+/// `Incoming::accept()`, so it bounds the rate at which we begin handshake
+/// crypto at all, not how many run at once.
+pub const HANDSHAKE_GLOBAL_RATE: f64 = MAX_ALPENGLOW_VOTE_ACCOUNTS as f64;
+
+/// Burst of inbound handshakes tolerated above [`HANDSHAKE_GLOBAL_RATE`] before
+/// new attempts are shed. Sized to ensure load spikes are smoothed.
+pub(crate) const HANDSHAKE_BURST: u64 = 500;
+
 /// Maximum inbound TLS handshakes allowed in flight at once. Once this many are
 /// pending we stop pulling new attempts off the endpoint until one finishes.
-/// This is the limiter on handshake memory use. The CPU usage of TLS work
-/// is limited since we run all handshakes on one core.
+/// This is the limiter on handshake memory use; the rate at which we *start*
+/// handshakes is smoothed separately by [`HANDSHAKE_GLOBAL_RATE`].
 pub const MAX_INFLIGHT_HANDSHAKES: usize = MAX_ALPENGLOW_VOTE_ACCOUNTS;
 
 /// Hard timeout for inbound handshake. During handshakes connections

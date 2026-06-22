@@ -2,9 +2,10 @@
 
 use {
     crate::{
-        ALLOWLIST_CHECK_INTERVAL, ALPENGLOW_ALPN, BANLIST_PRUNE_INTERVAL, HANDSHAKE_TIMEOUT,
-        MAX_INBOUND_CONNECTIONS_PER_PEER, MAX_INFLIGHT_HANDSHAKES, METRICS_INTERVAL,
-        PEER_RATE_LIMIT_BURST, PEER_RATE_LIMIT_BURST_DOS,
+        ALLOWLIST_CHECK_INTERVAL, ALPENGLOW_ALPN, BANLIST_PRUNE_INTERVAL, HANDSHAKE_BURST,
+        HANDSHAKE_GLOBAL_RATE, HANDSHAKE_TIMEOUT, MAX_INBOUND_CONNECTIONS_PER_PEER,
+        MAX_INFLIGHT_HANDSHAKES, METRICS_INTERVAL, PEER_RATE_LIMIT_BURST,
+        PEER_RATE_LIMIT_BURST_DOS,
         allowlist::Allowlist,
         close_codes,
         endpoint::Datagram,
@@ -92,6 +93,12 @@ impl AcceptLoop {
     }
 
     pub(crate) async fn run(mut self) {
+        // Global admission limiter on how fast we *start* handshakes. Bounds the
+        // rate of handshake crypto across all peers; over-rate attempts are shed
+        // (ignored) before any crypto runs.
+        let handshake_limiter =
+            TokenBucket::new(HANDSHAKE_BURST, HANDSHAKE_BURST, HANDSHAKE_GLOBAL_RATE);
+
         // Stores all in-flight handshakes for polling
         let mut handshakes = FuturesUnordered::new();
 
@@ -123,7 +130,7 @@ impl AcceptLoop {
                 // headroom; otherwise the Incoming stays buffered in quinn.
                 maybe_incoming = self.endpoint.accept(), if handshakes.len() < MAX_INFLIGHT_HANDSHAKES => {
                     let Some(incoming) = maybe_incoming else { break };
-                    if let Some(connecting) = self.accept_incoming(incoming) {
+                    if let Some(connecting) = self.accept_incoming(incoming, &handshake_limiter) {
                         self.stats.handshakes_started.fetch_add(1, Ordering::Relaxed);
                         // Stamp with the generation at accept time so a handshake
                         // that completes across an identity rotation is rejected.
@@ -152,9 +159,16 @@ impl AcceptLoop {
     /// `None` if the attempt was shed. Sheds are always `ignore()` (silent, no
     /// reply) and never `refuse()`, so a spoofed source address can't make us
     /// reflect a CONNECTION_CLOSE back at a victim.
-    fn accept_incoming(&self, incoming: Incoming) -> Option<Connecting> {
+    fn accept_incoming(&self, incoming: Incoming, limiter: &TokenBucket) -> Option<Connecting> {
         let remote_addr = incoming.remote_address();
         if remote_addr.is_ipv6() || remote_addr.ip().is_multicast() {
+            incoming.ignore();
+            return None;
+        }
+        if limiter.consume_tokens(1).is_err() {
+            self.stats
+                .handshake_rate_limited
+                .fetch_add(1, Ordering::Relaxed);
             incoming.ignore();
             return None;
         }

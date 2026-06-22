@@ -20,14 +20,10 @@ pub struct QuicDatagramStats {
     pub(crate) egress_dropped_dial_in_progress: AtomicU64,
 
     // --- Offered load (inbound accept / handshake) ---
-    /// Inbound TLS handshakes we began driving: one per accepted `Incoming`
-    /// that cleared the cheap pre-handshake gate. Together with
-    /// `handshakes_completed` this is the offered-load signal; the difference
-    /// is handshakes that failed, timed out, or are still in flight.
+    /// Inbound handshakes we began TLS work for.
     pub(crate) handshakes_started: AtomicU64,
     /// Inbound TLS handshakes that completed successfully and yielded an
-    /// authenticated connection. Counted before admission policy (allowlist /
-    /// banlist / table) and the post-handshake identity-rotation check.
+    /// authenticated connection.
     pub(crate) handshakes_completed: AtomicU64,
 
     // --- Connection lifecycle management ---
@@ -52,6 +48,9 @@ pub struct QuicDatagramStats {
     pub(crate) handshake_rejected_unauthorized: AtomicU64,
     /// Handshake refused due to a resource limit: connection table full.
     pub(crate) handshake_rejected_overload: AtomicU64,
+    /// Inbound attempt shed before its handshake started because the global
+    /// handshake rate limit was exhausted.
+    pub(crate) handshake_rate_limited: AtomicU64,
     /// Inbound handshake torn down because it did not complete within
     /// `HANDSHAKE_TIMEOUT` (a stalled or actively-stalling peer).
     pub(crate) handshake_timed_out: AtomicU64,
@@ -178,6 +177,11 @@ pub(crate) fn report_server(stats: &QuicDatagramStats, live_connections: u64) {
         (
             "handshake_rejected_overload",
             swap!(stats.handshake_rejected_overload),
+            i64
+        ),
+        (
+            "handshake_rate_limited",
+            swap!(stats.handshake_rate_limited),
             i64
         ),
         ("handshake_timed_out", swap!(stats.handshake_timed_out), i64),
