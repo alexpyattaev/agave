@@ -2,10 +2,9 @@
 
 use {
     crate::{
-        ALLOWLIST_CHECK_INTERVAL, ALPENGLOW_ALPN, BANLIST_PRUNE_INTERVAL, HANDSHAKE_BURST,
-        HANDSHAKE_GLOBAL_RATE, HANDSHAKE_TIMEOUT, MAX_INBOUND_CONNECTIONS_PER_PEER,
-        MAX_INFLIGHT_HANDSHAKES, METRICS_INTERVAL, PEER_RATE_LIMIT_BURST,
-        PEER_RATE_LIMIT_BURST_DOS,
+        ALLOWLIST_CHECK_INTERVAL, ALPENGLOW_ALPN, BANLIST_PRUNE_INTERVAL, HANDSHAKE_TIMEOUT,
+        MAX_INBOUND_CONNECTIONS_PER_PEER, MAX_INFLIGHT_HANDSHAKES, METRICS_INTERVAL,
+        PEER_RATE_LIMIT_BURST, PEER_RATE_LIMIT_BURST_DOS,
         allowlist::Allowlist,
         close_codes,
         endpoint::Datagram,
@@ -40,26 +39,25 @@ pub(crate) struct PeerEntry {
     rate_limiter: Arc<TokenBucket>,
 }
 
-/// Event reported to the inbound control loop by the accept loop (`Accepted`)
-/// or a per-connection read task (`Closed`, `FloodDetected`).
+/// Event reported to the InboundLoop. All identity-rotation handling lives in
+/// [`AcceptLoop`]; the only rotation signal that reaches here is
+/// [`InboundEvent::IdentityRotated`], so this loop carries no generation state.
 pub(crate) enum InboundEvent {
-    /// A TLS handshake completed and yielded an authenticated peer. Carries the
-    /// identity `generation` in force when the handshake was accepted so the
-    /// control loop can reject one that completed across an identity rotation.
+    /// A TLS handshake completed and yielded an authenticated peer. The accept
+    /// loop has already dropped any handshake that completed across a rotation,
+    /// so anything that arrives here is current.
     Accepted {
         peer: Pubkey,
         connection: Connection,
-        generation: u64,
     },
-    /// An inbound (we-accepted) connection ended. The read loop reports this
-    /// so the control loop can reap the table slot.
-    Closed {
-        peer: Pubkey,
-        generation: u64,
-        stable_id: usize,
-    },
+    /// An inbound connection terminated. Reaped by `stable_id`, which quinn
+    /// guarantees unique per connection, so a late report is a harmless no-op.
+    Closed { peer: Pubkey, stable_id: usize },
     /// The ingress traffic shaping bucket was drained by a sustained flood.
     FloodDetected { peer: Pubkey },
+    /// The local identity rotated; evict the table so peers re-handshake under
+    /// the new cert. The matching server-config swap happens in [`AcceptLoop`].
+    IdentityRotated,
 }
 
 /// Accept loop: pulls connection attempts off the endpoint, and drives the TLS
@@ -94,13 +92,7 @@ impl AcceptLoop {
     }
 
     pub(crate) async fn run(mut self) {
-        // Global admission limiter on how fast we *start* handshakes. Bounds the
-        // rate of handshake crypto across all peers; over-rate attempts are shed
-        // (ignored) before any crypto runs.
-        let handshake_limiter =
-            TokenBucket::new(HANDSHAKE_BURST, HANDSHAKE_BURST, HANDSHAKE_GLOBAL_RATE);
-
-        // Inbound handshakes still in progress.
+        // Stores all in-flight handshakes for polling
         let mut handshakes = FuturesUnordered::new();
 
         // TODO: this flag is a workaround for some local-cluster tests that are a
@@ -118,6 +110,9 @@ impl AcceptLoop {
                     let snap = self.identity_rx.borrow_and_update().clone();
                     if let Some(snap) = snap {
                         self.apply_identity_change(snap);
+                        // Tell the control loop to evict the table so peers
+                        // re-handshake under the new cert.
+                        let _ = self.events_tx.send(InboundEvent::IdentityRotated).await;
                     }
                 }
                 // A handshake finished, failed, or timed out. Forward or discard.
@@ -128,7 +123,7 @@ impl AcceptLoop {
                 // headroom; otherwise the Incoming stays buffered in quinn.
                 maybe_incoming = self.endpoint.accept(), if handshakes.len() < MAX_INFLIGHT_HANDSHAKES => {
                     let Some(incoming) = maybe_incoming else { break };
-                    if let Some(connecting) = self.accept_incoming(incoming, &handshake_limiter) {
+                    if let Some(connecting) = self.accept_incoming(incoming) {
                         // Stamp with the generation at accept time so a handshake
                         // that completes across an identity rotation is rejected.
                         let generation = self.generation;
@@ -156,16 +151,9 @@ impl AcceptLoop {
     /// `None` if the attempt was shed. Sheds are always `ignore()` (silent, no
     /// reply) and never `refuse()`, so a spoofed source address can't make us
     /// reflect a CONNECTION_CLOSE back at a victim.
-    fn accept_incoming(&self, incoming: Incoming, limiter: &TokenBucket) -> Option<Connecting> {
+    fn accept_incoming(&self, incoming: Incoming) -> Option<Connecting> {
         let remote_addr = incoming.remote_address();
         if remote_addr.is_ipv6() || remote_addr.ip().is_multicast() {
-            incoming.ignore();
-            return None;
-        }
-        if limiter.consume_tokens(1).is_err() {
-            self.stats
-                .handshake_rate_limited
-                .fetch_add(1, Ordering::Relaxed);
             incoming.ignore();
             return None;
         }
@@ -179,12 +167,15 @@ impl AcceptLoop {
         }
     }
 
-    /// A handshake finished (or failed). On success,
-    /// extract the attested pubkey and forward to the control loop for
-    /// admission.
+    /// A handshake finished, failed, or timed out. On success, extract the
+    /// attested pubkey and forward to the control loop for admission. `stamped`
+    /// is the generation in force when the handshake was accepted; if it no
+    /// longer matches, the local identity rotated mid-handshake and the
+    /// connection authenticated under our previous cert, so we reject it here
+    /// rather than forwarding it.
     async fn process_handshake_result(
         &self,
-        generation: u64,
+        stamped: u64,
         outcome: Result<Result<Connection, ConnectionError>, tokio::time::error::Elapsed>,
     ) {
         let connection = match outcome {
@@ -201,6 +192,13 @@ impl AcceptLoop {
                 return;
             }
         };
+        if stamped != self.generation {
+            close_codes::IDENTITY_ROTATED.close(&connection);
+            self.stats
+                .connection_evicted_identity_rotated
+                .fetch_add(1, Ordering::Relaxed);
+            return;
+        }
         let remote_addr = connection.remote_address();
         let Some(peer) = get_remote_pubkey(&connection) else {
             close_codes::INVALID_IDENTITY.close(&connection);
@@ -209,11 +207,7 @@ impl AcceptLoop {
         };
         let _ = self
             .events_tx
-            .send(InboundEvent::Accepted {
-                peer,
-                connection,
-                generation,
-            })
+            .send(InboundEvent::Accepted { peer, connection })
             .await;
     }
 }
@@ -223,7 +217,6 @@ pub(crate) struct ConnectionReader {
     pub(crate) connection: Connection,
     pub(crate) peer: Pubkey,
     pub(crate) remote_addr: SocketAddr,
-    pub(crate) generation: u64,
     pub(crate) ingress: Sender<Datagram>,
     pub(crate) allowlist: Arc<dyn Allowlist>,
     pub(crate) banlist: Arc<Banlist<Pubkey>>,
@@ -238,7 +231,6 @@ impl ConnectionReader {
             connection,
             peer,
             remote_addr,
-            generation,
             ingress,
             allowlist,
             banlist,
@@ -324,27 +316,18 @@ impl ConnectionReader {
             }
         }
         // Send the notification to control that this connection died.
-        let _ = events
-            .send(InboundEvent::Closed {
-                peer,
-                generation,
-                stable_id,
-            })
-            .await;
+        let _ = events.send(InboundEvent::Closed { peer, stable_id }).await;
     }
 }
 
 /// Inbound control loop: owns the connection table and admits authenticated
 /// connections handed over by [`AcceptLoop`]. Does no handshake work itself.
 pub(crate) struct InboundLoop {
-    /// Identity-rotation counter
-    pub(crate) generation: u64,
     pub(crate) ingress: Sender<Datagram>,
     /// Policy to instantly ban all packets from a Pubkey
     pub(crate) banlist: Arc<Banlist<Pubkey>>,
     /// Policy for which peers may occupy a slot or retain a connection.
     pub(crate) allowlist: Arc<dyn Allowlist>,
-    pub(crate) identity_rx: watch::Receiver<Option<Arc<IdentitySnapshot>>>,
     /// Per-peer accepted receive-only connection state, owned solely by this
     /// loop.
     pub(crate) peer_state: HashMap<Pubkey, PeerEntry, PubkeyHasherBuilder>,
@@ -364,7 +347,6 @@ impl InboundLoop {
         ingress: Sender<Datagram>,
         banlist: Arc<Banlist<Pubkey>>,
         allowlist: Arc<dyn Allowlist>,
-        identity_rx: watch::Receiver<Option<Arc<IdentitySnapshot>>>,
         events_tx: mpsc::Sender<InboundEvent>,
         events_rx: mpsc::Receiver<InboundEvent>,
         stats: Arc<QuicDatagramStats>,
@@ -372,11 +354,9 @@ impl InboundLoop {
         max_datagrams_per_second_per_peer: f64,
     ) -> Self {
         Self {
-            generation: 0,
             ingress,
             banlist,
             allowlist,
-            identity_rx,
             peer_state: HashMap::with_hasher(PubkeyHasherBuilder::default()),
             events_tx,
             events_rx,
@@ -412,25 +392,11 @@ impl InboundLoop {
         let mut metrics = interval(METRICS_INTERVAL);
         metrics.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
-        // TODO: this flag is a workaround for some local-cluster tests that are a
-        // nightmare to refactor. But they really should be.
-        let mut id_closed = false;
         loop {
             tokio::select! {
                 biased;
-                changed = self.identity_rx.changed(), if !id_closed => {
-                    if changed.is_err() {
-                        warn!("identity rotation channel closed; inbound loop running without rotation support");
-                        id_closed = true;
-                        continue;
-                    }
-                    let snap = self.identity_rx.borrow_and_update().clone();
-                    if let Some(snap) = snap {
-                        self.apply_identity_change(snap);
-                    }
-                }
-                // Lifecycle and admission events from the accept loop and the
-                // per-connection read tasks.
+                // Admission, lifecycle, and rotation events from the accept loop
+                // and the per-connection read tasks.
                 Some(event) = self.events_rx.recv() => self.handle_event(event),
                 // Metrics are quite handy to have even if we are flooded with incoming.
                 _ = metrics.tick() => stats::report_server(&self.stats, self.connection_count()),
@@ -449,12 +415,10 @@ impl InboundLoop {
         }
     }
 
-    /// Evict the inbound table so peers re-handshake under the new identity, and
-    /// bump our generation so any handshake that completes across the rotation
-    /// (carrying the old generation) is rejected by [`Self::handle_event`]. The
-    /// matching server-TLS-config swap lives in [`AcceptLoop`].
-    fn apply_identity_change(&mut self, snap: Arc<IdentitySnapshot>) {
-        self.generation = self.generation.wrapping_add(1);
+    /// Evict the whole inbound table so peers re-handshake under the new
+    /// identity. Driven by [`InboundEvent::IdentityRotated`] from [`AcceptLoop`],
+    /// which owns the matching server-TLS-config swap.
+    fn evict_all(&mut self) {
         let evicted = self
             .peer_state
             .drain()
@@ -464,37 +428,18 @@ impl InboundLoop {
         self.stats
             .connection_evicted_identity_rotated
             .fetch_add(evicted, Ordering::Relaxed);
-        info!(
-            "inbound identity rotated to {} ({} connection(s) evicted)",
-            snap.pubkey, evicted
-        );
+        info!("inbound identity rotated ({evicted} connection(s) evicted)");
     }
 
     /// Apply an admission or connection-lifecycle event.
     fn handle_event(&mut self, event: InboundEvent) {
         match event {
-            // Stale Accepted: completed across an identity rotation (it carries
-            // the previous generation). Authenticated under our old cert; reject.
-            InboundEvent::Accepted {
-                generation,
-                connection,
-                ..
-            } if generation != self.generation => {
-                close_codes::IDENTITY_ROTATED.close(&connection);
-                self.stats
-                    .connection_evicted_identity_rotated
-                    .fetch_add(1, Ordering::Relaxed);
+            // The accept loop already filtered handshakes that completed across
+            // a rotation, so an Accepted that reaches here is current.
+            InboundEvent::Accepted { peer, connection } => {
+                self.maybe_admit_connection(peer, connection)
             }
-            // Relevant Accepted: run admission control.
-            InboundEvent::Accepted {
-                peer, connection, ..
-            } => self.maybe_admit_connection(peer, connection),
-            // Stale Closed: no-op, table entry already gone.
-            InboundEvent::Closed { generation, .. } if generation != self.generation => {}
-            // Relevant Closed
-            InboundEvent::Closed {
-                peer, stable_id, ..
-            } => self.reap_connection(&peer, stable_id),
+            InboundEvent::Closed { peer, stable_id } => self.reap_connection(&peer, stable_id),
             // Flood detected: close all connections but keep the entry as a
             // tombstone so the depleted rate limiter persists on reconnect.
             InboundEvent::FloodDetected { peer } => {
@@ -508,6 +453,7 @@ impl InboundLoop {
                         .fetch_add(closed, Ordering::Relaxed);
                 }
             }
+            InboundEvent::IdentityRotated => self.evict_all(),
         }
     }
 
@@ -562,7 +508,6 @@ impl InboundLoop {
                 connection,
                 peer,
                 remote_addr,
-                generation: self.generation,
                 ingress: self.ingress.clone(),
                 allowlist: self.allowlist.clone(),
                 banlist: self.banlist.clone(),

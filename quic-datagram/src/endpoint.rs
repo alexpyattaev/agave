@@ -128,12 +128,11 @@ impl QuicDatagramEndpoint {
         runtime.spawn(outbound.run());
 
         // Shared inbound event channel: the accept loop forwards authenticated
-        // connections, and per-connection read tasks report lifecycle events,
-        // both into the control loop.
+        // connections, and per-connection read tasks report lifecycle events.
         let (events_tx, events_rx) = mpsc::channel::<InboundEvent>(CONN_EVENT_CHANNEL_CAP);
         let accept = AcceptLoop::new(
             endpoint.clone(),
-            identity_rx.clone(),
+            identity_rx,
             events_tx.clone(),
             server_stats.clone(),
             shutdown.clone(),
@@ -143,7 +142,6 @@ impl QuicDatagramEndpoint {
             ingress,
             banlist,
             allowlist,
-            identity_rx,
             events_tx,
             events_rx,
             server_stats.clone(),
