@@ -1,11 +1,11 @@
 //! QUIC datagram endpoint
 use {
     crate::{
-        ALPENGLOW_ALPN, MAX_ALPENGLOW_VOTE_ACCOUNTS,
+        ALPENGLOW_ALPN, CONN_EVENT_CHANNEL_CAP, MAX_ALPENGLOW_VOTE_ACCOUNTS,
         allowlist::Allowlist,
         client::OutboundLoop,
         error::Error,
-        server::InboundLoop,
+        server::{AcceptLoop, InboundEvent, InboundLoop},
         stats::QuicDatagramStats,
         transport::{IdentitySnapshot, new_client_config, new_server_config},
     },
@@ -126,12 +126,26 @@ impl QuicDatagramEndpoint {
             client_stats,
         );
         runtime.spawn(outbound.run());
-        let inbound = InboundLoop::new(
+
+        // Shared inbound event channel: the accept loop forwards authenticated
+        // connections, and per-connection read tasks report lifecycle events,
+        // both into the control loop.
+        let (events_tx, events_rx) = mpsc::channel::<InboundEvent>(CONN_EVENT_CHANNEL_CAP);
+        let accept = AcceptLoop::new(
             endpoint.clone(),
+            identity_rx.clone(),
+            events_tx.clone(),
+            server_stats.clone(),
+            shutdown.clone(),
+        );
+        runtime.spawn(accept.run());
+        let inbound = InboundLoop::new(
             ingress,
             banlist,
             allowlist,
             identity_rx,
+            events_tx,
+            events_rx,
             server_stats.clone(),
             shutdown.clone(),
             max_datagrams_per_second_per_peer,

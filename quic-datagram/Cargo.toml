@@ -21,6 +21,7 @@ arc-swap = { workspace = true }
 arrayvec = { workspace = true }
 bytes = { workspace = true }
 crossbeam-channel = { workspace = true }
+futures = { workspace = true }
 log = { workspace = true }
 lru = { workspace = true }
 quinn = { workspace = true }
@@ -36,7 +37,7 @@ tokio-util = { workspace = true }
 
 [dev-dependencies]
 solana-keypair = { workspace = true }
-solana-net-utils = { workspace = true }
+solana-net-utils = { workspace = true, features = ["dev-context-only-utils"] }
 tokio = { workspace = true, features = ["full"] }
 
 [lints]

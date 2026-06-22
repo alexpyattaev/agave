@@ -39,9 +39,27 @@ pub const PEER_RATE_LIMIT_BURST: u64 = 100;
 pub const PEER_RATE_LIMIT_BURST_DOS: u64 = 1000;
 
 /// Sustained rate at which we start inbound TLS handshakes across all peers
-/// (handshakes/second). This acts on `quinn_proto::Endpoint::accept()`, bounding the
-/// rate at which we process Initial packets at all, not how many can run at once.
-pub const HANDSHAKE_GLOBAL_RATE: f64 = 800.0;
+/// (handshakes/second). Feeds a token bucket consulted before we call
+/// `Incoming::accept()`, so it bounds the rate at which we begin handshake
+/// crypto at all, not how many run at once.
+pub const HANDSHAKE_GLOBAL_RATE: f64 = 800000.0;
+
+/// Burst of inbound handshakes tolerated above [`HANDSHAKE_GLOBAL_RATE`] before
+/// new attempts are shed. Sized to absorb a cluster-wide simultaneous reconnect.
+pub(crate) const HANDSHAKE_BURST: u64 = 1000000;
+
+/// Maximum inbound TLS handshakes allowed in flight at once. Once this many are
+/// pending we stop pulling new attempts off the endpoint until one finishes,
+/// bounding concurrent handshake crypto. quinn drives each handshake on its own
+/// task, so this caps how many of those exist.
+pub const MAX_INFLIGHT_HANDSHAKES: usize = 512;
+
+/// Hard wall-clock bound on a single inbound handshake. quinn resets the idle
+/// timer on every authenticated packet, so a peer that keeps retransmitting
+/// Initials can hold a half-open handshake open well past `MAX_IDLE_TIMEOUT`;
+/// this explicit cap (mirroring the streamer transport) reclaims the in-flight
+/// slot regardless of what the peer sends.
+pub(crate) const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// How often each connection's read loop re-checks whether the peer is still
 /// in the allowlist and closes any remaining connections.

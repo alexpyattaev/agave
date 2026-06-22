@@ -41,6 +41,12 @@ pub struct QuicDatagramStats {
     pub(crate) handshake_rejected_unauthorized: AtomicU64,
     /// Handshake refused due to a resource limit: connection table full.
     pub(crate) handshake_rejected_overload: AtomicU64,
+    /// Inbound attempt shed before its handshake started because the global
+    /// handshake rate limit was exhausted.
+    pub(crate) handshake_rate_limited: AtomicU64,
+    /// Inbound handshake torn down because it did not complete within
+    /// `HANDSHAKE_TIMEOUT` (a stalled or actively-stalling peer).
+    pub(crate) handshake_timed_out: AtomicU64,
     /// Peer's incoming datagram exceeded the per-connection rate.
     pub(crate) datagram_rate_limited: AtomicU64,
 
@@ -160,6 +166,12 @@ pub(crate) fn report_server(stats: &QuicDatagramStats, live_connections: u64) {
             swap!(stats.handshake_rejected_overload),
             i64
         ),
+        (
+            "handshake_rate_limited",
+            swap!(stats.handshake_rate_limited),
+            i64
+        ),
+        ("handshake_timed_out", swap!(stats.handshake_timed_out), i64),
         (
             "connection_evicted_allowlist",
             swap!(stats.connection_evicted_allowlist),
