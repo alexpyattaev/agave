@@ -7585,6 +7585,7 @@ dependencies = [
  "solana-time-utils",
  "solana-tls-utils",
  "solana-tpu-client",
+ "solana-tpu-client-next",
  "solana-transaction",
  "solana-transaction-error",
  "solana-udp-client",

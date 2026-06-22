@@ -1,4 +1,6 @@
 pub mod tpu_client;
+#[cfg(feature = "tpu-client-next")]
+pub mod tpu_client_next;
 
 pub mod blockhash_query {
     pub use solana_rpc_client_nonce_utils::nonblocking::blockhash_query::*;

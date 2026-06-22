@@ -15,6 +15,7 @@ targets = ["x86_64-unknown-linux-gnu"]
 [features]
 agave-unstable-api = []
 dev-context-only-utils = []
+tpu-client-next = ["dep:solana-tpu-client-next"]
 
 [dependencies]
 async-trait = { workspace = true }
@@ -42,6 +43,7 @@ solana-streamer = { workspace = true }
 solana-time-utils = { workspace = true }
 solana-tls-utils = { workspace = true }
 solana-tpu-client = { workspace = true, features = ["default"] }
+solana-tpu-client-next = { workspace = true, optional = true }
 solana-transaction = { workspace = true }
 solana-transaction-error = { workspace = true }
 solana-udp-client = { workspace = true }
