@@ -103,4 +103,9 @@ pub enum Error {
     /// process). Construction-time only.
     #[error(transparent)]
     Endpoint(#[from] io::Error),
+
+    /// Building the dedicated inbound-handshake runtime failed (e.g. the OS
+    /// refused to spawn its worker threads). Construction-time only.
+    #[error("failed to build handshake runtime")]
+    HandshakeRuntime(#[source] io::Error),
 }

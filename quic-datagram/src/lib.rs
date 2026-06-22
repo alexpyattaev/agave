@@ -61,6 +61,16 @@ pub const MAX_INFLIGHT_HANDSHAKES: usize = 512;
 /// slot regardless of what the peer sends.
 pub(crate) const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// Worker threads for the dedicated runtime that drives the inbound accept loop.
+///
+/// quinn spawns each accepted connection's driver via the ambient `tokio::spawn`
+/// at the point `Incoming::accept()` is called, so running the accept loop on
+/// this runtime pins not just the handshake but the connection's lifelong
+/// datagram I/O here. Size it for steady-state inbound connection load (it
+/// carries the receive path for every admitted peer), not for handshake count,
+/// and tune against `votor_bench_results`.
+pub(crate) const HANDSHAKE_RUNTIME_THREADS: usize = 2;
+
 /// How often each connection's read loop re-checks whether the peer is still
 /// in the allowlist and closes any remaining connections.
 pub const ALLOWLIST_CHECK_INTERVAL: Duration = Duration::from_secs(10);

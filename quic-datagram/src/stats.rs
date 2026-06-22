@@ -92,7 +92,7 @@ pub(crate) fn record_error(err: &Error, stats: &QuicDatagramStats) {
         Error::NotAdmitted(_) | Error::Banned(_) => add(&stats.handshake_rejected_unauthorized),
         Error::TableFull => add(&stats.handshake_rejected_overload),
         Error::IdentityRotated(_) => add(&stats.connection_evicted_identity_rotated),
-        Error::Endpoint(_) => {} // construction-time only; no runtime counter
+        Error::Endpoint(_) | Error::HandshakeRuntime(_) => {} // construction-time only; no runtime counter
     }
 }
 

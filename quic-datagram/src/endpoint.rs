@@ -1,7 +1,8 @@
 //! QUIC datagram endpoint
 use {
     crate::{
-        ALPENGLOW_ALPN, CONN_EVENT_CHANNEL_CAP, MAX_ALPENGLOW_VOTE_ACCOUNTS,
+        ALPENGLOW_ALPN, CONN_EVENT_CHANNEL_CAP, HANDSHAKE_RUNTIME_THREADS,
+        MAX_ALPENGLOW_VOTE_ACCOUNTS,
         allowlist::Allowlist,
         client::OutboundLoop,
         error::Error,
@@ -21,7 +22,7 @@ use {
         sync::Arc,
     },
     tokio::{
-        runtime::Handle,
+        runtime::{Builder, Handle, Runtime},
         sync::{mpsc, watch},
     },
     tokio_util::sync::CancellationToken,
@@ -59,12 +60,18 @@ pub struct QuicDatagramEndpoint {
     pub key_updater: Arc<KeyUpdater>,
     pub server_stats: Arc<QuicDatagramStats>,
     shutdown: CancellationToken,
+    /// Dedicated runtime driving the inbound accept loop and the connection
+    /// drivers quinn spawns from it. Held for the endpoint's lifetime.
+    handshake_runtime: Option<Runtime>,
 }
 
 impl QuicDatagramEndpoint {
-    /// Construct a datagram-only QUIC endpoint bound to `socket`. Spawns the
-    /// inbound and outbound loops on `runtime`; dropping the handle (or calling
-    /// [`close`](Self::close)) cancels them. Received datagrams flow into
+    /// Construct a datagram-only QUIC endpoint bound to `socket`. The control
+    /// (inbound) and outbound loops run on `runtime`; the inbound accept loop
+    /// runs on a dedicated handshake runtime owned by the returned endpoint, so
+    /// inbound handshake and connection work is isolated from the rest. Dropping
+    /// the handle (or calling [`close`](Self::close)) cancels them. Received
+    /// datagrams flow into
     /// `ingress` via `try_send`; full ingress channel results in a drop
     /// (counted in `datagram_ingress_dropped_channel_full`).
     ///
@@ -131,6 +138,19 @@ impl QuicDatagramEndpoint {
         // connections, and per-connection read tasks report lifecycle events,
         // both into the control loop.
         let (events_tx, events_rx) = mpsc::channel::<InboundEvent>(CONN_EVENT_CHANNEL_CAP);
+        // Dedicated runtime for the inbound accept path. quinn spawns each
+        // accepted connection's driver via the ambient `tokio::spawn` at the
+        // point `Incoming::accept()` runs (inside `AcceptLoop`), so running the
+        // accept loop here pins both the handshake and the connection's lifelong
+        // datagram I/O to this runtime. The control loop, the ingress consumer
+        // (`ConnectionReader` tasks), the endpoint driver, and the entire
+        // outbound direction stay on `runtime`.
+        let handshake_runtime = Builder::new_multi_thread()
+            .worker_threads(HANDSHAKE_RUNTIME_THREADS)
+            .thread_name("solQuicDgramHs")
+            .enable_all()
+            .build()
+            .map_err(Error::HandshakeRuntime)?;
         let accept = AcceptLoop::new(
             endpoint.clone(),
             identity_rx.clone(),
@@ -138,7 +158,7 @@ impl QuicDatagramEndpoint {
             server_stats.clone(),
             shutdown.clone(),
         );
-        runtime.spawn(accept.run());
+        handshake_runtime.spawn(accept.run());
         let inbound = InboundLoop::new(
             ingress,
             banlist,
@@ -157,6 +177,7 @@ impl QuicDatagramEndpoint {
             key_updater,
             server_stats,
             shutdown,
+            handshake_runtime: Some(handshake_runtime),
         })
     }
 
@@ -167,8 +188,15 @@ impl QuicDatagramEndpoint {
 }
 
 impl Drop for QuicDatagramEndpoint {
-    /// Cancel the spawned loops so a dropped handle can't leak them.
+    /// Cancel the spawned loops so a dropped handle can't leak them, then tear
+    /// down the dedicated handshake runtime. `shutdown_background` detaches its
+    /// worker threads without blocking, so this is safe even when the endpoint
+    /// is dropped from inside an async context (where dropping a `Runtime`
+    /// directly would panic).
     fn drop(&mut self) {
         self.shutdown.cancel();
+        if let Some(handshake_runtime) = self.handshake_runtime.take() {
+            handshake_runtime.shutdown_background();
+        }
     }
 }
