@@ -28,7 +28,7 @@ use {
             verify_net_stats_access,
         },
         tpu::{Tpu, TpuSockets},
-        tvu::{AlpenglowInitializationState, Tvu, TvuConfig, TvuSockets, VotorDatagramHandles},
+        tvu::{AlpenglowInitializationState, Tvu, TvuConfig, TvuSockets},
     },
     agave_snapshots::{
         SnapshotInterval, snapshot_archive_info::SnapshotArchiveInfoGetter as _,
@@ -96,7 +96,7 @@ use {
     },
     solana_measure::measure::Measure,
     solana_metrics::{datapoint_info, metrics::metrics_config_sanity_check},
-    solana_net_utils::{PinnedXdpSender, SocketAddrSpace, banlist::Banlist},
+    solana_net_utils::{PinnedXdpSender, SocketAddrSpace},
     solana_poh::{
         poh_controller::PohController,
         poh_recorder::PohRecorder,
@@ -105,7 +105,6 @@ use {
         transaction_recorder::TransactionRecorder,
     },
     solana_pubkey::Pubkey,
-    solana_quic_datagram::{allowlist::StakedNodesAllowlist, endpoint::QuicDatagramEndpoint},
     solana_rpc::{
         max_slots::MaxSlots,
         optimistically_confirmed_bank_tracker::{
@@ -683,10 +682,6 @@ pub struct Validator {
     // We don't wait for its JoinHandle here because ownership and shutdown
     // are managed elsewhere. This variable is intentionally unused.
     _tpu_client_next_runtime: Option<TokioRuntime>,
-    // This runtime is used to run the votor QUIC implementation.
-    // We don't wait for its JoinHandle here because ownership and shutdown
-    // are managed elsewhere. This variable is intentionally unused.
-    _votor_runtime: Option<TokioRuntime>,
 }
 
 impl Validator {
@@ -1218,88 +1213,6 @@ impl Validator {
                 .unwrap()
         });
 
-        // Votor QUIC datagram endpoint: only active on Testnet and Development.
-        // On other cluster types we skip the runtime and TLS stack entirely and
-        // hand no-op stubs to the rest of the validator so TvuConfig is unchanged.
-        let alpenglow_allowed = matches!(
-            genesis_config.cluster_type,
-            ClusterType::Testnet | ClusterType::Development
-        );
-        let (votor_runtime, votor_datagram) = if alpenglow_allowed {
-            let (votor_runtime, votor_rt_handle) = match &current_runtime_handle {
-                Ok(handle) => (None, handle.clone()),
-                Err(_) => {
-                    let rt = tokio::runtime::Builder::new_multi_thread()
-                        .enable_all()
-                        .worker_threads(4)
-                        .thread_name("solVotorQuicRt")
-                        .build()
-                        .unwrap();
-                    let handle = rt.handle().clone();
-                    (Some(rt), handle)
-                }
-            };
-            let (ingress_tx, votor_ingress) = bounded(crate::tvu::MAX_ALPENGLOW_PACKET_NUM);
-            let votor_banlist = Arc::new(Banlist::default());
-            // Seed the allowlist from the last rooted bank so inbound votor
-            // connections from staked peers are admitted during ledger
-            // replay and wait_for_supermajority.
-            let votor_allowlist = Arc::new(StakedNodesAllowlist::new(HashMap::new()));
-            {
-                let root_bank = bank_forks.read().unwrap().root_bank();
-                if let Some(epoch_staked_nodes) = root_bank.epoch_staked_nodes(root_bank.epoch()) {
-                    votor_allowlist.swap(epoch_staked_nodes);
-                }
-            }
-            let endpoint = QuicDatagramEndpoint::spawn(
-                &votor_rt_handle,
-                &identity_keypair,
-                node.sockets.alpenglow,
-                ingress_tx,
-                votor_allowlist.clone(),
-                votor_banlist.clone(),
-                agave_votor::voting_service::VOTOR_RATE_LIMIT_PPS as f64,
-            )
-            .map_err(|e| ValidatorError::Other(format!("alpenglow endpoint: {e:?}")))?;
-            key_notifiers
-                .write()
-                .unwrap()
-                .add(KeyUpdaterType::VotorDatagram, endpoint.key_updater.clone());
-            let votor_egress = endpoint.egress.clone();
-            votor_rt_handle.spawn({
-                let cancel = cancel.clone();
-                async move {
-                    cancel.cancelled().await;
-                    endpoint.close();
-                }
-            });
-            (
-                votor_runtime,
-                VotorDatagramHandles {
-                    egress: votor_egress,
-                    ingress: votor_ingress,
-                    banlist: votor_banlist,
-                    allowlist: votor_allowlist,
-                },
-            )
-        } else {
-            // No-op stubs: ingress is always empty (sender dropped), egress
-            // sends silently fail (receiver dropped). No socket, no TLS, no runtime.
-            let (votor_egress, _rx) = tokio::sync::mpsc::channel(1);
-            let (_tx, votor_ingress) = bounded(crate::tvu::MAX_ALPENGLOW_PACKET_NUM);
-            let votor_banlist = Arc::new(Banlist::default());
-            let votor_allowlist = Arc::new(StakedNodesAllowlist::new(HashMap::new()));
-            (
-                None,
-                VotorDatagramHandles {
-                    egress: votor_egress,
-                    ingress: votor_ingress,
-                    banlist: votor_banlist,
-                    allowlist: votor_allowlist,
-                },
-            )
-        };
-
         let rpc_override_health_check =
             Arc::new(AtomicBool::new(config.rpc_config.disable_health_check));
         let (
@@ -1662,6 +1575,16 @@ impl Validator {
                 (None, None, None, None)
             };
 
+        // Votor is only active on Testnet and Development.
+        let alpenglow_socket = if matches!(
+            genesis_config.cluster_type,
+            ClusterType::Testnet | ClusterType::Development
+        ) {
+            Some(node.sockets.alpenglow)
+        } else {
+            None
+        };
+
         let tvu = Tvu::new(
             vote_account,
             authorized_voter_keypairs,
@@ -1724,7 +1647,6 @@ impl Validator {
             slot_status_notifier,
             vote_connection_cache,
             AlpenglowInitializationState {
-                alpenglow_allowed,
                 leader_window_info_sender,
                 optimistic_parent_sender,
                 optimistic_parent_receiver,
@@ -1735,7 +1657,8 @@ impl Validator {
                 votor_event_sender: votor_event_sender.clone(),
                 votor_event_receiver,
                 key_notifiers: key_notifiers.clone(),
-                votor_datagram,
+                alpenglow_socket,
+                cancel: cancel.clone(),
                 #[cfg(feature = "dev-context-only-utils")]
                 voting_service_test_override: config.voting_service_test_override.clone(),
                 highest_finalized,
@@ -1886,7 +1809,6 @@ impl Validator {
             accounts_background_service,
             xdp_transmitter,
             _tpu_client_next_runtime: tpu_client_next_runtime,
-            _votor_runtime: votor_runtime,
         })
     }
 
