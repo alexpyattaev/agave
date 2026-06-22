@@ -19,6 +19,17 @@ pub struct QuicDatagramStats {
     /// Egress dropped because the connection for the peer is not ready.
     pub(crate) egress_dropped_dial_in_progress: AtomicU64,
 
+    // --- Offered load (inbound accept / handshake) ---
+    /// Inbound TLS handshakes we began driving: one per accepted `Incoming`
+    /// that cleared the cheap pre-handshake gate. Together with
+    /// `handshakes_completed` this is the offered-load signal; the difference
+    /// is handshakes that failed, timed out, or are still in flight.
+    pub(crate) handshakes_started: AtomicU64,
+    /// Inbound TLS handshakes that completed successfully and yielded an
+    /// authenticated connection. Counted before admission policy (allowlist /
+    /// banlist / table) and the post-handshake identity-rotation check.
+    pub(crate) handshakes_completed: AtomicU64,
+
     // --- Connection lifecycle management ---
     /// Connections closed because the local identity (TLS cert / pubkey) was
     /// rotated. Each rotation evicts every cached connection in one burst.
@@ -141,6 +152,12 @@ pub(crate) fn report_server(stats: &QuicDatagramStats, live_connections: u64) {
         "votor_datagram_server",
         ("connections_peak", take_peak(stats, live_connections), i64),
         ("datagrams_received", swap!(stats.datagrams_received), i64),
+        ("handshakes_started", swap!(stats.handshakes_started), i64),
+        (
+            "handshakes_completed",
+            swap!(stats.handshakes_completed),
+            i64
+        ),
         ("connect_failed", swap!(stats.connect_failed), i64),
         ("connection_lost", swap!(stats.connection_lost), i64),
         (

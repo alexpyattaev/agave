@@ -124,6 +124,7 @@ impl AcceptLoop {
                 maybe_incoming = self.endpoint.accept(), if handshakes.len() < MAX_INFLIGHT_HANDSHAKES => {
                     let Some(incoming) = maybe_incoming else { break };
                     if let Some(connecting) = self.accept_incoming(incoming) {
+                        self.stats.handshakes_started.fetch_add(1, Ordering::Relaxed);
                         // Stamp with the generation at accept time so a handshake
                         // that completes across an identity rotation is rejected.
                         let generation = self.generation;
@@ -179,7 +180,12 @@ impl AcceptLoop {
         outcome: Result<Result<Connection, ConnectionError>, tokio::time::error::Elapsed>,
     ) {
         let connection = match outcome {
-            Ok(Ok(connection)) => connection,
+            Ok(Ok(connection)) => {
+                self.stats
+                    .handshakes_completed
+                    .fetch_add(1, Ordering::Relaxed);
+                connection
+            }
             Ok(Err(e)) => {
                 record_error(&Error::from(e), &self.stats);
                 return;
