@@ -279,6 +279,7 @@ impl ConnectionReader {
         allowlist_check.tick().await; // skip the immediate first fire
         loop {
             tokio::select! {
+                biased;
                 result = connection.read_datagram() => {
                     match result {
                         Ok(bytes) => {

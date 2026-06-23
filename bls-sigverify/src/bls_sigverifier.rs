@@ -325,16 +325,19 @@ fn recv_batches(
     receiver: &Receiver<Datagram>,
     soft_receive_cap: usize,
 ) -> Result<Vec<PacketBatch>, ()> {
-    let batch = match receiver.recv_timeout(Duration::from_secs(1)) {
-        Ok(b) => datagram_to_batch(b),
-        Err(e) => match e {
-            RecvTimeoutError::Timeout => {
-                return Ok(vec![]);
+    let mut sleeps = 0;
+    let batch = loop {
+        if sleeps > 1000 {
+            return Ok(vec![]);
+        }
+        match receiver.try_recv() {
+            Ok(datagram) => break datagram_to_batch(datagram),
+            Err(TryRecvError::Empty) => {
+                sleeps += 1;
+                std::thread::sleep(Duration::from_millis(1))
             }
-            RecvTimeoutError::Disconnected => {
-                return Err(());
-            }
-        },
+            Err(TryRecvError::Disconnected) => return Err(()),
+        }
     };
     // Size to what is actually queued (plus the batch we just took) rather than
     // always reserving the full cap: the channel is usually far from full.
