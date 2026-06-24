@@ -2,10 +2,10 @@
 
 use {
     crate::{
-        ALLOWLIST_CHECK_INTERVAL, ALPENGLOW_ALPN, BANLIST_PRUNE_INTERVAL, HANDSHAKE_BURST,
-        HANDSHAKE_GLOBAL_RATE, HANDSHAKE_TIMEOUT, MAX_INBOUND_CONNECTIONS_PER_PEER,
-        MAX_INFLIGHT_HANDSHAKES, METRICS_INTERVAL, PEER_RATE_LIMIT_BURST,
-        PEER_RATE_LIMIT_BURST_DOS,
+        ALLOWLIST_CHECK_INTERVAL, ALPENGLOW_ALPN, BANLIST_PRUNE_INTERVAL, DATAGRAM_READ_BATCH_SIZE,
+        HANDSHAKE_BURST, HANDSHAKE_GLOBAL_RATE, HANDSHAKE_TIMEOUT,
+        MAX_INBOUND_CONNECTIONS_PER_PEER, MAX_INFLIGHT_HANDSHAKES, METRICS_INTERVAL,
+        PEER_RATE_LIMIT_BURST, PEER_RATE_LIMIT_BURST_DOS,
         allowlist::Allowlist,
         close_codes,
         endpoint::Datagram,
@@ -14,6 +14,7 @@ use {
         transport::{IdentitySnapshot, new_server_config},
     },
     arrayvec::ArrayVec,
+    bytes::Bytes,
     crossbeam_channel::{Sender, TrySendError},
     futures::{StreamExt as _, stream::FuturesUnordered},
     log::{debug, info, warn},
@@ -321,58 +322,58 @@ impl ConnectionReader {
         let stable_id = connection.stable_id();
         // Use the same bucket to be reused for both shaping and flood control
         const RATE_LIMIT_WATERMARK: u64 = PEER_RATE_LIMIT_BURST_DOS - PEER_RATE_LIMIT_BURST;
-        loop {
-            match connection.read_datagram().await {
-                Ok(bytes) => {
-                    // Banlist check happens AFTER the read so a ban that lands
-                    // while we're awaiting can't let a follow-up datagram leak
-                    // through to ingress.
-                    if banlist.is_banned(&peer) {
-                        close_codes::BANNED.close(&connection);
-                        break;
-                    }
-                    match rate_limiter.consume_tokens(1) {
-                        // normal operation
-                        Ok(remaining) if remaining > RATE_LIMIT_WATERMARK => {}
-                        // drop excess packets if peer exceeds normal rate
-                        Ok(_) => {
-                            drop(bytes);
-                            stats.datagram_rate_limited.fetch_add(1, Ordering::Relaxed);
-                            continue;
-                        }
-                        // peer drained bucket dry - kick them
-                        Err(_) => {
-                            drop(bytes);
-                            let _ = events.send(InboundEvent::FloodDetected { peer }).await;
-                            break;
-                        }
-                    }
-
-                    match ingress.try_send(Datagram {
-                        peer_pubkey: peer,
-                        peer_address: remote_addr,
-                        message: bytes,
-                    }) {
-                        Ok(()) => {
-                            stats.datagrams_received.fetch_add(1, Ordering::Relaxed);
-                        }
-                        Err(TrySendError::Full(_)) => {
-                            stats
-                                .datagram_ingress_dropped_channel_full
-                                .fetch_add(1, Ordering::Relaxed);
-                        }
-                        Err(TrySendError::Disconnected(_)) => {
-                            debug!("ingress disconnected; reader for {peer} exiting");
-                            break;
-                        }
-                    }
-                }
+        let mut batch: [Bytes; DATAGRAM_READ_BATCH_SIZE] = std::array::from_fn(|_| Bytes::new());
+        'read: loop {
+            let count = match connection.read_datagrams(&mut batch).await {
+                Ok(n) => n,
                 Err(e) => {
                     // The peer (or we) closed this inbound, or it timed out.
                     // Record and exit; the control loop reaps the table slot
                     // from the `Closed` event below.
                     record_error(&Error::from(e), &stats);
                     break;
+                }
+            };
+            // Banlist check happens AFTER the read so a ban that lands
+            // while we're awaiting can't let a follow-up datagram leak
+            // through to ingress.
+            if banlist.is_banned(&peer) {
+                close_codes::BANNED.close(&connection);
+                break 'read;
+            }
+            for slot in &mut batch[..count] {
+                let bytes = std::mem::take(slot);
+                match rate_limiter.consume_tokens(1) {
+                    // normal operation
+                    Ok(remaining) if remaining > RATE_LIMIT_WATERMARK => {}
+                    // drop excess packets if peer exceeds normal rate
+                    Ok(_) => {
+                        stats.datagram_rate_limited.fetch_add(1, Ordering::Relaxed);
+                        continue;
+                    }
+                    // peer drained bucket dry - kick them
+                    Err(_) => {
+                        let _ = events.send(InboundEvent::FloodDetected { peer }).await;
+                        break 'read;
+                    }
+                }
+                match ingress.try_send(Datagram {
+                    peer_pubkey: peer,
+                    peer_address: remote_addr,
+                    message: bytes,
+                }) {
+                    Ok(()) => {
+                        stats.datagrams_received.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Err(TrySendError::Full(_)) => {
+                        stats
+                            .datagram_ingress_dropped_channel_full
+                            .fetch_add(1, Ordering::Relaxed);
+                    }
+                    Err(TrySendError::Disconnected(_)) => {
+                        debug!("ingress disconnected; reader for {peer} exiting");
+                        break 'read;
+                    }
                 }
             }
         }

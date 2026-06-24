@@ -71,3 +71,8 @@ pub(crate) const METRICS_INTERVAL: Duration = Duration::from_secs(1);
 
 /// ALPN protocol identifier for the Alpenglow votor datagram transport.
 pub const ALPENGLOW_ALPN: &[u8] = b"alpenglow-v1";
+
+/// Number of datagrams drained per `read_datagrams` call in the inbound read
+/// loop. Batching amortizes the async overhead and the connection-state lock
+/// across all datagrams buffered since the previous await.
+pub(crate) const DATAGRAM_READ_BATCH_SIZE: usize = 64;
