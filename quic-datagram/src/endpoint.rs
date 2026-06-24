@@ -11,7 +11,7 @@ use {
     },
     bytes::Bytes,
     crossbeam_channel::Sender,
-    quinn::{Endpoint, EndpointConfig, TokioRuntime},
+    quinn::{Endpoint, EndpointConfig, EndpointRuntimeConfig, TokioRuntimeHandle},
     solana_keypair::{Keypair, Signer},
     solana_net_utils::banlist::Banlist,
     solana_pubkey::Pubkey,
@@ -78,7 +78,8 @@ impl QuicDatagramEndpoint {
     ///
     /// `allowlist` and `banlist` define admission policy.
     pub fn spawn(
-        runtime: &Handle,
+        endpoint_runtime: &Handle,
+        connection_runtime: &Handle,
         keypair: &Keypair,
         server_sockets: Vec<UdpSocket>,
         client_socket: UdpSocket,
@@ -98,36 +99,36 @@ impl QuicDatagramEndpoint {
         // One quinn endpoint per SO_REUSEPORT socket. All carry the server
         // config so any of them can accept; the kernel decides which socket a
         // given inbound 4-tuple lands on.
-        let endpoints: Vec<Endpoint> = {
-            // Endpoint::new requires being inside the runtime context, else it
-            // panics on its first internal `tokio::spawn`.
-            let _guard = runtime.enter();
-            server_sockets
-                .into_iter()
-                .map(|socket| {
-                    Endpoint::new(
-                        EndpointConfig::default(),
-                        Some(server_config.clone()),
-                        socket,
-                        Arc::new(TokioRuntime),
-                    )
-                    .map_err(Error::Endpoint)
-                })
-                .collect::<Result<Vec<_>, _>>()?
-        };
+        // The endpoint driver (UDP recv/send) runs on `endpoint_runtime`;
+        // per-connection state machines and application tasks use `connection_runtime`.
+        let runtimes = EndpointRuntimeConfig::new(
+            Arc::new(TokioRuntimeHandle::new(endpoint_runtime.clone())),
+            Arc::new(TokioRuntimeHandle::new(connection_runtime.clone())),
+        );
+        let endpoints: Vec<Endpoint> = server_sockets
+            .into_iter()
+            .map(|socket| {
+                Endpoint::new_with_runtimes(
+                    EndpointConfig::default(),
+                    Some(server_config.clone()),
+                    socket,
+                    runtimes.clone(),
+                )
+                .map_err(Error::Endpoint)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
 
         // The outbound (we-dial, send-only) direction that runs on its own
-        // client-only endpoint bound to `client_socket`.
-        let mut outbound_endpoint = {
-            let _guard = runtime.enter();
-            Endpoint::new(
-                EndpointConfig::default(),
-                None,
-                client_socket,
-                Arc::new(TokioRuntime),
-            )
-            .map_err(Error::Endpoint)?
-        };
+        // client-only endpoint bound to `client_socket`. Egress doesn't need
+        // the dedicated IO runtime; run its driver on `connection_runtime`.
+        let conn_rt = Arc::new(TokioRuntimeHandle::new(connection_runtime.clone()));
+        let outbound_endpoint = Endpoint::new_with_runtimes(
+            EndpointConfig::default(),
+            None,
+            client_socket,
+            EndpointRuntimeConfig::single(conn_rt),
+        )
+        .map_err(Error::Endpoint)?;
         outbound_endpoint.set_default_client_config(client_config);
 
         // Independent stats instances: each loop owns one and reports it under
@@ -158,7 +159,7 @@ impl QuicDatagramEndpoint {
             shutdown.clone(),
             client_stats,
         );
-        runtime.spawn(outbound.run());
+        connection_runtime.spawn(outbound.run());
 
         // Shared inbound event channel: the accept loop forwards authenticated
         // connections, and per-connection read tasks report lifecycle events.
@@ -170,7 +171,7 @@ impl QuicDatagramEndpoint {
             server_stats.clone(),
             shutdown.clone(),
         );
-        runtime.spawn(accept.run());
+        connection_runtime.spawn(accept.run());
         let inbound = InboundLoop::new(
             ingress,
             banlist,
@@ -181,7 +182,7 @@ impl QuicDatagramEndpoint {
             shutdown.clone(),
             max_datagrams_per_second_per_peer,
         );
-        runtime.spawn(inbound.run());
+        connection_runtime.spawn(inbound.run());
 
         Ok(Self {
             egress: egress_tx,

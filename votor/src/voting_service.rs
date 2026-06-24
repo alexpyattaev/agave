@@ -606,6 +606,7 @@ mod tests {
         let banlist = Arc::new(Banlist::<Pubkey>::default());
         let endpoint = QuicDatagramEndpoint::spawn(
             rt.handle(),
+            rt.handle(),
             &keypair,
             vec![socket],
             client_socket,

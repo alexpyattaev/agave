@@ -84,7 +84,7 @@ use {
         sync::{Arc, RwLock, atomic::AtomicBool},
         thread::{self, JoinHandle},
     },
-    tokio::runtime::{Handle, Runtime as TokioRuntime},
+    tokio::runtime::Runtime as TokioRuntime,
 };
 
 /// Sets the upper bound on the number of batches stored in the retransmit
@@ -121,12 +121,13 @@ pub struct Tvu {
     commitment_service: AggregateCommitmentService,
     /// Owns the votor QUIC datagram endpoint for Tvu's lifetime. Dropping it
     /// cancels the endpoint's inbound/outbound loops (see `Drop` for
-    /// `QuicDatagramEndpoint`); declared before `_votor_runtime` so the loops
-    /// are signalled to stop before the runtime they run on is torn down.
+    /// `QuicDatagramEndpoint`); declared before the runtimes so the loops are
+    /// signalled to stop before the runtimes they run on are torn down.
     _votor_endpoint: QuicDatagramEndpoint,
-    /// Owns the votor QUIC datagram runtime for Tvu's lifetime. `None` when
-    /// running on an ambient runtime (test-validator).
-    _votor_runtime: Option<TokioRuntime>,
+    /// Endpoint-driver runtime: runs the quinn UDP recv/send loop.
+    _votor_endpoint_runtime: TokioRuntime,
+    /// Connection runtime: runs per-connection state machines and app tasks.
+    _votor_conn_runtime: TokioRuntime,
 }
 
 pub struct TvuSockets {
@@ -286,22 +287,21 @@ impl Tvu {
             bounded(MAX_IN_FLIGHT_CONSENSUS_EVENTS);
         let generated_cert_types = Arc::new(GeneratedCertTypes::default());
 
-        // Bring up the votor QUIC datagram endpoint.
-        // TODO: change test-validator tests from starting validator inside a
-        // tokio runtime so the nested runtime hack can be dropped.
-        let (votor_runtime, votor_rt_handle) = match Handle::try_current() {
-            Ok(handle) => (None, handle),
-            Err(_) => {
-                let rt = tokio::runtime::Builder::new_multi_thread()
-                    .enable_all()
-                    .worker_threads(4)
-                    .thread_name("solVotorQuicRt")
-                    .build()
-                    .unwrap();
-                let handle = rt.handle().clone();
-                (Some(rt), handle)
-            }
-        };
+        // Bring up the votor QUIC datagram endpoint with split runtimes:
+        // the endpoint driver (UDP recv/send) and connection tasks run on
+        // dedicated thread pools so neither can starve the other.
+        let votor_endpoint_rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .worker_threads(2)
+            .thread_name("solVotorEndptRt")
+            .build()
+            .expect("votor endpoint runtime");
+        let votor_conn_rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .worker_threads(4)
+            .thread_name("solVotorConnRt")
+            .build()
+            .expect("votor conn runtime");
         let (ingress_tx, votor_ingress) = bounded(MAX_ALPENGLOW_PACKET_NUM);
         let votor_banlist = Arc::new(Banlist::default());
         // Seed the allowlist from the last rooted bank so inbound votor
@@ -315,7 +315,8 @@ impl Tvu {
             }
         }
         let endpoint = QuicDatagramEndpoint::spawn(
-            &votor_rt_handle,
+            votor_endpoint_rt.handle(),
+            votor_conn_rt.handle(),
             &cluster_info.keypair(),
             alpenglow_sockets,
             alpenglow_client_socket,
@@ -663,7 +664,8 @@ impl Tvu {
             votor,
             commitment_service,
             _votor_endpoint: endpoint,
-            _votor_runtime: votor_runtime,
+            _votor_endpoint_runtime: votor_endpoint_rt,
+            _votor_conn_runtime: votor_conn_rt,
         })
     }
 
