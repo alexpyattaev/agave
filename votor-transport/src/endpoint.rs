@@ -2,7 +2,8 @@
 use {
     crate::{
         ALPENGLOW_ALPN, CONN_EVENT_CHANNEL_CAP, HANDSHAKE_BURST, HANDSHAKE_GLOBAL_RATE,
-        HANDSHAKE_WORKERS_PER_ENDPOINT, MAX_INFLIGHT_HANDSHAKES, PeerListReceiver,
+        HANDSHAKE_WORKERS_PER_ENDPOINT, MAX_INFLIGHT_HANDSHAKES, METRICS_INTERVAL,
+        PeerListReceiver,
         client::OutboundLoop,
         error::Error,
         server::{AcceptLoop, InboundLoop},
@@ -53,17 +54,14 @@ pub struct QuicDatagramEndpoint {
     pub egress: mpsc::Sender<Bytes>,
     /// Handle for rotating the local identity (TLS cert / pubkey).
     pub key_updater: Arc<KeyUpdater>,
-    /// A retained `peer_list` receiver clone. Exists so a peer_list update
-    /// never panics just because the loop tasks have exited during teardown.
-    _peer_list: PeerListReceiver,
     exit_signals: ExitSignals,
+    /// Spawned event-loop tasks. We must join these so a panic
+    /// that tokio would otherwise swallow is surfaced.
+    task_handles: JoinSet<()>,
     /// Inbound stats, exposed so integration tests can assert on them.
     #[cfg(any(test, feature = "dev-context-only-utils"))]
     pub server_stats: Arc<ServerStats>,
-    /// Spawned event-loop tasks. In test / DCOU builds `Drop` joins these so a panic
-    /// that tokio would otherwise swallow becomes a real failure.
-    task_handles: JoinSet<()>,
-    #[cfg(any(test, feature = "dev-context-only-utils"))]
+    #[cfg(test)]
     runtime_handle: Handle,
 }
 
@@ -197,78 +195,31 @@ impl QuicDatagramEndpoint {
         Ok(Self {
             egress: egress_sender,
             key_updater,
-            _peer_list: peer_list,
             exit_signals,
             task_handles,
-            #[cfg(any(test, feature = "dev-context-only-utils"))]
+            #[cfg(test)]
             runtime_handle: runtime.clone(),
             #[cfg(any(test, feature = "dev-context-only-utils"))]
             server_stats: endpoint_server_stats,
         })
     }
-}
 
-impl Drop for QuicDatagramEndpoint {
-    /// Cancel the spawned loops so a dropped handle can't leak them.
-    fn drop(&mut self) {
+    pub async fn shutdown(&mut self) -> Result<(), String> {
         self.exit_signals.cancel();
-        #[cfg(any(test, feature = "dev-context-only-utils"))]
-        {
-            // Join all the internal tasks so a panic that a loop task would
-            // otherwise swallow turns into a real test failure instead of a green
-            // run with a stray "task panicked" line on stderr.
-            let mut join = || {
-                self.runtime_handle.block_on(async {
-                    let mut errors = vec![];
-                    loop {
-                        match tokio::time::timeout(
-                            Duration::from_secs(1),
-                            self.task_handles.join_next(),
-                        )
-                        .await
-                        {
-                            Ok(Some(Ok(()))) => {}
-                            Ok(Some(Err(join_err))) => {
-                                if join_err.is_panic() {
-                                    errors.push(format!(
-                                        "QuicDatagramEndpoint teardown error {join_err}"
-                                    ));
-                                }
-                            }
-                            // All loop tasks have exited.
-                            Ok(None) => break,
-                            // Stuck tasks on shutdown are also a concern.
-                            Err(_elapsed) => {
-                                errors.push(
-                                    "QuicDatagramEndpoint teardown: a loop task did not exit \
-                                     within 1s"
-                                        .to_string(),
-                                );
-                            }
-                        }
+        loop {
+            match tokio::time::timeout(METRICS_INTERVAL, self.task_handles.join_next()).await {
+                Ok(Some(Ok(()))) => {}
+                Ok(Some(Err(join_err))) => {
+                    if join_err.is_panic() {
+                        return Err(format!("QuicDatagramEndpoint teardown error {join_err}"));
                     }
-                    errors
-                })
-            };
-            // one day we will stop running validator inside ambient tokio runtime
-            let errors = match Handle::try_current().map(|handle| handle.runtime_flavor()) {
-                Err(_) => join(),
-                Ok(tokio::runtime::RuntimeFlavor::MultiThread) => tokio::task::block_in_place(join),
-                // current thread runtime can not be used here
-                Ok(_) => vec![],
-            };
-            if !errors.is_empty() {
-                // Guard against a double panic (which aborts the process).
-                if !std::thread::panicking() {
-                    panic!("QuicDatagramEndpoint encountered errors: {errors:?}");
-                } else {
-                    eprintln!("QuicDatagramEndpoint encountered errors: {errors:?}");
+                }
+                Ok(None) => break Ok(()),
+                Err(_elapsed) => {
+                    return Err("QuicDatagramEndpoint teardown: a task is stuck".to_string());
                 }
             }
         }
-        // Detach rather than abort: in prod the loops wind down on their own once
-        // `shutdown` fires; in test/dev the set was already drained above.
-        self.task_handles.detach_all();
     }
 }
 
@@ -376,6 +327,7 @@ mod tests {
         keypair: Keypair,
         peer_list_sender: PeerListSender,
         ban_sender: mpsc::Sender<BanCommand>,
+        exit_signals: ExitSignals,
     }
 
     impl Node {
@@ -396,58 +348,70 @@ mod tests {
                 .send(Arc::new(map))
                 .expect("peer_list receiver alive");
         }
-    }
 
-    fn spawn_node(
-        rt: &Runtime,
-        keypair: Keypair,
-        peer_list: HashMap<Pubkey, SocketAddr>,
-        max_pps: usize,
-    ) -> Node {
-        let server_socket = bind_to_localhost_unique().expect("bind server UDP");
-        spawn_node_with_sockets(rt, keypair, peer_list, max_pps, vec![server_socket])
-    }
+        fn spawn_node(
+            rt: &Runtime,
+            keypair: Keypair,
+            peer_list: HashMap<Pubkey, SocketAddr>,
+            max_pps: usize,
+        ) -> Node {
+            let server_socket = bind_to_localhost_unique().expect("bind server UDP");
+            Node::spawn_node_with_sockets(rt, keypair, peer_list, max_pps, vec![server_socket])
+        }
 
-    /// As [`spawn_node`], but the caller supplies the inbound socket(s). Used to
-    /// drive the multi-endpoint (SO_REUSEPORT) path where `inbound_sockets.len() > 1`.
-    fn spawn_node_with_sockets(
-        rt: &Runtime,
-        keypair: Keypair,
-        peer_list: HashMap<Pubkey, SocketAddr>,
-        max_pps: usize,
-        inbound_sockets: Vec<UdpSocket>,
-    ) -> Node {
-        let addr = inbound_sockets[0]
-            .local_addr()
-            .expect("server local addr from first inbound socket");
-        let client_socket = bind_to_localhost_unique().expect("bind client UDP");
-        // Channel sizes mirror prod (`solana_core::tvu`): ingress like
-        // `MAX_ALPENGLOW_PACKET_NUM`, ban like `MAX_ALPENGLOW_VOTE_ACCOUNTS * 2`.
-        let (ingress_sender, ingress_receiver) = bounded(INGRESS_CAP);
-        let (ban_sender, ban_receiver) = mpsc::channel(MAX_ALPENGLOW_VOTE_ACCOUNTS * 2);
-        let (peer_list_sender, peer_list_receiver) = watch::channel(Arc::new(peer_list));
-        let endpoint = QuicDatagramEndpoint::spawn(
-            rt.handle(),
-            &keypair,
-            inbound_sockets,
-            client_socket,
-            ingress_sender,
-            peer_list_receiver,
-            ban_receiver,
-            max_pps,
-            ExitSignals::new(Arc::new(AtomicBool::new(false)), CancellationToken::new()),
-        )
-        .expect("QuicDatagramEndpoint::spawn");
-        Node {
-            endpoint,
-            ingress_receiver,
-            addr,
-            keypair,
-            peer_list_sender,
-            ban_sender,
+        /// As [`spawn_node`], but the caller supplies the inbound socket(s). Used to
+        /// drive the multi-endpoint (SO_REUSEPORT) path where `inbound_sockets.len() > 1`.
+        fn spawn_node_with_sockets(
+            rt: &Runtime,
+            keypair: Keypair,
+            peer_list: HashMap<Pubkey, SocketAddr>,
+            max_pps: usize,
+            inbound_sockets: Vec<UdpSocket>,
+        ) -> Node {
+            let exit_signals =
+                ExitSignals::new(Arc::new(AtomicBool::new(false)), CancellationToken::new());
+            let addr = inbound_sockets[0]
+                .local_addr()
+                .expect("server local addr from first inbound socket");
+            let client_socket = bind_to_localhost_unique().expect("bind client UDP");
+            // Channel sizes mirror prod (`solana_core::tvu`): ingress like
+            // `MAX_ALPENGLOW_PACKET_NUM`, ban like `MAX_ALPENGLOW_VOTE_ACCOUNTS * 2`.
+            let (ingress_sender, ingress_receiver) = bounded(INGRESS_CAP);
+            let (ban_sender, ban_receiver) = mpsc::channel(MAX_ALPENGLOW_VOTE_ACCOUNTS * 2);
+            let (peer_list_sender, peer_list_receiver) = watch::channel(Arc::new(peer_list));
+            let endpoint = QuicDatagramEndpoint::spawn(
+                rt.handle(),
+                &keypair,
+                inbound_sockets,
+                client_socket,
+                ingress_sender,
+                peer_list_receiver,
+                ban_receiver,
+                max_pps,
+                exit_signals.clone(),
+            )
+            .expect("QuicDatagramEndpoint::spawn");
+            Node {
+                endpoint,
+                ingress_receiver,
+                addr,
+                keypair,
+                peer_list_sender,
+                ban_sender,
+                exit_signals,
+            }
         }
     }
 
+    impl Drop for Node {
+        fn drop(&mut self) {
+            self.exit_signals.cancel();
+            let handle = self.endpoint.runtime_handle.clone();
+            handle
+                .block_on(self.endpoint.shutdown())
+                .expect("Shutdown should be clean");
+        }
+    }
     /// A one-entry peer_list connecting to `peer` at `addr`.
     fn peer_list_of(peer: Pubkey, addr: SocketAddr) -> HashMap<Pubkey, SocketAddr> {
         std::iter::once((peer, addr)).collect()
@@ -546,23 +510,23 @@ mod tests {
     #[test]
     fn test_client_keeps_trying() {
         let rt = make_runtime_for_tests();
-        let a_kp = Keypair::new();
-        let b_kp = Keypair::new();
-        let a_pk = a_kp.pubkey();
-        let b_pk = b_kp.pubkey();
-        let a = spawn_node(&rt, a_kp, HashMap::new(), HIGH_PPS);
-        let b = spawn_node(&rt, b_kp, HashMap::new(), HIGH_PPS);
-        a.set_peer_list(peer_list_of(b_pk, b.addr));
+        let keypair_a = Keypair::new();
+        let keypair_b = Keypair::new();
+        let pubkey_a = keypair_a.pubkey();
+        let pubkey_b = keypair_b.pubkey();
+        let node_a = Node::spawn_node(&rt, keypair_a, HashMap::new(), HIGH_PPS);
+        let node_b = Node::spawn_node(&rt, keypair_b, HashMap::new(), HIGH_PPS);
+        node_a.set_peer_list(peer_list_of(pubkey_b, node_b.addr));
 
         let from_a = Bytes::from_static(b"from-A");
-        send_until_received(&a, &from_a, &b.ingress_receiver, |d| {
-            (d.peer_pubkey == a_pk && d.message == from_a).then_some(())
+        send_until_received(&node_a, &from_a, &node_b.ingress_receiver, |d| {
+            (d.peer_pubkey == pubkey_a && d.message == from_a).then_some(())
         })
         .expect_err("B should not have received anything");
         // now allow A to connect
-        b.set_peer_list(peer_list_of(a_pk, a.addr));
-        send_until_received(&a, &from_a, &b.ingress_receiver, |d| {
-            (d.peer_pubkey == a_pk && d.message == from_a).then_some(())
+        node_b.set_peer_list(peer_list_of(pubkey_a, node_a.addr));
+        send_until_received(&node_a, &from_a, &node_b.ingress_receiver, |d| {
+            (d.peer_pubkey == pubkey_a && d.message == from_a).then_some(())
         })
         .expect("B never received A's datagram");
     }
@@ -571,23 +535,23 @@ mod tests {
     #[test]
     fn test_delivery_flows_both_directions() {
         let rt = make_runtime_for_tests();
-        let a_kp = Keypair::new();
-        let b_kp = Keypair::new();
-        let a_pk = a_kp.pubkey();
-        let b_pk = b_kp.pubkey();
-        let a = spawn_node(&rt, a_kp, HashMap::new(), HIGH_PPS);
-        let b = spawn_node(&rt, b_kp, HashMap::new(), HIGH_PPS);
-        a.set_peer_list(peer_list_of(b_pk, b.addr));
-        b.set_peer_list(peer_list_of(a_pk, a.addr));
+        let keypair_a = Keypair::new();
+        let keypair_b = Keypair::new();
+        let pubkey_a = keypair_a.pubkey();
+        let pubkey_b = keypair_b.pubkey();
+        let node_a = Node::spawn_node(&rt, keypair_a, HashMap::new(), HIGH_PPS);
+        let node_b = Node::spawn_node(&rt, keypair_b, HashMap::new(), HIGH_PPS);
+        node_a.set_peer_list(peer_list_of(pubkey_b, node_b.addr));
+        node_b.set_peer_list(peer_list_of(pubkey_a, node_a.addr));
 
         let from_a = Bytes::from_static(b"from-A");
-        send_until_received(&a, &from_a, &b.ingress_receiver, |d| {
-            (d.peer_pubkey == a_pk && d.message == from_a).then_some(())
+        send_until_received(&node_a, &from_a, &node_b.ingress_receiver, |d| {
+            (d.peer_pubkey == pubkey_a && d.message == from_a).then_some(())
         })
         .expect("B never received A's datagram");
         let from_b = Bytes::from_static(b"from-B");
-        send_until_received(&b, &from_b, &a.ingress_receiver, |d| {
-            (d.peer_pubkey == b_pk && d.message == from_b).then_some(())
+        send_until_received(&node_b, &from_b, &node_a.ingress_receiver, |d| {
+            (d.peer_pubkey == pubkey_b && d.message == from_b).then_some(())
         })
         .expect("A never received B's datagram");
     }
@@ -597,17 +561,22 @@ mod tests {
     #[test]
     fn test_server_admitted_peer_delivers_unadmitted_is_rejected() {
         let rt = make_runtime_for_tests();
-        let a_kp = Keypair::new();
-        let a_pk = a_kp.pubkey();
-        let server = spawn_node(
+        let keypair_a = Keypair::new();
+        let pubkey_a = keypair_a.pubkey();
+        let server = Node::spawn_node(
             &rt,
             Keypair::new(),
-            peer_list_of(a_pk, ADDRESS_UNKNOWN),
+            peer_list_of(pubkey_a, ADDRESS_UNKNOWN),
             HIGH_PPS,
         );
         let server_pk = server.pubkey();
-        let client_a = spawn_node(&rt, a_kp, peer_list_of(server_pk, server.addr), HIGH_PPS);
-        let client_b = spawn_node(
+        let client_a = Node::spawn_node(
+            &rt,
+            keypair_a,
+            peer_list_of(server_pk, server.addr),
+            HIGH_PPS,
+        );
+        let client_b = Node::spawn_node(
             &rt,
             Keypair::new(),
             peer_list_of(server_pk, server.addr),
@@ -616,7 +585,7 @@ mod tests {
 
         let payload_a = Bytes::from_static(b"hello-from-A");
         send_until_received(&client_a, &payload_a, &server.ingress_receiver, |d| {
-            (d.peer_pubkey == a_pk && d.message == payload_a).then_some(())
+            (d.peer_pubkey == pubkey_a && d.message == payload_a).then_some(())
         })
         .expect("server never received payload from admitted peer A");
         drain_backlog(&server.ingress_receiver);
@@ -641,13 +610,13 @@ mod tests {
         let rt = make_runtime_for_tests();
         let client_keypair = Keypair::new();
         let client_pubkey = client_keypair.pubkey();
-        let server = spawn_node(
+        let server = Node::spawn_node(
             &rt,
             Keypair::new(),
             peer_list_of(client_pubkey, ADDRESS_UNKNOWN),
             HIGH_PPS,
         );
-        let client = spawn_node(
+        let client = Node::spawn_node(
             &rt,
             client_keypair,
             peer_list_of(server.pubkey(), server.addr),
@@ -692,7 +661,7 @@ mod tests {
         let rt = make_runtime_for_tests();
         let shared = Keypair::new();
         let shared_pk = shared.pubkey();
-        let server = spawn_node(
+        let server = Node::spawn_node(
             &rt,
             Keypair::new(),
             peer_list_of(shared_pk, ADDRESS_UNKNOWN),
@@ -706,25 +675,25 @@ mod tests {
             .report_frozen
             .store(true, Ordering::Relaxed);
         let peers = peer_list_of(server_pk, server.addr);
-        let c1 = spawn_node(&rt, shared.insecure_clone(), peers.clone(), HIGH_PPS);
-        let c2 = spawn_node(&rt, shared.insecure_clone(), peers.clone(), HIGH_PPS);
+        let client1 = Node::spawn_node(&rt, shared.insecure_clone(), peers.clone(), HIGH_PPS);
+        let client2 = Node::spawn_node(&rt, shared.insecure_clone(), peers.clone(), HIGH_PPS);
 
-        let p1 = Bytes::from_static(b"from-c1");
-        send_until_received(&c1, &p1, &server.ingress_receiver, |d| {
-            (d.message == p1).then_some(())
+        let payload1 = Bytes::from_static(b"from-c1");
+        send_until_received(&client1, &payload1, &server.ingress_receiver, |d| {
+            (d.message == payload1).then_some(())
         })
         .expect("server did not receive c1's probe");
         drain_backlog(&server.ingress_receiver);
-        let p2 = Bytes::from_static(b"from-c2");
-        send_until_received(&c2, &p2, &server.ingress_receiver, |d| {
-            (d.message == p2).then_some(())
+        let payload2 = Bytes::from_static(b"from-c2");
+        send_until_received(&client2, &payload2, &server.ingress_receiver, |d| {
+            (d.message == payload2).then_some(())
         })
         .expect("server did not receive c2's probe (second same-identity inbound)");
         drain_backlog(&server.ingress_receiver);
 
-        let c3 = spawn_node(&rt, shared.insecure_clone(), peers.clone(), HIGH_PPS);
+        let client3 = Node::spawn_node(&rt, shared.insecure_clone(), peers.clone(), HIGH_PPS);
         let blocked = Bytes::from_static(b"from-c3-table-full");
-        assert_not_delivered(&c3, &blocked, &server.ingress_receiver, 30);
+        assert_not_delivered(&client3, &blocked, &server.ingress_receiver, 30);
         assert!(
             server
                 .endpoint
@@ -745,25 +714,25 @@ mod tests {
         // Two instances of one identity give the server two inbound connections.
         let shared = Keypair::new();
         let shared_pk = shared.pubkey();
-        let server = spawn_node(
+        let server = Node::spawn_node(
             &rt,
             Keypair::new(),
             peer_list_of(shared_pk, ADDRESS_UNKNOWN),
             HIGH_PPS,
         );
         let peers = peer_list_of(server.pubkey(), server.addr);
-        let c1 = spawn_node(&rt, shared.insecure_clone(), peers.clone(), HIGH_PPS);
-        let c2 = spawn_node(&rt, shared.insecure_clone(), peers.clone(), HIGH_PPS);
+        let client1 = Node::spawn_node(&rt, shared.insecure_clone(), peers.clone(), HIGH_PPS);
+        let client2 = Node::spawn_node(&rt, shared.insecure_clone(), peers.clone(), HIGH_PPS);
 
-        let p1 = Bytes::from_static(b"from-c1");
-        send_until_received(&c1, &p1, &server.ingress_receiver, |d| {
-            (d.message == p1).then_some(())
+        let payload1 = Bytes::from_static(b"from-c1");
+        send_until_received(&client1, &payload1, &server.ingress_receiver, |d| {
+            (d.message == payload1).then_some(())
         })
         .expect("server never received c1's probe");
         drain_backlog(&server.ingress_receiver);
-        let p2 = Bytes::from_static(b"from-c2");
-        send_until_received(&c2, &p2, &server.ingress_receiver, |d| {
-            (d.message == p2).then_some(())
+        let payload2 = Bytes::from_static(b"from-c2");
+        send_until_received(&client2, &payload2, &server.ingress_receiver, |d| {
+            (d.message == payload2).then_some(())
         })
         .expect("server never received c2's probe (second same-identity inbound)");
         drain_backlog(&server.ingress_receiver);
@@ -785,8 +754,8 @@ mod tests {
 
         // Neither instance can deliver after eviction.
         let after = Bytes::from_static(b"after-eviction");
-        assert_not_delivered(&c1, &after, &server.ingress_receiver, 20);
-        assert_not_delivered(&c2, &after, &server.ingress_receiver, 20);
+        assert_not_delivered(&client1, &after, &server.ingress_receiver, 20);
+        assert_not_delivered(&client2, &after, &server.ingress_receiver, 20);
     }
 
     /// Per-connection rate-limit check: a burst above the refill rate is
@@ -801,7 +770,7 @@ mod tests {
         let rt = make_runtime_for_tests();
         let client_keypair = Keypair::new();
         let client_pubkey = client_keypair.pubkey();
-        let server = spawn_node(
+        let server = Node::spawn_node(
             &rt,
             Keypair::new(),
             peer_list_of(client_pubkey, ADDRESS_UNKNOWN),
@@ -813,7 +782,7 @@ mod tests {
             .server_stats
             .report_frozen
             .store(true, Ordering::Relaxed);
-        let client = spawn_node(
+        let client = Node::spawn_node(
             &rt,
             client_keypair,
             peer_list_of(server.pubkey(), server.addr),
@@ -908,28 +877,28 @@ mod tests {
     #[test]
     fn test_client_identity_rotation_resends_under_new_identity() {
         let rt = make_runtime_for_tests();
-        let k1 = Keypair::new();
-        let k1_pk = k1.pubkey();
-        let k2 = Keypair::new();
-        let k2_pk = k2.pubkey();
+        let keypair1 = Keypair::new();
+        let pubkey1 = keypair1.pubkey();
+        let keypair2 = Keypair::new();
+        let pubkey2 = keypair2.pubkey();
         // Server admits both the old and new client identities so the rotated
         // client is still accepted after re-handshaking under K2.
-        let server = spawn_node(
+        let server = Node::spawn_node(
             &rt,
             Keypair::new(),
-            HashMap::from([(k1_pk, ADDRESS_UNKNOWN), (k2_pk, ADDRESS_UNKNOWN)]),
+            HashMap::from([(pubkey1, ADDRESS_UNKNOWN), (pubkey2, ADDRESS_UNKNOWN)]),
             HIGH_PPS,
         );
-        let client = spawn_node(
+        let client = Node::spawn_node(
             &rt,
-            k1,
+            keypair1,
             peer_list_of(server.pubkey(), server.addr),
             HIGH_PPS,
         );
 
-        let p1 = Bytes::from_static(b"under-K1");
-        send_until_received(&client, &p1, &server.ingress_receiver, |d| {
-            (d.peer_pubkey == k1_pk && d.message == p1).then_some(())
+        let payload1 = Bytes::from_static(b"under-K1");
+        send_until_received(&client, &payload1, &server.ingress_receiver, |d| {
+            (d.peer_pubkey == pubkey1 && d.message == payload1).then_some(())
         })
         .expect("server never received message attributed to K1");
         drain_backlog(&server.ingress_receiver);
@@ -937,13 +906,13 @@ mod tests {
         client
             .endpoint
             .key_updater
-            .update_key(&k2)
+            .update_key(&keypair2)
             .expect("identity rotation accepted");
         std::thread::sleep(Duration::from_millis(500));
 
-        let p2 = Bytes::from_static(b"under-K2");
-        send_until_received(&client, &p2, &server.ingress_receiver, |d| {
-            (d.peer_pubkey == k2_pk && d.message == p2).then_some(())
+        let payload2 = Bytes::from_static(b"under-K2");
+        send_until_received(&client, &payload2, &server.ingress_receiver, |d| {
+            (d.peer_pubkey == pubkey2 && d.message == payload2).then_some(())
         })
         .expect("server never received message attributed to K2 after rotation");
     }
@@ -955,23 +924,23 @@ mod tests {
         let rt = make_runtime_for_tests();
         let client_keypair = Keypair::new();
         let client_pubkey = client_keypair.pubkey();
-        let server = spawn_node(
+        let server = Node::spawn_node(
             &rt,
             Keypair::new(),
             peer_list_of(client_pubkey, ADDRESS_UNKNOWN),
             HIGH_PPS,
         );
         let server_pubkey1 = server.pubkey();
-        let client = spawn_node(
+        let client = Node::spawn_node(
             &rt,
             client_keypair,
             peer_list_of(server_pubkey1, server.addr),
             HIGH_PPS,
         );
 
-        let p1 = Bytes::from_static(b"under-server-id-1");
-        send_until_received(&client, &p1, &server.ingress_receiver, |d| {
-            (d.message == p1).then_some(())
+        let payload1 = Bytes::from_static(b"under-server-id-1");
+        send_until_received(&client, &payload1, &server.ingress_receiver, |d| {
+            (d.message == payload1).then_some(())
         })
         .expect("server never received datagram under original identity");
         drain_backlog(&server.ingress_receiver);
@@ -1003,9 +972,9 @@ mod tests {
         // The new identity is reachable at the same address once the client
         // peer_list is updated to it.
         client.set_peer_list(peer_list_of(server_pubkey2, server.addr));
-        let p2 = Bytes::from_static(b"under-server-id-2");
-        send_until_received(&client, &p2, &server.ingress_receiver, |d| {
-            (d.message == p2).then_some(())
+        let payload2 = Bytes::from_static(b"under-server-id-2");
+        send_until_received(&client, &payload2, &server.ingress_receiver, |d| {
+            (d.message == payload2).then_some(())
         })
         .expect("server never received datagram under new identity");
     }
@@ -1019,13 +988,13 @@ mod tests {
         let server_pubkey = server_keypair.pubkey();
         let client_keypair = Keypair::new();
         let client_pubkey = client_keypair.pubkey();
-        let server1 = spawn_node(
+        let server1 = Node::spawn_node(
             &rt,
             server_keypair.insecure_clone(),
             peer_list_of(client_pubkey, ADDRESS_UNKNOWN),
             HIGH_PPS,
         );
-        let client = spawn_node(
+        let client = Node::spawn_node(
             &rt,
             client_keypair,
             peer_list_of(server_pubkey, server1.addr),
@@ -1040,7 +1009,7 @@ mod tests {
         drain_backlog(&server1.ingress_receiver);
 
         // Server takes the same identity at a new address (gossip publishes a move).
-        let server2 = spawn_node(
+        let server2 = Node::spawn_node(
             &rt,
             server_keypair.insecure_clone(),
             peer_list_of(client_pubkey, ADDRESS_UNKNOWN),
@@ -1068,7 +1037,7 @@ mod tests {
         let rt = make_runtime_for_tests();
         let keypair = Keypair::new();
         let self_pubkey = keypair.pubkey();
-        let node = spawn_node(&rt, keypair, HashMap::new(), HIGH_PPS);
+        let node = Node::spawn_node(&rt, keypair, HashMap::new(), HIGH_PPS);
         // Our own identity, mapped to our own inbound address.
         node.set_peer_list(peer_list_of(self_pubkey, node.addr));
 
@@ -1099,13 +1068,13 @@ mod tests {
         let rt = make_runtime_for_tests();
         let client_keypair = Keypair::new();
         let client_pubkey = client_keypair.pubkey();
-        let server = spawn_node(
+        let server = Node::spawn_node(
             &rt,
             Keypair::new(),
             peer_list_of(client_pubkey, ADDRESS_UNKNOWN),
             HIGH_PPS,
         );
-        let client = spawn_node(
+        let client = Node::spawn_node(
             &rt,
             client_keypair,
             peer_list_of(server.pubkey(), server.addr),
@@ -1171,7 +1140,7 @@ mod tests {
             .iter()
             .map(|kp| (kp.pubkey(), ADDRESS_UNKNOWN))
             .collect();
-        let server = spawn_node_with_sockets(
+        let server = Node::spawn_node_with_sockets(
             &rt,
             Keypair::new(),
             server_peer_list,
@@ -1181,7 +1150,7 @@ mod tests {
         let server_pubkey = server.pubkey();
         let clients: Vec<Node> = client_keypairs
             .into_iter()
-            .map(|kp| spawn_node(&rt, kp, peer_list_of(server_pubkey, server.addr), HIGH_PPS))
+            .map(|kp| Node::spawn_node(&rt, kp, peer_list_of(server_pubkey, server.addr), HIGH_PPS))
             .collect();
 
         // Every client must get a datagram through.
@@ -1205,7 +1174,7 @@ mod tests {
     #[test]
     fn test_server_inflight_handshakes_are_capped() {
         let rt = make_runtime_for_tests();
-        let node = spawn_node(&rt, Keypair::new(), HashMap::new(), HIGH_PPS);
+        let node = Node::spawn_node(&rt, Keypair::new(), HashMap::new(), HIGH_PPS);
         let server_addr = node.addr;
         let server_name = socket_addr_to_quic_server_name(server_addr);
 
@@ -1257,7 +1226,7 @@ mod tests {
     #[test]
     fn test_server_handshake_rate_is_limited() {
         let rt = make_runtime_for_tests();
-        let node = spawn_node(&rt, Keypair::new(), HashMap::new(), HIGH_PPS);
+        let node = Node::spawn_node(&rt, Keypair::new(), HashMap::new(), HIGH_PPS);
         let server_addr = node.addr;
         let server_name = socket_addr_to_quic_server_name(server_addr);
 
@@ -1321,14 +1290,14 @@ mod tests {
         let server_addr = SocketAddr::new(localhost, server_port);
         let server_socket = bind_to(localhost, server_port).expect("bind server to reserved port");
 
-        let server = spawn_node_with_sockets(
+        let server = Node::spawn_node_with_sockets(
             &rt,
             server_keypair.insecure_clone(),
             peer_list_of(client_pubkey, ADDRESS_UNKNOWN),
             HIGH_PPS,
             vec![server_socket],
         );
-        let client = spawn_node(
+        let client = Node::spawn_node(
             &rt,
             client_keypair,
             peer_list_of(server_pubkey, server_addr),
@@ -1349,7 +1318,7 @@ mod tests {
 
         // Restart on the same port under the same identity.
         let server_socket = bind_to(localhost, server_port).expect("bind server to reserved port");
-        let server = spawn_node_with_sockets(
+        let server = Node::spawn_node_with_sockets(
             &rt,
             server_keypair,
             peer_list_of(client_pubkey, ADDRESS_UNKNOWN),
@@ -1372,7 +1341,7 @@ mod tests {
         let rt = make_runtime_for_tests();
         let client_keypair = Keypair::new();
         let client_pubkey = client_keypair.pubkey();
-        let server = spawn_node(
+        let server = Node::spawn_node(
             &rt,
             Keypair::new(),
             peer_list_of(client_pubkey, ADDRESS_UNKNOWN),
@@ -1383,7 +1352,7 @@ mod tests {
         // The client's peer_list points at the server's address but expects a
         // different identity there.
         let wrong_pubkey = Keypair::new().pubkey();
-        let client = spawn_node(
+        let client = Node::spawn_node(
             &rt,
             client_keypair,
             peer_list_of(wrong_pubkey, server.addr),

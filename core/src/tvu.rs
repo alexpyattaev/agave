@@ -127,10 +127,9 @@ pub struct Tvu {
     bls_sigverifier: JoinHandle<()>,
     votor: Votor,
     commitment_service: AggregateCommitmentService,
-    // Held so votor Endpoint terminates during Drop of TVU.
-    _votor_endpoint: QuicDatagramEndpoint,
+    votor_transport_endpoint: QuicDatagramEndpoint,
     // `None` when running on an ambient runtime (test-validator).
-    _votor_runtime: Option<TokioRuntime>,
+    votor_transport_runtime: Option<TokioRuntime>,
 }
 
 pub struct TvuSockets {
@@ -681,12 +680,12 @@ impl Tvu {
             bls_sigverifier,
             votor,
             commitment_service,
-            _votor_endpoint: endpoint,
-            _votor_runtime: votor_runtime,
+            votor_transport_endpoint: endpoint,
+            votor_transport_runtime: votor_runtime,
         })
     }
 
-    pub fn join(self) -> thread::Result<()> {
+    pub fn join(mut self) -> thread::Result<()> {
         self.retransmit_stage.join()?;
         self.window_service.join()?;
         self.cluster_slots_service.join()?;
@@ -702,6 +701,11 @@ impl Tvu {
         }
         self.drop_bank_service.join()?;
         self.duplicate_shred_listener.join()?;
+        if let Some(rt) = self.votor_transport_runtime.take() {
+            rt.block_on(self.votor_transport_endpoint.shutdown())
+                .expect("Votor-transport should exit cleanly");
+            rt.shutdown_background();
+        }
         self.bls_sigverifier.join()?;
         self.votor.join()?;
         self.commitment_service.join()?;

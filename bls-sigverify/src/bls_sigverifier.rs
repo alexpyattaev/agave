@@ -50,11 +50,13 @@ pub(super) fn send_ban_request(ban_sender: &mpsc::Sender<BanCommand>, peer: Pubk
         peer,
         duration: BAN_TIMEOUT,
     }) {
-        Ok(()) => info!("requested ban for sender={peer}"),
+        Ok(()) => info!("Requested ban for {peer}"),
         Err(mpsc::error::TrySendError::Full(_)) => {
-            warn!("ban channel full; dropping ban request for sender={peer}")
+            warn!("Ban channel full, dropping ban request for sender={peer}")
         }
-        Err(mpsc::error::TrySendError::Closed(_)) => {}
+        Err(mpsc::error::TrySendError::Closed(_)) => {
+            warn!("Ban channel closed: we must be exiting")
+        }
     }
 }
 

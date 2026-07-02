@@ -130,9 +130,7 @@ impl StakedValidatorsCache {
         // staked set. An unstaked node publishes an empty peer_list, so the
         // transport neither connects to staked peers nor admits inbound connections.
         if !staked_nodes.contains_key(&cluster_info.id()) {
-            if peer_list.send(Arc::new(HashMap::new())).is_err() {
-                error!("Could not send empty peer list to the transport endpoint!");
-            }
+            peer_list.send_replace(Arc::new(HashMap::new()));
             return;
         }
 
@@ -145,11 +143,8 @@ impl StakedValidatorsCache {
                 (pubkey, addr)
             })
             .collect();
-        // Publish the latest version via watch channel - this never blocks.
-        peer_list.send(Arc::new(new_peer_list)).expect(
-            "Transport endpoint receivers should not be dropped before StakedValidatorsCache \
-             exits.",
-        );
+        // Publish the latest version - this never blocks nor fails.
+        peer_list.send_replace(Arc::new(new_peer_list));
     }
 }
 

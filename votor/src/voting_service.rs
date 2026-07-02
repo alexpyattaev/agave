@@ -334,7 +334,8 @@ impl VotingService {
                 error!("alpenglow transport egress channel full; dropping votes/certs!");
             }
             Err(TrySendError::Closed(_)) => {
-                warn!("alpenglow egress channel closed; shutting down");
+                // this is intentional - we can tear down the transport before votor.
+                warn!("alpenglow egress channel closed; must be shutting down");
             }
         }
     }
