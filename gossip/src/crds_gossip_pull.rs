@@ -65,9 +65,6 @@ pub struct CrdsFilter {
     mask_bits: u32,
 }
 
-#[cfg(debug_assertions)]
-pub(crate) const MIN_NUM_BLOOM_ITEMS: usize = 512;
-#[cfg(not(debug_assertions))]
 pub(crate) const MIN_NUM_BLOOM_ITEMS: usize = 65_536;
 
 // Loosest mask_bits floor accepted for incoming pull requests.
@@ -694,9 +691,6 @@ pub(crate) mod tests {
 
     // Active filter slots per request set for these small-CRDS tests:
     // `ceil(buckets / SAMPLE_RATE)`, with 1 bucket in debug and 64 in release.
-    #[cfg(debug_assertions)]
-    pub(crate) const MIN_NUM_BLOOM_FILTERS: usize = 1usize.div_ceil(super::SAMPLE_RATE);
-    #[cfg(not(debug_assertions))]
     pub(crate) const MIN_NUM_BLOOM_FILTERS: usize = 64usize.div_ceil(super::SAMPLE_RATE);
 
     impl CrdsGossipPull {
