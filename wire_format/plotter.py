@@ -126,7 +126,7 @@ def ready_indicator(dct, shreds_set):
     return indicators
 
 
-def extract_block(block_df, leader_schedule:dict, gossip_state:dict) -> pd.DataFrame:
+def extract_block(block_df, leader_schedule:dict, gossip_state:dict,   tagged_ip: str = None,) -> pd.DataFrame:
     # tracks the process of FEC set building
     shreds = defaultdict(list)
     # tracks times of arrivals for all duplicates
@@ -141,6 +141,7 @@ def extract_block(block_df, leader_schedule:dict, gossip_state:dict) -> pd.DataF
     fec_set_indices = pd.unique(block_df["fec_index"])
     fec_set_completion_stats = []
     duplicate_senders = defaultdict(int)
+    tagged_ip_shreds = 0
     too_late_shreds = []
     first_shred_timestamp = block_df['time_stamp'].min()
     for fec_id, group in grouped_by_fec:
@@ -155,6 +156,9 @@ def extract_block(block_df, leader_schedule:dict, gossip_state:dict) -> pd.DataF
                     (shred.time_stamp, len(received_indices_multicast))
                 )
                 continue
+            if tagged_ip is not None:
+                if IPv4Address(shred.sender_ip) == tagged_ip:
+                    tagged_ip_shreds += 1
             if shred.index in received_indices:
                 base_shred_time = group.loc[received_indices[shred.index], "time_stamp"]
                 base_shred_y = list(received_indices.keys()).index(shred.index)
@@ -190,10 +194,12 @@ def extract_block(block_df, leader_schedule:dict, gossip_state:dict) -> pd.DataF
 
     )
 
+    if tagged_ip is not None:
+        print(f"Tagged IP {tagged_ip} send {tagged_ip_shreds}")
     if DEBUG_DUP_SENDERS:
         analyze_duplicates(duplicate_senders, gossip_state)
 
-    analyze_late_shreds(too_late_shreds, gossip_state)
+    #analyze_late_shreds(too_late_shreds, gossip_state)
 
     sources = {
         "shreds": shreds,
@@ -225,12 +231,14 @@ def plot_shreds(
     block_df,
     show_repair=True,
     show_duplicate=True,
+
 ):
     ax.clear()
     colors = mpl.color_sequences["Set1"]
     max_y = 0
     zero_time = min(block_df.loc["shreds"].loc["times"].min())
-    # from ipaddress import IPv4Address
+    #from ipaddress import IPv4Address
+
     # late = df.loc[(df["time_stamp"] - zero_time) > 400000]
     # for row in late.loc[:, ["time_stamp", "sender_ip"]].itertuples(index=False):
     #     ip = IPv4Address(row.sender_ip)
@@ -345,6 +353,8 @@ def main():
 
     parser.add_argument("--leader", help="filter slots by this leader (by pubkey)",
                         type=str, default=None)
+    parser.add_argument("--retransmitter", help="filter slots by this retransmitter (IP)",
+                        type=str, default=None)
     args = parser.parse_args()
 
     leader_schedule = {}
@@ -397,7 +407,8 @@ def main():
         title = f"Block number {slot_id} {leader_info}"
         print(title)
 
-        block_df = extract_block(block_df, leader_schedule, gossip_state)
+        tagged_ip = IPv4Address(args.retransmitter ) if args.retransmitter is not None else None
+        block_df = extract_block(block_df, leader_schedule, gossip_state, tagged_ip =tagged_ip )
         # done_batches = when_batch_done(df)
 
         plot_shreds(
@@ -405,6 +416,7 @@ def main():
             block_df,
             show_repair=visibility_options["Repair"],
             show_duplicate=visibility_options["Duplicate"],
+
         )
 
         fig.suptitle(
