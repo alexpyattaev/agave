@@ -1,6 +1,7 @@
 //! Transport tuning constants for a votor-style workload.
 use {
     crate::{ALPENGLOW_ALPN, MAX_ALPENGLOW_VOTE_ACCOUNTS},
+    qualifier_attr::qualifiers,
     quinn::{
         ClientConfig, IdleTimeout, ServerConfig, TransportConfig, VarInt,
         crypto::rustls::{QuicClientConfig, QuicServerConfig},
@@ -76,10 +77,9 @@ pub(crate) fn new_server_config(
 }
 
 /// Build the rustls + quinn client config.
-pub(crate) fn new_client_config(
-    keypair: &Keypair,
-    max_datagrams_per_second_per_peer: usize,
-) -> ClientConfig {
+#[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
+#[cfg_attr(not(feature = "dev-context-only-utils"), qualifiers(pub(crate)))]
+fn new_client_config(keypair: &Keypair, max_datagrams_per_second_per_peer: usize) -> ClientConfig {
     let (cert, key) = new_dummy_x509_certificate(keypair);
     let mut tls = tls_client_config_builder()
         .with_client_auth_cert(vec![cert], key)

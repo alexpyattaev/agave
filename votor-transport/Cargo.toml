@@ -32,10 +32,26 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "ti
 tokio-util = { workspace = true }
 
 [dev-dependencies]
+env_logger = { workspace = true }
 quinn-proto = "0.11"
 solana-keypair = { workspace = true }
 solana-net-utils = { workspace = true, features = ["dev-context-only-utils"] }
+# `solana-metrics` depends on the hasher without `sha2` and relies on some other
+# crate in the graph to turn it on. Nothing does in a votor-transport-only
+# build, so its agent thread panics on the first flush and every later
+# `datapoint_info!` panics the tokio worker that emits it. Mirrors what
+# `solana-metrics` does in its own dev-dependencies.
+solana-sha256-hasher = { workspace = true, features = ["sha2"] }
 tokio = { workspace = true, features = ["full"] }
+
+# CPU-cost measurement harness, driven by `examples/bench_endpoint_scaling.sh`.
+[[example]]
+name = "bench_server"
+required-features = ["agave-unstable-api", "dev-context-only-utils"]
+
+[[example]]
+name = "bench_loadgen"
+required-features = ["agave-unstable-api", "dev-context-only-utils"]
 
 [lints]
 workspace = true

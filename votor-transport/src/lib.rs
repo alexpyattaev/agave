@@ -7,6 +7,12 @@ pub(crate) use error::close_codes;
 pub mod endpoint;
 pub(crate) mod server;
 pub(crate) mod stats;
+// Exposed to `dev-context-only-utils` consumers so benchmark harnesses build
+// clients with exactly the transport config production uses. `qualifier_attr`
+// cannot be applied to a file module, hence the explicit cfg pair.
+#[cfg(feature = "dev-context-only-utils")]
+pub mod transport;
+#[cfg(not(feature = "dev-context-only-utils"))]
 pub(crate) mod transport;
 
 use {
