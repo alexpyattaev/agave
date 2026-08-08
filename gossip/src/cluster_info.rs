@@ -152,7 +152,7 @@ pub const MINIMUM_NUM_TVU_RETRANSMIT_SOCKETS: NonZeroUsize = NonZeroUsize::new(1
 pub const DEFAULT_NUM_TVU_RETRANSMIT_SOCKETS: NonZeroUsize = NonZeroUsize::new(12).unwrap();
 
 /// Number of QUIC endpoints for the votor datagram transport.
-pub const DEFAULT_NUM_VOTOR_QUIC_ENDPOINTS: NonZeroUsize = NonZeroUsize::new(1).unwrap();
+pub const DEFAULT_NUM_VOTOR_QUIC_ENDPOINTS: NonZeroUsize = NonZeroUsize::new(2).unwrap();
 
 // Contact-info save/restore handles trusted local data, so disable wincode's
 // default 4 MiB preallocation limit (which defends untrusted wire input).
