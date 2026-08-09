@@ -557,8 +557,10 @@ version = "4.3.0-alpha.3"
 dependencies = [
  "arrayvec",
  "bytes",
+ "clap 4.5.31",
  "crossbeam-channel",
  "env_logger",
+ "futures 0.3.33",
  "log",
  "qualifier_attr",
  "quinn",
