@@ -35,6 +35,8 @@ LOADGEN_EVENTS = ("task-clock", "context-switches")
 
 # Ceiling on the connect phase, which the server's own clock has to cover.
 CONNECT_BUDGET_SECS = 60
+# Must match `DATAGRAMS_PER_SECOND_PER_PEER` in examples/common/mod.rs.
+DATAGRAMS_PER_SECOND_PER_PEER = 50
 
 
 def parse_args():
@@ -50,20 +52,20 @@ def parse_args():
         default=256,
         help="source ports to use for the generator to spread connections over",
     )
-    p.add_argument("--server-cpus", default="0-9")
+    p.add_argument("--server-cpus", default="0-11")
     p.add_argument(
         "--server-worker-threads",
         type=int,
         default=8,
     )
-    p.add_argument("--loadgen-cpus", default="10-23")
+    p.add_argument("--loadgen-cpus", default="12-23")
     p.add_argument("--loadgen-worker-threads", type=int, default=14)
     p.add_argument("--rust-log", default="error")
     p.add_argument("--out-dir", type=Path)
     return p.parse_args()
 
 
-def expand_cpus(spec):
+def expand_cpus(spec: str) -> list[int]:
     cpus = []
     for part in spec.split(","):
         if "-" in part:
@@ -74,7 +76,7 @@ def expand_cpus(spec):
     return cpus
 
 
-def warn_on_shared_cores(server_cpus, loadgen_cpus):
+def warn_on_shared_cores(server_cpus: str, loadgen_cpus: str) -> None:
     loadgen = set(expand_cpus(loadgen_cpus))
     for cpu in expand_cpus(server_cpus):
         siblings = Path(
@@ -168,7 +170,7 @@ def window_rate(before, after, total_key):
 def perf_stat(pid, events, secs, log_path):
     """Counters for `secs` of `pid`'s execution, keyed by event name."""
     with log_path.open("w") as log:
-        subprocess.run(
+        _ = subprocess.run(
             [
                 "perf",
                 "stat",
@@ -183,7 +185,7 @@ def perf_stat(pid, events, secs, log_path):
             ],
             stdout=subprocess.DEVNULL,
             stderr=log,
-            check=False,
+            check=True,
         )
     counters = {}
     for line in log_path.read_text().splitlines():
@@ -267,7 +269,6 @@ def run_load(args, endpoints, rep, out_dir, env):
         time.sleep(args.settle_secs)
 
         rx_before = latest(server.log_path, "STAT")
-        tx_before = latest(loadgen.log_path, "TX")
         # Both processes are sampled over the same window, so the two CPU
         # numbers are comparable and their sum is the whole cost of the traffic.
         with ThreadPoolExecutor(2) as pool:
@@ -287,16 +288,12 @@ def run_load(args, endpoints, rep, out_dir, env):
             )
             counters, gen_counters = srv_perf.result(), gen_perf.result()
         rx_after = latest(server.log_path, "STAT")
-        tx_after = latest(loadgen.log_path, "TX")
         if not loadgen.alive():
             raise RuntimeError(
                 f"bench_loadgen died during the perf window, see {loadgen.log_path}"
             )
 
-    rx_per_s = window_rate(rx_before, rx_after, "rx_total")
-    tx_per_s = window_rate(tx_before, tx_after, "tx_total")
-    pkts = rx_per_s * args.perf_secs
-    offered = tx_per_s * args.perf_secs
+    pkts = window_rate(rx_before, rx_after, "rx_total") * args.perf_secs
     # Slowest full second inside the window, which catches a dip the window
     # average would smooth over.
     min_rx_per_s = min(
@@ -320,11 +317,6 @@ def run_load(args, endpoints, rep, out_dir, env):
         "RESULT",
         {
             "endpoints": endpoints,
-            "rep": rep,
-            "pkts": round(pkts),
-            "offered": round(offered),
-            "rx_per_s": round(rx_per_s),
-            "cpu_seconds": round(cpu_seconds, 3),
             "cpus_busy": round(cpu_seconds / args.perf_secs, 3),
             "ipc": round(instructions / cycles, 2) if cycles else 0.0,
             "ctxsw_per_pkt": round(per_pkt(counters.get("context-switches", 0)), 4),
@@ -333,7 +325,8 @@ def run_load(args, endpoints, rep, out_dir, env):
             "gen_ctxsw_per_pkt": round(
                 per_pkt(gen_counters.get("context-switches", 0)), 4
             ),
-            "min_rx_per_s": min_rx_per_s,
+            "min_rx_per_s": f"{min_rx_per_s} "
+            f"({args.num_clients * DATAGRAMS_PER_SECOND_PER_PEER})",
         },
         out_dir,
     )
