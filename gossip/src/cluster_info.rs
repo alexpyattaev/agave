@@ -173,6 +173,25 @@ pub enum ClusterInfoError {
     TooManyIncrementalSnapshotHashes,
 }
 
+/// Outcome of looking for a crds vote-index to write the next vote into.
+#[derive(Debug)]
+enum VoteIndexToEvict {
+    /// Index that can be written without discarding a vote at or above the slot being pushed.
+    Evictable(u8),
+    /// Gossip holds a vote of ours at `slot`, at or above the slot being pushed, that was signed
+    /// before this process started: residue replayed back at us by peers that still hold our
+    /// pre-restart values. Overwriting `index` is only sound if we rewound deliberately, which we
+    /// know from having booted into a coordinated cluster restart.
+    PreRestartResidue {
+        index: u8,
+        slot: Slot,
+        wallclock: u64,
+    },
+    /// Gossip holds a vote of ours at `slot`, at or above the slot being pushed, that was signed
+    /// after this process started. Nothing about a restart explains it.
+    DoubleVote { slot: Slot },
+}
+
 pub struct ClusterInfo {
     /// The network
     pub gossip: CrdsGossip,
@@ -196,6 +215,13 @@ pub struct ClusterInfo {
     sigverify_cache: SigVerifyCache,
     /// Alpenglow migration status
     migration_status: OnceLock<Arc<MigrationStatus>>,
+    /// Wallclock at which this process started. Crds values we signed carry a signed wallclock, so
+    /// anything below this was signed by an earlier run of this identity and replayed back at us by
+    /// peers still holding our pre-restart values. See [`ClusterInfo::push_vote`].
+    start_wallclock: u64,
+    /// Slot of the coordinated cluster restart this node booted into, if any (`--wait-for-supermajority`).
+    /// Set once at startup. See [`ClusterInfo::push_vote`].
+    cluster_restart_slot: OnceLock<Slot>,
 }
 
 impl ClusterInfo {
@@ -235,6 +261,8 @@ impl ClusterInfo {
             bind_ip_addrs: Arc::new(BindIpAddrs::default()),
             sigverify_cache: SigVerifyCache::new(),
             migration_status: OnceLock::new(),
+            start_wallclock: timestamp(),
+            cluster_restart_slot: OnceLock::new(),
         };
         me.refresh_my_gossip_contact_info();
         me
@@ -243,6 +271,13 @@ impl ClusterInfo {
     /// Wires in the Alpenglow MigrationStatus.
     pub fn set_migration_status(&self, migration_status: Arc<MigrationStatus>) {
         let _ = self.migration_status.set(migration_status);
+    }
+
+    /// Records that this node booted as part of a coordinated cluster restart rooted at
+    /// `slot`, which makes our own pre-restart votes still circulating in gossip expected
+    /// rather than evidence of a mangled tower. See [`ClusterInfo::push_vote`].
+    pub fn set_cluster_restart_slot(&self, slot: Slot) {
+        let _ = self.cluster_restart_slot.set(slot);
     }
 
     /// Returns `true` iff the migration status has been wired AND the cluster
@@ -910,43 +945,67 @@ impl ClusterInfo {
     /// - Finds the oldest wallclock vote and returns its index
     /// - Otherwise returns the total amount of observed votes
     ///
-    /// If there exists a newer vote in gossip than `new_vote_slot` return `None` as this indicates
-    /// that we might be submitting slashable votes after an improper restart
-    fn find_vote_index_to_evict(&self, new_vote_slot: Slot) -> Option<u8> {
+    /// Votes in gossip at or above `new_vote_slot` are never recycled by that path, as pushing
+    /// over them means we are voting on ground we already covered. They are split by wallclock,
+    /// which is covered by our own signature and so cannot be forged forward by a peer replaying
+    /// values we signed in an earlier run: see [`VoteIndexToEvict`].
+    fn find_vote_index_to_evict(&self, new_vote_slot: Slot) -> VoteIndexToEvict {
         let self_pubkey = self.id();
-        let mut num_crds_votes = 0;
-        let mut exists_newer_vote = false;
-        let vote_index = {
+        let votes: Vec<(u8, Option<Slot>, u64 /*wallclock*/)> = {
             let gossip_crds =
                 self.time_gossip_read_lock("gossip_read_push_vote", &self.stats.push_vote_read);
             (0..MAX_VOTES)
                 .filter_map(|ix| {
-                    let vote = CrdsValueLabel::Vote(ix, self_pubkey);
-                    let vote: &CrdsData = gossip_crds.get(&vote)?;
-                    num_crds_votes += 1;
-                    match &vote {
-                        CrdsData::Vote(_, vote) if vote.slot() < Some(new_vote_slot) => {
-                            Some((vote.wallclock, ix))
-                        }
-                        CrdsData::Vote(_, _) => {
-                            exists_newer_vote = true;
-                            None
-                        }
-                        _ => panic!("this should not happen!"),
-                    }
+                    let label = CrdsValueLabel::Vote(ix, self_pubkey);
+                    let vote: &CrdsData = gossip_crds.get(&label)?;
+                    let CrdsData::Vote(_, vote) = vote else {
+                        panic!("crds value at a Vote label must be a vote, got {vote:?}");
+                    };
+                    Some((ix, vote.slot(), vote.wallclock))
                 })
-                .min() // Boot the oldest evicted vote by wallclock.
-                .map(|(_ /*wallclock*/, ix)| ix)
+                .collect()
         };
-        if exists_newer_vote {
-            return None;
+        // A vote with no slots carries no information, so its index is free to recycle.
+        let is_below_new_vote = |slot: &Option<Slot>| slot.is_none_or(|slot| slot < new_vote_slot);
+        let at_or_above_new_vote = || votes.iter().filter(|(_, slot, _)| !is_below_new_vote(slot));
+        // Boot the oldest evicted vote by wallclock.
+        let oldest_by_wallclock =
+            |votes: &mut dyn Iterator<Item = &(u8, Option<Slot>, u64)>| -> Option<(u8, Slot, u64)> {
+                votes
+                    .min_by_key(|(ix, _, wallclock)| (*wallclock, *ix))
+                    .map(|&(ix, slot, wallclock)| {
+                        (
+                            ix,
+                            slot.expect("a vote at or above new_vote_slot has a slot"),
+                            wallclock,
+                        )
+                    })
+            };
+
+        if let Some((_, slot, _)) = oldest_by_wallclock(
+            &mut at_or_above_new_vote()
+                .filter(|(_, _, wallclock)| *wallclock >= self.start_wallclock),
+        ) {
+            return VoteIndexToEvict::DoubleVote { slot };
         }
+        if let Some((index, slot, wallclock)) = oldest_by_wallclock(&mut at_or_above_new_vote()) {
+            return VoteIndexToEvict::PreRestartResidue {
+                index,
+                slot,
+                wallclock,
+            };
+        }
+        let num_crds_votes = votes.len() as u8;
         if num_crds_votes < MAX_VOTES {
             // Do not evict if there is space in crds
-            Some(num_crds_votes)
-        } else {
-            vote_index
+            return VoteIndexToEvict::Evictable(num_crds_votes);
         }
+        let index = votes
+            .iter()
+            .min_by_key(|(ix, _, wallclock)| (*wallclock, *ix))
+            .map(|&(ix, _, _)| ix)
+            .expect("crds holds MAX_VOTES votes of ours");
+        VoteIndexToEvict::Evictable(index)
     }
 
     pub fn push_vote(&self, tower: &[Slot], vote: Transaction) {
@@ -954,24 +1013,66 @@ impl ClusterInfo {
         debug_assert!(tower.iter().tuple_windows().all(|(a, b)| a < b));
         // Find the oldest crds vote by wallclock that has a lower slot than `tower`
         // and recycle its vote-index. If the crds buffer is not full we instead add a new vote-index.
-        let Some(vote_index) =
-            self.find_vote_index_to_evict(tower.last().copied().expect("Cannot push empty vote"))
-        else {
-            // In this case we have restarted with a mangled/missing tower and are attempting
-            // to push an old vote. This could be a slashable offense so better to panic here.
-            let (_, vote, hash, _) = vote_parser::parse_vote_transaction(&vote).unwrap();
-            panic!(
-                "Submitting old vote, switch: {}, vote slots: {:?}, tower: {:?}. The local \
-                 tower.bin was out of date or missing, and we are attempting to submit slashable \
-                 votes. Another possibility is that the node was not correctly started with wait \
-                 for supermajority during a cluster restart, and then later started with wait for \
-                 supermajority, causing the tower.bin to be pruned. To progress, either download \
-                 a newer snapshot or set --wait-to-vote-slot higher than the last vote present in \
-                 gossip",
-                hash.is_some(),
-                vote.slots(),
-                tower
-            );
+        let vote_index = match self
+            .find_vote_index_to_evict(tower.last().copied().expect("Cannot push empty vote"))
+        {
+            VoteIndexToEvict::Evictable(index) => index,
+            VoteIndexToEvict::PreRestartResidue {
+                index,
+                slot,
+                wallclock,
+            } => {
+                let Some(restart_slot) = self.cluster_restart_slot.get() else {
+                    // In this case we have restarted with a mangled/missing tower and are attempting
+                    // to push an old vote. This could be a slashable offense so better to panic here.
+                    let (_, vote, hash, _) = vote_parser::parse_vote_transaction(&vote).unwrap();
+                    panic!(
+                        "Submitting old vote, switch: {}, vote slots: {:?}, tower: {:?}. Gossip \
+                         holds our own vote for slot {slot}, signed at wallclock {wallclock} by \
+                         an earlier run of this identity (this one started at {}). The local \
+                         tower.bin was out of date or missing, and we are attempting to submit \
+                         slashable votes. Another possibility is that the node was not correctly \
+                         started with wait for supermajority during a cluster restart, and then \
+                         later started with wait for supermajority, causing the tower.bin to be \
+                         pruned. To progress, either download a newer snapshot, set \
+                         --wait-to-vote-slot higher than the last vote present in gossip, or pass \
+                         --wait-for-supermajority if this is a coordinated cluster restart",
+                        hash.is_some(),
+                        vote.slots(),
+                        tower,
+                        self.start_wallclock,
+                    );
+                };
+                // We deliberately rewound to `restart_slot`, so our pre-restart votes above it are
+                // residue that peers keep handing back to us for up to CRDS_GOSSIP_PURGE_DURATION.
+                // Recycling their indices overwrites them with a newer wallclock, which is what
+                // finally drives them out of the cluster's tables.
+                warn!(
+                    "Overwriting our own pre-restart vote for slot {slot} (wallclock {wallclock}) \
+                     at vote-index {index}: if this node was started in a cluster restarted at slot \
+                     {restart_slot}, this is safe to ignore"
+                );
+                datapoint_info!(
+                    "cluster_info-evict_pre_restart_vote",
+                    ("slot", slot, i64),
+                    ("restart_slot", *restart_slot, i64),
+                    ("wallclock", wallclock, i64),
+                );
+                index
+            }
+            VoteIndexToEvict::DoubleVote { slot } => {
+                let (_, vote, hash, _) = vote_parser::parse_vote_transaction(&vote).unwrap();
+                panic!(
+                    "Submitting old vote, switch: {}, vote slots: {:?}, tower: {:?}. Gossip holds \
+                     a vote for slot {slot} under our identity that was signed after this process \
+                     started, so either the tower was rewound within this run or another instance \
+                     is voting with our identity. Either way pushing this vote is a slashable \
+                     offense",
+                    hash.is_some(),
+                    vote.slots(),
+                    tower,
+                );
+            }
         };
         debug_assert!(vote_index < MAX_VOTES);
         self.push_vote_at_index(vote, vote_index, &self_keypair);
@@ -1007,7 +1108,9 @@ impl ClusterInfo {
         } else {
             // If you don't see a vote with the same slot yet, this means you probably
             // restarted, and need to repush and evict the oldest vote
-            let Some(vote_index) = self.find_vote_index_to_evict(refresh_vote_slot) else {
+            let VoteIndexToEvict::Evictable(vote_index) =
+                self.find_vote_index_to_evict(refresh_vote_slot)
+            else {
                 warn!(
                     "trying to refresh slot {refresh_vote_slot} but all votes in gossip table are \
                      for newer slots",
@@ -3465,6 +3568,80 @@ mod tests {
                 .downcast_ref::<String>()
                 .map(|s| { s.starts_with("Submitting old vote") }))
             .unwrap_or_default()
+        );
+    }
+
+    // Seeds the crds with a vote signed by `keypair` before `cluster_info` started, the way a peer
+    // replaying our pre-restart values does.
+    fn seed_pre_restart_vote(cluster_info: &ClusterInfo, keypair: &Keypair, slot: Slot) {
+        // Disambiguated from `solana_vote_interface::state::Vote`, imported by this test module.
+        let vote = crds_data::Vote::new(
+            keypair.pubkey(),
+            new_vote_transaction(vec![slot]),
+            cluster_info.start_wallclock - 1,
+        )
+        .expect("vote transaction should parse");
+        let vote = CrdsValue::new(CrdsData::Vote(0, vote), keypair);
+        cluster_info
+            .gossip
+            .crds
+            .write()
+            .unwrap()
+            .insert(vote, timestamp(), GossipRoute::LocalMessage)
+            .expect("vacant vote index should accept the replayed vote");
+    }
+
+    #[test]
+    fn test_push_vote_panics_on_pre_restart_vote_without_cluster_restart() {
+        let keypair = Arc::new(Keypair::new());
+        let contact_info = ContactInfo::new_localhost(&keypair.pubkey(), 0);
+        let cluster_info =
+            ClusterInfo::new(contact_info, keypair.clone(), SocketAddrSpace::Unspecified);
+        seed_pre_restart_vote(&cluster_info, &keypair, 100);
+
+        let tower = vec![50];
+        let vote = new_vote_transaction(tower.clone());
+        // `KeyedRateLimiter` is not unwind-safe; this test only checks the panic.
+        assert!(
+            panic::catch_unwind(panic::AssertUnwindSafe(|| {
+                cluster_info.push_vote(&tower, vote)
+            }))
+            .err()
+            .and_then(|a| a
+                .downcast_ref::<String>()
+                .map(|s| { s.starts_with("Submitting old vote") }))
+            .unwrap_or_default()
+        );
+    }
+
+    #[test]
+    fn test_push_vote_overwrites_pre_restart_vote_during_cluster_restart() {
+        let keypair = Arc::new(Keypair::new());
+        let contact_info = ContactInfo::new_localhost(&keypair.pubkey(), 0);
+        let cluster_info =
+            ClusterInfo::new(contact_info, keypair.clone(), SocketAddrSpace::Unspecified);
+        seed_pre_restart_vote(&cluster_info, &keypair, 100);
+        cluster_info.set_cluster_restart_slot(49);
+
+        let tower = vec![50];
+        cluster_info.push_vote(&tower, new_vote_transaction(tower.clone()));
+
+        // The residue is gone: its index now holds the vote we just pushed.
+        let (labels, _) = cluster_info.get_votes_with_labels(&mut Cursor::default());
+        let gossip_crds = cluster_info.gossip.crds.read().unwrap();
+        let slots: Vec<_> = labels
+            .iter()
+            .map(|label| {
+                let CrdsData::Vote(_, vote) = gossip_crds.get::<&CrdsData>(label).unwrap() else {
+                    panic!("crds value at a Vote label must be a vote");
+                };
+                vote.slot().unwrap()
+            })
+            .collect();
+        assert_eq!(
+            slots,
+            vec![50],
+            "pre-restart vote for slot 100 should be overwritten"
         );
     }
 

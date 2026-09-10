@@ -1556,6 +1556,15 @@ impl Validator {
             &start_progress,
         )?;
 
+        // Our own votes from before the restart may be cached in gossip on any of the peers
+        // already in the restarted cluster. Tell gossip that pushing votes below them is
+        // expected here rather than evidence of a broken tower state.
+        if let Some(restart_slot) =
+            maybe_cluster_restart_with_hard_fork(config, bank_forks.read().unwrap().root())
+        {
+            cluster_info.set_cluster_restart_slot(restart_slot);
+        }
+
         let blockstore_metric_report_service =
             BlockstoreMetricReportService::new(blockstore.clone(), exit.clone());
 
