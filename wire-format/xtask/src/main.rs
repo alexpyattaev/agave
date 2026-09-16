@@ -25,8 +25,8 @@ fn main() {
 
     use Command::*;
     let ret = match opts.command {
-        BuildXdp(opts) => build_ebpf::build_ebpf(opts, PathBuf::from("wf_ebpf")),
-        BuildTc(opts) => build_ebpf::build_ebpf(opts, PathBuf::from("wf_tc")),
+        BuildXdp(opts) => build_ebpf::build_ebpf(opts, PathBuf::from("wf-ebpf")),
+        BuildTc(opts) => build_ebpf::build_ebpf(opts, PathBuf::from("wf-tc")),
         Run(opts) => run::run(opts),
         Build(opts) => build::build(opts),
     };

@@ -1,5 +1,5 @@
 [package]
-name = "wire_format"
+name = "wire-format"
 version.workspace = true
 authors.workspace = true
 repository.workspace = true
@@ -54,7 +54,7 @@ tokio = { workspace = true, features = [
     "sync",
 ] }
 tokio-util.workspace = true
-wf-common = { path = "wf_common", features = ["user"] }
+wf-common = { path = "wf-common", features = ["user"] }
 wincode.workspace = true
 [lints]
 workspace = true

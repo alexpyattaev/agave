@@ -37,7 +37,7 @@ pub fn build(opts: Options) -> Result<(), anyhow::Error> {
             target: opts.bpf_target,
             debug: opts.debug,
         },
-        PathBuf::from("wf_ebpf"),
+        PathBuf::from("wf-ebpf"),
     )
     .context("Error while building eBPF XDP program")?;
     build_ebpf(
@@ -45,7 +45,7 @@ pub fn build(opts: Options) -> Result<(), anyhow::Error> {
             target: opts.bpf_target,
             debug: opts.debug,
         },
-        PathBuf::from("wf_tc"),
+        PathBuf::from("wf-tc"),
     )
     .context("Error while building eBPF TC program")?;
     build_project(&opts).context("Error while building userspace application")?;

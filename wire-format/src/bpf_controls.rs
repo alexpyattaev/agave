@@ -170,16 +170,16 @@ pub fn bump_rlimit() {
 // runtime. This approach is recommended for most real-world use cases.
 const fn wf_xdp_bytes() -> &'static [u8] {
     #[cfg(debug_assertions)]
-    let b = include_bytes_aligned!("../wf_ebpf/target/bpfel-unknown-none/debug/wf-ebpf");
+    let b = include_bytes_aligned!("../wf-ebpf/target/bpfel-unknown-none/debug/wf-ebpf");
     #[cfg(not(debug_assertions))]
-    let b = include_bytes_aligned!("../wf_ebpf/target/bpfel-unknown-none/release/wf-ebpf");
+    let b = include_bytes_aligned!("../wf-ebpf/target/bpfel-unknown-none/release/wf-ebpf");
     b
 }
 const fn wf_tc_bytes() -> &'static [u8] {
     #[cfg(debug_assertions)]
-    let b = include_bytes_aligned!("../wf_tc/target/bpfel-unknown-none/debug/wf-tc");
+    let b = include_bytes_aligned!("../wf-tc/target/bpfel-unknown-none/debug/wf-tc");
     #[cfg(not(debug_assertions))]
-    let b = include_bytes_aligned!("../wf_tc/target/bpfel-unknown-none/release/wf-tc");
+    let b = include_bytes_aligned!("../wf-tc/target/bpfel-unknown-none/release/wf-tc");
     b
 }
 

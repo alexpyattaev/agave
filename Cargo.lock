@@ -14128,7 +14128,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "wire_format"
+name = "wire-format"
 version = "3.1.0"
 dependencies = [
  "anyhow",
