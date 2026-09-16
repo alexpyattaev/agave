@@ -35,7 +35,7 @@ pub fn run(opts: Options) -> Result<(), anyhow::Error> {
 
     // profile we are building (release or debug)
     let profile = if opts.debug { "debug" } else { "release" };
-    let bin_path = format!("../target/{profile}/wire_format");
+    let bin_path = format!("../target/{profile}/wire-format");
 
     // arguments to pass to the application
     let mut run_args: Vec<_> = opts.run_args.iter().map(String::as_str).collect();
