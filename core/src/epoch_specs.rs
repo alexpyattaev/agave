@@ -1,5 +1,5 @@
 use {
-    solana_clock::Epoch,
+    solana_clock::{Epoch, Slot},
     solana_epoch_schedule::EpochSchedule,
     solana_gossip::epoch_specs::EpochSpecs as EpochSpecsTrait,
     solana_pubkey::Pubkey,
@@ -38,6 +38,10 @@ impl EpochSpecsTrait for EpochSpecs {
 
     fn clone_box(&self) -> Box<dyn EpochSpecsTrait> {
         Box::new(self.clone())
+    }
+
+    fn root_slot(&self) -> Slot {
+        self.sharable_banks.root().slot()
     }
 }
 

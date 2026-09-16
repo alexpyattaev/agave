@@ -97,7 +97,7 @@ impl DuplicateShredHandler {
     }
 
     fn cache_root_info(&mut self) {
-        let last_root = self.blockstore.max_root();
+        let last_root = self.epoch_specs.root_slot();
         if last_root == self.last_root && self.cached_slots_in_epoch != 0 {
             return;
         }
@@ -315,6 +315,7 @@ mod tests {
         let epoch_specs = TestEpochSpecs {
             staked_nodes: Arc::new(HashMap::new()),
             slots_in_epoch,
+            root_slot: bank_forks_arc.read().unwrap().root(),
         };
 
         assert!(blockstore.set_roots([0, 9].iter()).is_ok());
@@ -439,6 +440,7 @@ mod tests {
         let epoch_specs = TestEpochSpecs {
             staked_nodes: Arc::new(HashMap::new()),
             slots_in_epoch,
+            root_slot: bank_forks_arc.read().unwrap().root(),
         };
 
         blockstore.set_roots([0, 9].iter()).unwrap();
