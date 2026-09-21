@@ -1,3 +1,5 @@
+#[cfg(feature = "dev-context-only-utils")]
+use qualifier_attr::qualifiers;
 use {
     super::{repair_handler::RepairHandler, repair_response},
     solana_clock::Slot,
@@ -6,11 +8,13 @@ use {
     std::{net::SocketAddr, sync::Arc},
 };
 
+#[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
 pub(crate) struct StandardRepairHandler {
     blockstore: Arc<Blockstore>,
 }
 
 impl StandardRepairHandler {
+    #[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
     pub(crate) fn new(blockstore: Arc<Blockstore>) -> Self {
         Self { blockstore }
     }
