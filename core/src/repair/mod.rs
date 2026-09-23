@@ -14,5 +14,6 @@ pub mod repair_weighted_traversal;
 pub mod request_response;
 pub mod result;
 pub mod serve_repair;
+pub(crate) mod serve_repair_quic_service;
 pub mod serve_repair_service;
 pub(crate) mod standard_repair_handler;

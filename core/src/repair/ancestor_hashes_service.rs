@@ -7,7 +7,10 @@ use {
             },
             outstanding_requests::OutstandingRequests,
             packet_threshold::DynamicPacketToProcessThreshold,
-            repair_service::{AncestorDuplicateSlotsSender, RepairInfo, RepairStatsGroup},
+            repair_service::{
+                AncestorDuplicateSlotsSender, RepairInfo, RepairQuicConfig, RepairStatsGroup,
+            },
+            request_response::RequestResponse,
             serve_repair::{
                 AncestorHashesRepairType, AncestorHashesResponse, RepairProtocol, ServeRepair,
             },
@@ -16,6 +19,8 @@ use {
         },
         replay_stage::DUPLICATE_THRESHOLD,
     },
+    agave_repair_transport::endpoint::OutboundRepairRequest,
+    bytes::Bytes,
     crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TrySendError, bounded},
     dashmap::{DashMap, mapref::entry::Entry::Occupied},
     solana_clock::Slot,
@@ -209,6 +214,7 @@ impl AncestorHashesService {
             exit,
             ancestor_hashes_replay_update_receiver,
             retryable_slots_receiver,
+            response_sender,
         );
         Some(Self {
             thread_hdls: vec![t_receiver, t_ancestor_hashes_responses, t_ancestor_requests],
@@ -366,6 +372,8 @@ impl AncestorHashesService {
     {
         let packet = packet.into();
         let from_addr = packet.meta().socket_addr();
+        // Set by the QUIC transport on responses it delivers.
+        let is_from_quic = packet.meta().remote_pubkey().is_some();
         let Some(packet_data) = packet.data(..) else {
             stats.invalid_packets += 1;
             return None;
@@ -439,6 +447,12 @@ impl AncestorHashesService {
                 }
             }
             AncestorHashesResponse::Ping(ping) => {
+                if is_from_quic {
+                    // We never ping over QUIC, and the pong would go out on the
+                    // UDP socket to a QUIC address: a free amplification lever.
+                    stats.invalid_packets += 1;
+                    return None;
+                }
                 // verify that packet does not contain extraneous data
                 if cursor.bytes().next().is_some() {
                     stats.invalid_packets += 1;
@@ -586,6 +600,7 @@ impl AncestorHashesService {
         exit: Arc<AtomicBool>,
         ancestor_hashes_replay_update_receiver: AncestorHashesReplayUpdateReceiver,
         retryable_slots_receiver: RetryableSlotsReceiver,
+        response_sender: Sender<PacketBatch>,
     ) -> JoinHandle<()> {
         let migration_status = repair_info.bank_forks.read().unwrap().migration_status();
         let serve_repair = {
@@ -637,6 +652,7 @@ impl AncestorHashesService {
                         &mut repairable_dead_slot_pool,
                         &mut popular_pruned_slot_pool,
                         &mut request_throttle,
+                        &response_sender,
                     );
 
                     let sleep_duration = Duration::from_nanos_u128(
@@ -667,6 +683,7 @@ impl AncestorHashesService {
         repairable_dead_slot_pool: &mut HashSet<Slot>,
         popular_pruned_slot_pool: &mut HashSet<Slot>,
         request_throttle: &mut Vec<u64>,
+        response_sender: &Sender<PacketBatch>,
     ) {
         let root_bank = repair_info.bank_forks.read().unwrap().root_bank();
         for (slot, request_type) in retryable_slots_receiver.try_iter() {
@@ -761,6 +778,8 @@ impl AncestorHashesService {
                 outstanding_requests,
                 identity_keypair,
                 request_type,
+                repair_info.repair_quic.as_ref(),
+                response_sender,
             ) {
                 request_throttle.push(timestamp());
                 if request_type.is_pruned() {
@@ -827,6 +846,8 @@ impl AncestorHashesService {
         outstanding_requests: &RwLock<OutstandingAncestorHashesRepairs>,
         identity_keypair: &Keypair,
         request_type: AncestorRequestType,
+        repair_quic: Option<&RepairQuicConfig>,
+        response_sender: &Sender<PacketBatch>,
     ) -> bool {
         let Ok(sampled_validators) = serve_repair.repair_request_ancestor_hashes_sample_peers(
             duplicate_slot,
@@ -838,6 +859,10 @@ impl AncestorHashesService {
             return false;
         };
 
+        // The address a response is accepted from, which is the address we
+        // actually sent to: over QUIC the transport stamps the peer's QUIC
+        // repair address on the response.
+        let mut asked_addresses = Vec::with_capacity(sampled_validators.len());
         for (pubkey, socket_addr) in &sampled_validators {
             repair_stats
                 .ancestor_requests
@@ -855,16 +880,31 @@ impl AncestorHashesService {
             ) else {
                 continue;
             };
-            let _ = ancestor_hashes_request_socket.send_to(&request_bytes, socket_addr);
+            match serve_repair.quic_repair_address(pubkey, repair_quic) {
+                Some(quic_addr) => {
+                    let quic = repair_quic.expect("a QUIC address implies a QUIC client");
+                    let num_expected_responses = ancestor_hashes_repair_type
+                        .num_expected_responses()
+                        .min(u32::from(u8::MAX))
+                        as u8;
+                    quic.client.try_send(OutboundRepairRequest {
+                        peer: *pubkey,
+                        peer_address: quic_addr,
+                        bytes: Bytes::from(request_bytes),
+                        num_expected_responses,
+                        responses: response_sender.clone(),
+                    });
+                    asked_addresses.push(quic_addr);
+                }
+                None => {
+                    let _ = ancestor_hashes_request_socket.send_to(&request_bytes, socket_addr);
+                    asked_addresses.push(*socket_addr);
+                }
+            }
         }
 
-        let ancestor_request_status = AncestorRequestStatus::new(
-            sampled_validators
-                .into_iter()
-                .map(|(_pk, socket_addr)| socket_addr),
-            duplicate_slot,
-            request_type,
-        );
+        let ancestor_request_status =
+            AncestorRequestStatus::new(asked_addresses.into_iter(), duplicate_slot, request_type);
         assert!(
             ancestor_hashes_request_statuses
                 .insert(duplicate_slot, ancestor_request_status)
@@ -1318,6 +1358,7 @@ mod test {
         retryable_slots_receiver: RetryableSlotsReceiver,
         ancestor_hashes_replay_update_sender: AncestorHashesReplayUpdateSender,
         ancestor_hashes_replay_update_receiver: AncestorHashesReplayUpdateReceiver,
+        response_sender: Sender<PacketBatch>,
     }
 
     impl ManageAncestorHashesState {
@@ -1361,6 +1402,7 @@ mod test {
                 ancestor_duplicate_slots_sender,
                 repair_validators: None,
                 repair_whitelist,
+                repair_quic: None,
             };
 
             let (ancestor_hashes_replay_update_sender, ancestor_hashes_replay_update_receiver) =
@@ -1383,6 +1425,7 @@ mod test {
                 ancestor_hashes_replay_update_receiver,
                 retryable_slots_sender,
                 retryable_slots_receiver,
+                response_sender: bounded(1024).0,
             }
         }
     }
@@ -1479,6 +1522,7 @@ mod test {
             outstanding_requests,
             requester_serve_repair,
             mut repair_stats,
+            response_sender,
             ..
         } = ManageAncestorHashesState::new(vote_simulator.bank_forks);
 
@@ -1499,6 +1543,8 @@ mod test {
             &outstanding_requests,
             &requester_cluster_info.keypair(),
             AncestorRequestType::DeadDuplicateConfirmed,
+            None, // repair_quic
+            &response_sender,
         );
         assert!(ancestor_hashes_request_statuses.is_empty());
 
@@ -1549,6 +1595,8 @@ mod test {
             &outstanding_requests,
             &requester_cluster_info.keypair(),
             AncestorRequestType::DeadDuplicateConfirmed,
+            None, // repair_quic
+            &response_sender,
         );
 
         assert_eq!(ancestor_hashes_request_statuses.len(), 1);
@@ -1609,6 +1657,8 @@ mod test {
             &outstanding_requests,
             &requester_cluster_info.keypair(),
             AncestorRequestType::PopularPruned,
+            None, // repair_quic
+            &response_sender,
         );
 
         assert_eq!(ancestor_hashes_request_statuses.len(), 1);
@@ -1675,6 +1725,7 @@ mod test {
             ancestor_hashes_replay_update_sender,
             ancestor_hashes_replay_update_receiver,
             retryable_slots_receiver,
+            response_sender,
             ..
         } = ManageAncestorHashesState::new(vote_simulator.bank_forks);
         let responder_node = Node::new_localhost();
@@ -1699,6 +1750,7 @@ mod test {
             &mut repairable_dead_slot_pool,
             &mut popular_pruned_slot_pool,
             &mut request_throttle,
+            &response_sender,
         );
 
         assert!(dead_slot_pool.is_empty());
@@ -1741,6 +1793,7 @@ mod test {
             &mut repairable_dead_slot_pool,
             &mut popular_pruned_slot_pool,
             &mut request_throttle,
+            &response_sender,
         );
 
         assert_eq!(dead_slot_pool.len(), 1);
@@ -1780,6 +1833,7 @@ mod test {
             &mut repairable_dead_slot_pool,
             &mut popular_pruned_slot_pool,
             &mut request_throttle,
+            &response_sender,
         );
 
         assert_eq!(dead_slot_pool.len(), 1);
@@ -1811,6 +1865,7 @@ mod test {
             &mut repairable_dead_slot_pool,
             &mut popular_pruned_slot_pool,
             &mut request_throttle,
+            &response_sender,
         );
         assert_eq!(dead_slot_pool.len(), 1);
         assert!(dead_slot_pool.contains(&dead_slot));
@@ -1848,6 +1903,7 @@ mod test {
             &mut repairable_dead_slot_pool,
             &mut popular_pruned_slot_pool,
             &mut request_throttle,
+            &response_sender,
         );
 
         assert_eq!(dead_slot_pool.len(), 1);
@@ -1888,6 +1944,7 @@ mod test {
             &mut repairable_dead_slot_pool,
             &mut popular_pruned_slot_pool,
             &mut request_throttle,
+            &response_sender,
         );
         assert!(dead_slot_pool.is_empty());
         assert!(repairable_dead_slot_pool.is_empty());
@@ -1968,6 +2025,7 @@ mod test {
             ancestor_hashes_replay_update_sender,
             ancestor_hashes_replay_update_receiver,
             retryable_slots_receiver,
+            response_sender,
             ..
         } = ManageAncestorHashesState::new(bank_forks.clone());
 
@@ -2052,6 +2110,7 @@ mod test {
             &mut repairable_dead_slot_pool,
             &mut popular_pruned_slot_pool,
             &mut request_throttle,
+            &response_sender,
         );
 
         assert_eq!(ancestor_hashes_request_statuses.len(), 1);
@@ -2118,6 +2177,7 @@ mod test {
             ancestor_hashes_replay_update_receiver,
             retryable_slots_receiver,
             retryable_slots_sender,
+            response_sender,
             ..
         } = ManageAncestorHashesState::new(vote_simulator.bank_forks);
 
@@ -2155,6 +2215,7 @@ mod test {
             &mut repairable_dead_slot_pool,
             &mut popular_pruned_slot_pool,
             &mut request_throttle,
+            &response_sender,
         );
 
         assert!(dead_slot_pool.is_empty());
@@ -2193,6 +2254,7 @@ mod test {
             &mut repairable_dead_slot_pool,
             &mut popular_pruned_slot_pool,
             &mut request_throttle,
+            &response_sender,
         );
 
         assert!(dead_slot_pool.is_empty());

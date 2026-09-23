@@ -28,6 +28,7 @@ use {
     },
     solana_measure::measure::Measure,
     solana_net_utils::PinnedXdpSender,
+    solana_perf::packet::PacketBatch,
     solana_rayon_threadlimit::get_thread_count,
     solana_runtime::bank_forks::{BankForks, SharableBanks},
     solana_streamer::evicting_sender::EvictingSender,
@@ -235,6 +236,9 @@ pub struct WindowServiceChannels {
     pub duplicate_slots_sender: DuplicateSlotSender,
     pub repair_service_channels: RepairServiceChannels,
     pub block_id_repair_channels: BlockIdRepairChannels,
+    /// Shred repair responses that arrive over QUIC, for the requests the
+    /// block id repair service sends. `None` when repair over QUIC is off.
+    pub repair_quic_response_sender: Option<Sender<PacketBatch>>,
 }
 
 impl WindowServiceChannels {
@@ -245,6 +249,7 @@ impl WindowServiceChannels {
         duplicate_slots_sender: DuplicateSlotSender,
         repair_service_channels: RepairServiceChannels,
         block_id_repair_channels: BlockIdRepairChannels,
+        repair_quic_response_sender: Option<Sender<PacketBatch>>,
     ) -> Self {
         Self {
             verified_receiver,
@@ -253,6 +258,7 @@ impl WindowServiceChannels {
             duplicate_slots_sender,
             repair_service_channels,
             block_id_repair_channels,
+            repair_quic_response_sender,
         }
     }
 }
@@ -288,6 +294,7 @@ impl WindowService {
             duplicate_slots_sender,
             repair_service_channels,
             block_id_repair_channels,
+            repair_quic_response_sender,
         } = window_service_channels;
 
         let repair_service = RepairService::new(
@@ -309,6 +316,7 @@ impl WindowService {
             block_id_repair_channels,
             repair_info,
             outstanding_repair_requests,
+            repair_quic_response_sender,
         );
 
         let (duplicate_sender, duplicate_receiver) = unbounded();

@@ -11,7 +11,7 @@ use {
             duplicate_repair_status::get_ancestor_hash_repair_sample_size,
             outstanding_requests::OutstandingRequests,
             repair_handler::RepairHandler,
-            repair_service::{OutstandingShredRepairs, RepairInfo, RepairStats},
+            repair_service::{OutstandingShredRepairs, RepairInfo, RepairQuicConfig, RepairStats},
             request_response::RequestResponse,
             result::{Error, RepairVerifyError, Result},
         },
@@ -397,7 +397,7 @@ impl RequestResponse for BlockIdRepairType {
 }
 
 #[derive(Default)]
-struct ServeRepairStats {
+pub(crate) struct ServeRepairStats {
     total_requests: usize,
     dropped_requests_outbound_bandwidth: usize,
     dropped_requests_load_shed: usize,
@@ -433,6 +433,7 @@ struct ServeRepairStats {
     err_sig_verify: usize,
     err_unsigned: usize,
     err_id_mismatch: usize,
+    err_pubkey_mismatch: usize,
 }
 
 #[cfg_attr(feature = "frozen-abi", derive(StableAbi, PartialEq))]
@@ -717,6 +718,39 @@ enum RepairPeerWeightSource {
 struct Node {
     pubkey: Pubkey,
     serve_repair: SocketAddr,
+    /// `None` when the peer does not serve repair over QUIC.
+    repair_quic: Option<SocketAddr>,
+}
+
+/// Port a node advertises for `serve_repair(QUIC)` when it does not actually
+/// serve repair over QUIC. It exists so legacy nodes do not conclude we have no
+/// repair ports at all, see
+/// <https://github.com/anza-xyz/agave/pull/10460#discussion_r3054463946>.
+const UNADVERTISED_REPAIR_QUIC_PORT: u16 = 1;
+
+/// Where a repair request should be sent, and what the transport needs to know
+/// to send it. Carrying the destination as data (rather than reviving the old
+/// `Protocol` selector) is deliberate: the previous QUIC path became invisible
+/// dead code precisely because the selector was a hard-wired enum.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RepairTarget {
+    Udp(SocketAddr),
+    Quic {
+        pubkey: Pubkey,
+        addr: SocketAddr,
+        num_expected_responses: u8,
+    },
+}
+
+impl RepairTarget {
+    /// The address the request is sent to, whichever transport carries it.
+    #[cfg(test)]
+    pub(crate) fn address(&self) -> SocketAddr {
+        match self {
+            Self::Udp(addr) => *addr,
+            Self::Quic { addr, .. } => *addr,
+        }
+    }
 }
 
 impl RepairPeers {
@@ -733,9 +767,14 @@ impl RepairPeers {
             .iter()
             .zip(weights)
             .filter_map(|(peer, &weight)| {
+                // UDP remains a hard requirement, so a QUIC-only node is never
+                // selected and QUIC is always a per-peer upgrade, never a floor.
                 let node = Node {
                     pubkey: *peer.pubkey(),
                     serve_repair: peer.serve_repair(Protocol::UDP)?,
+                    repair_quic: peer
+                        .serve_repair(Protocol::QUIC)
+                        .filter(|addr| addr.port() != UNADVERTISED_REPAIR_QUIC_PORT),
                 };
                 Some((node, weight))
             })
@@ -762,7 +801,8 @@ impl RepairPeers {
     }
 }
 
-struct RepairRequestWithMeta {
+#[cfg_attr(test, derive(Debug))]
+pub(crate) struct RepairRequestWithMeta {
     request: RepairProtocol,
     from_addr: SocketAddr,
     stake: u64,
@@ -898,12 +938,74 @@ impl ServeRepair {
         Ok(peers_cache.get(&slot).unwrap())
     }
 
+    /// Serves a single request that arrived over QUIC. There is no ping/pong on
+    /// that path: the TLS handshake attests both the peer's identity and its
+    /// address, and [`Self::decode_request`] rejects a request whose signer
+    /// disagrees with the attestation. Rate limiting is the QUIC transport's,
+    /// so the UDP path's data budget is deliberately not consulted here.
+    pub(crate) fn handle_quic_request(
+        &self,
+        request: BytesPacket,
+        socket_addr_space: &SocketAddrSpace,
+        stats: &mut ServeRepairStats,
+    ) -> Option<PacketBatch> {
+        stats.total_requests += 1;
+        let root_bank = self.sharable_banks.root();
+        let epoch_staked_nodes = root_bank.epoch_staked_nodes(root_bank.epoch());
+        let my_id = self.cluster_info.id();
+        let decoded = {
+            let whitelist = self.repair_whitelist.read().unwrap();
+            Self::decode_request(
+                request,
+                &epoch_staked_nodes,
+                &whitelist,
+                &my_id,
+                socket_addr_space,
+            )
+        };
+        let RepairRequestWithMeta {
+            request,
+            from_addr,
+            stake,
+            whitelisted,
+        } = match decoded {
+            Ok(decoded) => decoded,
+            Err(err) => {
+                Self::record_request_decode_error(&err, stats);
+                return None;
+            }
+        };
+        if matches!(&request, RepairProtocol::Pong(_)) {
+            // We never ping over QUIC, so a pong is a protocol violation rather
+            // than an address validation.
+            stats.err_malformed += 1;
+            return None;
+        }
+        if whitelisted {
+            stats.whitelisted_requests += 1;
+        }
+        match stake > 0 {
+            true => stats.handle_requests_staked += 1,
+            false => stats.handle_requests_unstaked += 1,
+        }
+        stats.processed += 1;
+        let response = self.handle_repair(&from_addr, request, stats, None)?;
+        stats.total_response_packets += response.len();
+        let num_response_bytes: usize = response.iter().map(|packet| packet.meta().size).sum();
+        match stake > 0 {
+            true => stats.total_response_bytes_staked += num_response_bytes,
+            false => stats.total_response_bytes_unstaked += num_response_bytes,
+        }
+        Some(response)
+    }
+
     fn handle_repair(
         &self,
         from_addr: &SocketAddr,
         request: RepairProtocol,
         stats: &mut ServeRepairStats,
-        ping_cache: &mut PingCache,
+        // `None` on the QUIC path, which neither sends nor accepts pings.
+        ping_cache: Option<&mut PingCache>,
     ) -> Option<PacketBatch> {
         let now = Instant::now();
         let (res, label) = {
@@ -976,7 +1078,9 @@ impl ServeRepair {
                 }
                 RepairProtocol::Pong(pong) => {
                     stats.pong += 1;
-                    ping_cache.add(pong, *from_addr, Instant::now());
+                    if let Some(ping_cache) = ping_cache {
+                        ping_cache.add(pong, *from_addr, Instant::now());
+                    }
                     (None, "Pong")
                 }
                 RepairProtocol::ParentAndFecSetCount {
@@ -1074,7 +1178,7 @@ impl ServeRepair {
         }
     }
 
-    fn decode_request(
+    pub(crate) fn decode_request(
         remote_request: BytesPacket,
         epoch_staked_nodes: &Option<Arc<HashMap<Pubkey, u64>>>,
         whitelist: &HashSet<Pubkey>,
@@ -1089,6 +1193,16 @@ impl ServeRepair {
             return Err(Error::from(RepairVerifyError::Malformed));
         }
         Self::verify_signed_packet(my_id, remote_request.buffer(), &request)?;
+        // Requests that arrived over QUIC carry a TLS-attested identity. That
+        // attestation is what the QUIC path has instead of ping/pong, so a
+        // request whose signed sender disagrees with it is a replay and must be
+        // dropped rather than served: the reply is up to
+        // MAX_ORPHAN_REPAIR_RESPONSES packets for one ~130 byte request.
+        if let Some(attested) = remote_request.meta().remote_pubkey()
+            && request.sender() != Some(&attested)
+        {
+            return Err(Error::from(RepairVerifyError::PubkeyMismatch));
+        }
         if request.sender() == Some(my_id) {
             error!("self repair: from_addr={from_addr} my_id={my_id} request={request:?}");
             return Err(Error::from(RepairVerifyError::SelfRepair));
@@ -1118,6 +1232,9 @@ impl ServeRepair {
             }
             Error::RepairVerify(RepairVerifyError::Malformed) => {
                 stats.err_malformed += 1;
+            }
+            Error::RepairVerify(RepairVerifyError::PubkeyMismatch) => {
+                stats.err_pubkey_mismatch += 1;
             }
             Error::RepairVerify(RepairVerifyError::SelfRepair) => {
                 stats.err_self_repair += 1;
@@ -1290,7 +1407,7 @@ impl ServeRepair {
         Ok(())
     }
 
-    fn report_reset_stats(&self, stats: &mut ServeRepairStats) {
+    pub(crate) fn report_reset_stats(&self, stats: &mut ServeRepairStats) {
         if stats.err_self_repair > 0 {
             let my_id = self.cluster_info.id();
             warn!(
@@ -1392,6 +1509,7 @@ impl ServeRepair {
             ("err_sig_verify", stats.err_sig_verify, i64),
             ("err_unsigned", stats.err_unsigned, i64),
             ("err_id_mismatch", stats.err_id_mismatch, i64),
+            ("err_pubkey_mismatch", stats.err_pubkey_mismatch, i64),
         );
 
         *stats = ServeRepairStats::default();
@@ -1604,7 +1722,8 @@ impl ServeRepair {
                 }
             }
             stats.processed += 1;
-            let Some(rsp) = self.handle_repair(&from_addr, request, stats, ping_cache) else {
+            let Some(rsp) = self.handle_repair(&from_addr, request, stats, Some(&mut *ping_cache))
+            else {
                 data_budget.add_tokens(max_response_cost as u64);
                 continue;
             };
@@ -1677,7 +1796,7 @@ impl ServeRepair {
         peers_cache: &mut LruCache<Slot, RepairPeers>,
         repair_stats: &mut RepairStats,
         outstanding_requests: &mut OutstandingShredRepairs,
-    ) -> Result<Option<(SocketAddr, Vec<u8>)>> {
+    ) -> Result<Option<(RepairTarget, Vec<u8>)>> {
         let identity_keypair = repair_info.cluster_info.keypair();
         // find a peer that appears to be accepting replication and has the desired slot, as indicated
         // by a valid tvu port location
@@ -1718,7 +1837,49 @@ impl ServeRepair {
             peer.pubkey,
             repair_request
         );
-        Ok(Some((peer.serve_repair, out)))
+        let target =
+            Self::repair_target(peer, repair_info, repair_request.num_expected_responses());
+        Ok(Some((target, out)))
+    }
+
+    /// Pick the transport for a request to `peer`: QUIC when it is enabled, the
+    /// peer advertises it, and the client is not backing off from that peer;
+    /// UDP otherwise. The backoff check is what keeps a peer that advertises a
+    /// firewalled QUIC port from costing a full repair timeout per request.
+    /// QUIC repair address for `peer`, or `None` when repair over QUIC is off,
+    /// the peer does not serve it, or the peer is currently backed off.
+    pub(crate) fn quic_repair_address(
+        &self,
+        peer: &Pubkey,
+        repair_quic: Option<&RepairQuicConfig>,
+    ) -> Option<SocketAddr> {
+        let quic = repair_quic?;
+        if !quic.required && quic.client.is_backing_off(peer) {
+            return None;
+        }
+        self.cluster_info
+            .lookup_contact_info(peer, |node: &ContactInfo| node.serve_repair(Protocol::QUIC))?
+            .filter(|addr| addr.port() != UNADVERTISED_REPAIR_QUIC_PORT)
+    }
+
+    fn repair_target(
+        peer: &Node,
+        repair_info: &RepairInfo,
+        num_expected_responses: u32,
+    ) -> RepairTarget {
+        let quic_addr = repair_info
+            .repair_quic
+            .as_ref()
+            .filter(|quic| quic.required || !quic.client.is_backing_off(&peer.pubkey))
+            .and(peer.repair_quic);
+        match quic_addr {
+            Some(addr) => RepairTarget::Quic {
+                pubkey: peer.pubkey,
+                addr,
+                num_expected_responses: num_expected_responses.min(u8::MAX as u32) as u8,
+            },
+            None => RepairTarget::Udp(peer.serve_repair),
+        }
     }
 
     /// [`Self::repair_request`] but for [`BlockIdRepairType`] requests
@@ -1729,7 +1890,7 @@ impl ServeRepair {
         repair_request: BlockIdRepairType,
         peers_cache: &mut LruCache<Slot, RepairPeers>,
         outstanding_requests: &mut OutstandingRequests<BlockIdRepairType>,
-    ) -> Result<(Vec<u8>, SocketAddr, Pubkey)> {
+    ) -> Result<(Vec<u8>, RepairTarget, Pubkey)> {
         let identity_keypair = repair_info.cluster_info.keypair();
         let slot = repair_request.slot();
         let weight_source = RepairPeerWeightSource::CurrentEpochStake;
@@ -1756,7 +1917,9 @@ impl ServeRepair {
             peer.pubkey,
             repair_request
         );
-        Ok((out, peer.serve_repair, peer.pubkey))
+        let target =
+            Self::repair_target(peer, repair_info, repair_request.num_expected_responses());
+        Ok((out, target, peer.pubkey))
     }
 
     pub(crate) fn repair_request_ancestor_hashes_sample_peers(
@@ -1993,6 +2156,7 @@ mod tests {
         super::*,
         crate::repair::repair_response,
         agave_feature_set::FeatureSet,
+        bytes::Bytes,
         crossbeam_channel::bounded,
         solana_gossip::{contact_info::ContactInfo, socketaddr, socketaddr_any},
         solana_hash::Hash,
@@ -2008,6 +2172,7 @@ mod tests {
             },
         },
         solana_net_utils::SocketAddrSpace,
+        solana_packet::Meta,
         solana_perf::packet::{
             Packet, PacketFlags, PacketRef, deserialize_slice_from_packet, packet_from_data,
         },
@@ -2183,6 +2348,147 @@ mod tests {
         let num_well_formed = discard_malformed_repair_requests(&mut batch, &mut stats);
         assert_eq!(num_well_formed, 0);
         assert_eq!(stats.err_malformed, 1);
+    }
+
+    /// Builds a signed repair request packet as it would arrive over QUIC,
+    /// with `attested` standing in for the TLS-attested sender identity.
+    fn quic_request_packet(
+        requester: &Keypair,
+        recipient: &Pubkey,
+        attested: &Pubkey,
+        slot: Slot,
+    ) -> BytesPacket {
+        let header = RepairRequestHeader::new(requester.pubkey(), *recipient, timestamp(), 456);
+        let request = RepairProtocol::Orphan { header, slot };
+        let bytes = ServeRepair::repair_proto_to_bytes(&request, requester)
+            .expect("serializing a repair request must succeed");
+        let mut meta = Meta::default();
+        meta.size = bytes.len();
+        meta.set_socket_addr(&socketaddr!(Ipv4Addr::LOCALHOST, 1234));
+        meta.set_remote_pubkey(*attested);
+        BytesPacket::new(Bytes::from(bytes), meta)
+    }
+
+    #[test]
+    fn quic_request_is_rejected_when_attestation_disagrees_with_sender() {
+        let requester = Keypair::new();
+        let me = Keypair::new();
+        let slot = 123;
+        let whitelist = HashSet::default();
+        let socket_addr_space = SocketAddrSpace::Unspecified;
+
+        // Replay of a validly signed request by someone else: the signature
+        // covers neither the address nor the transport, so only the
+        // attestation catches it.
+        let replayed =
+            quic_request_packet(&requester, &me.pubkey(), &Keypair::new().pubkey(), slot);
+        assert_matches!(
+            ServeRepair::decode_request(
+                replayed,
+                &None,
+                &whitelist,
+                &me.pubkey(),
+                &socket_addr_space,
+            ),
+            Err(Error::RepairVerify(RepairVerifyError::PubkeyMismatch))
+        );
+
+        // The same request from the peer that signed it is served.
+        let genuine = quic_request_packet(&requester, &me.pubkey(), &requester.pubkey(), slot);
+        assert_matches!(
+            ServeRepair::decode_request(
+                genuine,
+                &None,
+                &whitelist,
+                &me.pubkey(),
+                &socket_addr_space,
+            ),
+            Ok(_)
+        );
+    }
+
+    #[test]
+    fn pong_over_quic_is_not_served() {
+        let GenesisConfigInfo { genesis_config, .. } = create_genesis_config(10_000);
+        let bank = Bank::new_for_tests(&genesis_config);
+        let bank_forks = BankForks::new_rw_arc(bank);
+        let cluster_info = Arc::new(new_test_cluster_info());
+        let serve_repair = ServeRepair::new_for_test(
+            cluster_info,
+            bank_forks,
+            Arc::new(RwLock::new(HashSet::default())),
+        );
+
+        let peer = Keypair::new();
+        let ping = Ping::new(rand::rng().random(), &peer);
+        let pong = RepairProtocol::Pong(Pong::new(&ping, &peer));
+        let bytes = wincode::serialize(&pong).expect("serializing a pong must succeed");
+        let mut meta = Meta::default();
+        meta.size = bytes.len();
+        meta.set_socket_addr(&socketaddr!(Ipv4Addr::LOCALHOST, 1234));
+        meta.set_remote_pubkey(peer.pubkey());
+        let packet = BytesPacket::new(Bytes::from(bytes), meta);
+
+        let mut stats = ServeRepairStats::default();
+        assert_matches!(
+            serve_repair.handle_quic_request(packet, &SocketAddrSpace::Unspecified, &mut stats),
+            None
+        );
+        assert_eq!(
+            stats.pong, 0,
+            "a pong must never reach the ping cache over QUIC"
+        );
+    }
+
+    #[test]
+    fn repair_peers_ignore_the_unadvertised_quic_repair_port() {
+        let quic_repair_addr = socketaddr!(Ipv4Addr::LOCALHOST, 1250);
+        let mut peers = Vec::new();
+        for quic_port in [UNADVERTISED_REPAIR_QUIC_PORT, quic_repair_addr.port()] {
+            let mut peer = ContactInfo::new(
+                solana_pubkey::new_rand(),
+                timestamp(), // wallclock
+                0u16,        // shred_version
+            );
+            peer.set_serve_repair(Protocol::UDP, socketaddr!(Ipv4Addr::LOCALHOST, 1243))
+                .unwrap();
+            peer.set_serve_repair(Protocol::QUIC, (Ipv4Addr::LOCALHOST, quic_port))
+                .unwrap();
+            peers.push(peer);
+        }
+        let repair_peers = RepairPeers::new(
+            Instant::now(),
+            RepairPeerWeightSource::ClusterSlots,
+            &peers,
+            &[1, 1],
+        )
+        .expect("two peers with UDP repair addresses");
+        assert_eq!(repair_peers.peers[0].repair_quic, None);
+        assert_eq!(repair_peers.peers[1].repair_quic, Some(quic_repair_addr));
+    }
+
+    #[test]
+    fn repair_target_is_udp_without_a_quic_client() {
+        let peer = Node {
+            pubkey: solana_pubkey::new_rand(),
+            serve_repair: socketaddr!(Ipv4Addr::LOCALHOST, 1243),
+            repair_quic: Some(socketaddr!(Ipv4Addr::LOCALHOST, 1250)),
+        };
+        let GenesisConfigInfo { genesis_config, .. } = create_genesis_config(10_000);
+        let bank = Bank::new_for_tests(&genesis_config);
+        let bank_forks = BankForks::new_rw_arc(bank);
+        let cluster_info = Arc::new(new_test_cluster_info());
+        let repair_info = new_test_repair_info(
+            cluster_info,
+            bank_forks,
+            Arc::new(ClusterSlots::default_for_tests()),
+            None, // repair_validators
+        );
+        let num_expected_responses = 1;
+        assert_eq!(
+            ServeRepair::repair_target(&peer, &repair_info, num_expected_responses),
+            RepairTarget::Udp(peer.serve_repair)
+        );
     }
 
     #[test]
@@ -2598,6 +2904,7 @@ mod tests {
             cluster_info,
             cluster_slots,
             epoch_schedule,
+            repair_quic: None,
             ancestor_duplicate_slots_sender,
             repair_validators,
             repair_whitelist: Arc::new(RwLock::new(HashSet::default())),
@@ -2657,7 +2964,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(nxt.serve_repair(Protocol::UDP).unwrap(), serve_repair_addr);
-        assert_eq!(rv.0, nxt.serve_repair(Protocol::UDP).unwrap());
+        assert_eq!(rv.0.address(), nxt.serve_repair(Protocol::UDP).unwrap());
 
         let serve_repair_addr2 = socketaddr!([127, 0, 0, 2], 1243);
         let mut nxt = ContactInfo::new(
@@ -2687,10 +2994,10 @@ mod tests {
                 )
                 .unwrap()
                 .unwrap();
-            if rv.0 == serve_repair_addr {
+            if rv.0.address() == serve_repair_addr {
                 one = true;
             }
-            if rv.0 == serve_repair_addr2 {
+            if rv.0.address() == serve_repair_addr2 {
                 two = true;
             }
         }

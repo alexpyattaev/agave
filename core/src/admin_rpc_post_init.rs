@@ -34,6 +34,10 @@ pub enum KeyUpdaterType {
     Votor,
     /// Votor updater of peer lists
     VotorPeerListService,
+    /// Repair QUIC server endpoint
+    RepairQuicServer,
+    /// Repair QUIC client endpoint
+    RepairQuicClient,
 }
 
 /// Responsible for managing the updaters for identity key change

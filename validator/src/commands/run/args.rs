@@ -669,6 +669,20 @@ pub fn add_args<'a>(app: App<'a, 'a>, default_args: &'a DefaultArgs) -> App<'a, 
             ),
     )
     .arg(
+        Arg::with_name("repair_quic")
+            .hidden(hidden_unless_forced())
+            .long("repair-quic")
+            .value_name("MODE")
+            .takes_value(true)
+            .possible_values(&["off", "enabled", "required"])
+            .default_value("off")
+            .help(
+                "Whether to serve and request repair over QUIC in addition to UDP. \"required\" \
+                 never falls back to UDP for a peer advertising QUIC repair, so a test can assert \
+                 the QUIC path was used.",
+            ),
+    )
+    .arg(
         Arg::with_name("repair_whitelist")
             .hidden(hidden_unless_forced())
             .long("repair-whitelist")

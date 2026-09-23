@@ -521,6 +521,20 @@ impl ClusterInfo {
         Ok(())
     }
 
+    /// Advertise the QUIC repair server port. Until this is called the node
+    /// advertises the placeholder port 1, which peers read as "not serving".
+    pub fn set_serve_repair_quic(
+        &self,
+        serve_repair_addr: SocketAddr,
+    ) -> Result<(), ContactInfoError> {
+        self.my_contact_info
+            .write()
+            .unwrap()
+            .set_serve_repair(contact_info::Protocol::QUIC, serve_repair_addr)?;
+        self.refresh_my_gossip_contact_info();
+        Ok(())
+    }
+
     pub fn set_tpu_vote(
         &self,
         protocol: contact_info::Protocol,
@@ -2439,9 +2453,15 @@ pub struct Sockets {
     // Socket sending out local RepairProtocol::AncestorHashes,
     // and receiving AncestorHashesResponse from the cluster.
     pub ancestor_hashes_requests: UdpSocket, // udp read/write
-    pub tpu_quic: Vec<UdpSocket>,            // quic read only
-    pub tpu_forwards_quic: Vec<UdpSocket>,   // quic read only
-    pub tpu_vote_quic: Vec<UdpSocket>,       // quic read only
+    // Socket receiving remote repair requests over QUIC.
+    pub serve_repair_quic: UdpSocket, // quic read only
+    // Client-side socket for repair requests we make over QUIC. Bound
+    // separately from `repair` so the UDP repair path keeps its own socket
+    // (and its AF_XDP sender) untouched.
+    pub repair_quic_client: UdpSocket,     // quic write only
+    pub tpu_quic: Vec<UdpSocket>,          // quic read only
+    pub tpu_forwards_quic: Vec<UdpSocket>, // quic read only
+    pub tpu_vote_quic: Vec<UdpSocket>,     // quic read only
     // Socket sending out BlockIdRepairType requests,
     // and receiving BlockIdRepairResponse from the cluster.
     pub block_id_repair: UdpSocket,

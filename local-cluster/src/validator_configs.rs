@@ -85,6 +85,7 @@ pub fn safe_clone_config(config: &ValidatorConfig) -> ValidatorConfig {
         delay_leader_block_for_pending_fork: config.delay_leader_block_for_pending_fork,
         votor_peer_overrides: config.votor_peer_overrides.clone(),
         repair_handler_type: config.repair_handler_type.clone(),
+        repair_quic_mode: config.repair_quic_mode,
         snapshot_packager_niceness_adj: config.snapshot_packager_niceness_adj,
     }
 }

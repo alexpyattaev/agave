@@ -298,6 +298,13 @@ impl Node {
             bind_in_range_with_config(bind_ip_addr, port_range, socket_configs.read_write)
                 .expect("ancestor_hashes_requests bind");
 
+        // The port is advertised by the validator via
+        // `ClusterInfo::set_serve_repair_quic` once the QUIC repair server is
+        // actually running; until then peers see the placeholder below.
+        let (_, serve_repair_quic) =
+            bind_in_range_with_config(bind_ip_addr, port_range, socket_configs.primarily_read_quic)
+                .expect("serve_repair_quic bind");
+
         let (votor_server_port, votor_server_primary) =
             bind_in_range_with_config(bind_ip_addr, port_range, socket_configs.primarily_read_quic)
                 .expect("Votor server port bind should succeed");
@@ -347,6 +354,13 @@ impl Node {
             socket_configs.primarily_write_quic,
         )
         .unwrap();
+
+        let (_, repair_quic_client) = bind_in_range_with_config(
+            bind_ip_addr,
+            port_range,
+            socket_configs.primarily_write_quic,
+        )
+        .expect("repair QUIC client socket bind should succeed");
 
         let (_, quic_votor_client) = bind_in_range_with_config(
             bind_ip_addr,
@@ -424,6 +438,8 @@ impl Node {
             serve_repair,
             ip_echo: ip_echo_sockets.into_iter().next(),
             ancestor_hashes_requests,
+            serve_repair_quic,
+            repair_quic_client,
             block_id_repair,
             tpu_quic,
             tpu_forwards_quic,

@@ -42,6 +42,11 @@ struct RepairContext {
 enum ShredIngress {
     Turbine,
     Repair(RepairContext),
+    /// Repair responses received over QUIC. There is no socket to pong on:
+    /// our QUIC server never emits pings, so a ping arriving on that path is a
+    /// buggy or hostile peer and answering it would be a free amplification
+    /// lever. Nonce verification is unchanged.
+    RepairQuic(Arc<RwLock<OutstandingShredRepairs>>),
 }
 
 impl ShredFetchStage {
@@ -56,9 +61,16 @@ impl ShredFetchStage {
         ingress: ShredIngress,
         turbine_mode: TurbineMode,
     ) {
-        let (flags, repair_context) = match &ingress {
-            ShredIngress::Turbine => (PacketFlags::empty(), None),
-            ShredIngress::Repair(repair_context) => (PacketFlags::REPAIR, Some(repair_context)),
+        let (flags, ping_context, outstanding_repair_requests) = match &ingress {
+            ShredIngress::Turbine => (PacketFlags::empty(), None, None),
+            ShredIngress::Repair(repair_context) => (
+                PacketFlags::REPAIR,
+                Some(repair_context),
+                Some(&repair_context.outstanding_repair_requests),
+            ),
+            ShredIngress::RepairQuic(outstanding_repair_requests) => {
+                (PacketFlags::REPAIR, None, Some(outstanding_repair_requests))
+            }
         };
         const STATS_SUBMIT_CADENCE: Duration = Duration::from_secs(1);
         let mut shred_filter_ctx = ShredFilterContext::new_with_turbine_mode(
@@ -71,7 +83,7 @@ impl ShredFetchStage {
             shred_filter_ctx.maybe_update(sharable_banks.root());
             shred_filter_ctx.stats.shred_count += packet_batch.len();
 
-            if let Some(repair_context) = repair_context {
+            if let Some(repair_context) = ping_context {
                 let keypair = repair_context.cluster_info.keypair();
                 ServeRepair::handle_repair_response_pings(
                     &repair_context.repair_socket,
@@ -79,10 +91,11 @@ impl ShredFetchStage {
                     &mut packet_batch,
                     &mut shred_filter_ctx.stats,
                 );
+            }
+            if let Some(outstanding_repair_requests) = outstanding_repair_requests {
                 // Discard packets if repair nonce does not verify.
                 let now = solana_time_utils::timestamp();
-                let mut outstanding_repair_requests =
-                    repair_context.outstanding_repair_requests.write().unwrap();
+                let mut outstanding_repair_requests = outstanding_repair_requests.write().unwrap();
                 packet_batch
                     .iter_mut()
                     .filter(|packet| !packet.meta().discard())
@@ -176,10 +189,40 @@ impl ShredFetchStage {
         (streamers, modifier_hdl)
     }
 
+    /// Spawns the modifier for repair responses that arrive over QUIC. Unlike
+    /// [`Self::packet_modifier`] there is no receiver thread: the transport
+    /// feeds `recvr` directly.
+    fn quic_packet_modifier(
+        recvr: PacketBatchReceiver,
+        sender: EvictingSender<PacketBatch>,
+        bank_forks: &RwLock<BankForks>,
+        shred_version: u16,
+        outstanding_repair_requests: Arc<RwLock<OutstandingShredRepairs>>,
+        turbine_mode: TurbineMode,
+    ) -> JoinHandle<()> {
+        let sharable_banks = bank_forks.read().unwrap().sharable_banks();
+        Builder::new()
+            .name("solTvuRepQPktMod".to_string())
+            .spawn(move || {
+                Self::modify_packets(
+                    recvr,
+                    None, // recvr_stats
+                    sender,
+                    &sharable_banks,
+                    shred_version,
+                    "shred_fetch_repair_quic",
+                    ShredIngress::RepairQuic(outstanding_repair_requests),
+                    turbine_mode,
+                )
+            })
+            .expect("spawning the QUIC repair packet modifier must succeed")
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         sockets: Vec<Arc<UdpSocket>>,
         repair_socket: Arc<UdpSocket>,
+        repair_quic_receiver: Option<PacketBatchReceiver>,
         sender: EvictingSender<PacketBatch>,
         shred_version: u16,
         bank_forks: Arc<RwLock<BankForks>>,
@@ -191,7 +234,7 @@ impl ShredFetchStage {
         let repair_context = RepairContext {
             repair_socket: repair_socket.clone(),
             cluster_info,
-            outstanding_repair_requests,
+            outstanding_repair_requests: outstanding_repair_requests.clone(),
         };
 
         let (mut tvu_threads, tvu_filter) = Self::packet_modifier(
@@ -225,6 +268,16 @@ impl ShredFetchStage {
         tvu_threads.extend(repair_receiver);
         tvu_threads.push(tvu_filter);
         tvu_threads.push(repair_handler);
+        if let Some(repair_quic_receiver) = repair_quic_receiver {
+            tvu_threads.push(Self::quic_packet_modifier(
+                repair_quic_receiver,
+                sender,
+                &bank_forks,
+                shred_version,
+                outstanding_repair_requests,
+                turbine_mode,
+            ));
+        }
         Self {
             thread_hdls: tvu_threads,
         }

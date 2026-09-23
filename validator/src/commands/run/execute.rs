@@ -44,9 +44,9 @@ use {
         system_monitor_service::SystemMonitorService,
         tpu::MAX_VOTES_PER_SECOND,
         validator::{
-            BlockProductionMethod, BlockVerificationMethod, SchedulerPacing, Validator,
-            ValidatorConfig, ValidatorLogConfig, ValidatorStartProgress, ValidatorTpuConfig,
-            is_snapshot_config_valid,
+            BlockProductionMethod, BlockVerificationMethod, RepairQuicMode, SchedulerPacing,
+            Validator, ValidatorConfig, ValidatorLogConfig, ValidatorStartProgress,
+            ValidatorTpuConfig, is_snapshot_config_valid,
         },
     },
     solana_genesis_utils::MAX_GENESIS_ARCHIVE_UNPACKED_SIZE,
@@ -480,6 +480,16 @@ pub fn execute(
         None
     };
 
+    let repair_quic_mode = match matches
+        .value_of("repair_quic")
+        .expect("repair_quic has a default value")
+    {
+        "off" => RepairQuicMode::Off,
+        "enabled" => RepairQuicMode::Enabled,
+        "required" => RepairQuicMode::Required,
+        mode => unreachable!("unhandled --repair-quic value {mode}"),
+    };
+
     let repair_validators = validators_set(
         &identity_keypair.pubkey(),
         matches,
@@ -821,6 +831,7 @@ pub fn execute(
         repair_whitelist,
         votor_peer_overrides,
         repair_handler_type: RepairHandlerType::default(),
+        repair_quic_mode,
         gossip_validators,
         blockstore_cleanup_strategy,
         blockstore_options: run_args.blockstore_options,
