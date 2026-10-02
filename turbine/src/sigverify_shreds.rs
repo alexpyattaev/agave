@@ -180,6 +180,11 @@ fn run_shred_sigverify<const K: usize>(
     });
     stats.num_discards_post += count_discards(shred_buffer);
     shred_buffer
+        .iter()
+        .flatten()
+        .filter(|packet| !packet.meta().discard())
+        .for_each(rtx_test_counters::record);
+    shred_buffer
         .iter_mut()
         .flatten()
         .filter(|packet| !packet.meta().discard())
@@ -230,6 +235,43 @@ fn run_shred_sigverify<const K: usize>(
     stats.elapsed_micros += now.elapsed().as_micros() as u64;
     shred_buffer.clear();
     Ok(())
+}
+
+/// Throwaway instrumentation: counts verified resigned-variant shreds at ingress
+/// (before clearing) by path, and those carrying a nonzero retransmitter signature.
+pub mod rtx_test_counters {
+    use {
+        super::*,
+        std::sync::atomic::{AtomicU64, Ordering},
+    };
+
+    pub static RESIGNED_TURBINE: AtomicU64 = AtomicU64::new(0);
+    pub static RESIGNED_REPAIR: AtomicU64 = AtomicU64::new(0);
+    pub static RTX_NONZERO: AtomicU64 = AtomicU64::new(0);
+
+    pub(super) fn record(packet: &BytesPacket) {
+        let Some(shred) = get_shred(packet) else {
+            return;
+        };
+        if !is_retransmitter_signed_variant(shred).unwrap_or(false) {
+            return;
+        }
+        let is_repair = packet.meta().repair();
+        if is_repair {
+            RESIGNED_REPAIR.fetch_add(1, Ordering::Relaxed);
+        } else {
+            RESIGNED_TURBINE.fetch_add(1, Ordering::Relaxed);
+        }
+        let signature = get_retransmitter_signature(shred).expect("resigned variant");
+        if signature != Signature::default() {
+            RTX_NONZERO.fetch_add(1, Ordering::Relaxed);
+            log::error!(
+                "nonzero retransmitter signature: repair={is_repair}, from={:?}, \
+                 signature={signature}",
+                packet.meta().socket_addr(),
+            );
+        }
+    }
 }
 
 /// Extracts shred bytes and, for repaired shreds, the location where the shred
