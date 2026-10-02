@@ -5941,6 +5941,34 @@ fn test_alpenglow_4_1_offline() {
     test_alpenglow_nodes_basic(NUM_NODES, NUM_OFFLINE);
 }
 
+/// Throwaway: checks that every verified resigned shred arriving at any node carries a
+/// zeroed retransmitter signature, and that such shreds actually arrived over turbine.
+#[test]
+#[serial]
+fn test_rtx_zero_signature_alpenglow_4() {
+    use {
+        solana_turbine::sigverify_shreds::rtx_test_counters::{
+            RESIGNED_REPAIR, RESIGNED_TURBINE, RTX_NONZERO,
+        },
+        std::sync::atomic::Ordering,
+    };
+    const NUM_NODES: usize = 4;
+    test_alpenglow_nodes_basic(NUM_NODES, 0);
+    let turbine = RESIGNED_TURBINE.load(Ordering::Relaxed);
+    let repair = RESIGNED_REPAIR.load(Ordering::Relaxed);
+    let nonzero = RTX_NONZERO.load(Ordering::Relaxed);
+    println!("resigned shreds: turbine={turbine} repair={repair} nonzero_rtx_signature={nonzero}");
+    assert!(turbine > 0, "no resigned shreds were received over turbine");
+    assert!(
+        turbine > repair,
+        "resigned shreds came mostly from repair (turbine={turbine}, repair={repair})"
+    );
+    assert_eq!(
+        nonzero, 0,
+        "resigned shreds with nonzero retransmitter signature"
+    );
+}
+
 /// Basic restart coverage for the Alpenglow execution path.
 /// This does not cover the legacy restart path.
 #[test]
