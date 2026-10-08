@@ -36,7 +36,6 @@ use {
     solana_streamer::sendmmsg::{SendPktsError, multi_target_send},
     solana_time_utils::timestamp,
     std::{
-        collections::{HashMap, HashSet},
         net::{SocketAddr, UdpSocket},
         ops::AddAssign,
         sync::{Arc, RwLock, atomic::Ordering},
@@ -239,7 +238,44 @@ impl<const K: usize> ShredDeduper<K> {
     }
 }
 
-type SlotLeaderCache = HashMap<Slot, (Pubkey, Arc<ClusterNodes<RetransmitStage>>)>;
+type SlotLeaderNodes = (/*leader:*/ Pubkey, Arc<ClusterNodes<RetransmitStage>>);
+
+// Slot leader and turbine tree for each distinct slot in a batch of shreds.
+struct SlotLeaderCache {
+    // Sorted by slot, unique. None if the slot leader is unknown.
+    entries: Vec<(Slot, Option<SlotLeaderNodes>)>,
+}
+
+impl SlotLeaderCache {
+    // Calls resolve once per distinct slot, in ascending order.
+    fn new(
+        slots: impl IntoIterator<Item = Slot>,
+        mut resolve: impl FnMut(Slot) -> Option<SlotLeaderNodes>,
+    ) -> Self {
+        // Shreds of the same slot mostly arrive back to back, so skipping
+        // repeats of the previous slot keeps the vector small before sorting.
+        let mut prev = None;
+        let mut entries: Vec<_> = slots
+            .into_iter()
+            .filter(|&slot| prev.replace(slot) != Some(slot))
+            .map(|slot| (slot, None))
+            .collect();
+        entries.sort_unstable_by_key(|&(slot, _)| slot);
+        entries.dedup_by_key(|&mut (slot, _)| slot);
+        for (slot, entry) in &mut entries {
+            *entry = resolve(*slot);
+        }
+        Self { entries }
+    }
+
+    fn get(&self, slot: Slot) -> Option<&SlotLeaderNodes> {
+        let index = self
+            .entries
+            .binary_search_by_key(&slot, |&(slot, _)| slot)
+            .ok()?;
+        self.entries[index].1.as_ref()
+    }
+}
 
 struct RetransmitJob {
     context: Arc<JobContext>,
@@ -252,7 +288,7 @@ struct JobContext {
     cluster_info: Arc<ClusterInfo>,
     shred_deduper: Arc<ShredDeduper>,
     root_bank: Arc<Bank>,
-    slot_leader_cache: Arc<SlotLeaderCache>,
+    slot_leader_cache: SlotLeaderCache,
     result_sender: Sender<JobStats>,
 }
 
@@ -444,13 +480,12 @@ fn retransmit(context: &RetransmitContext, state: &mut RetransmitState) -> Resul
     epoch_cache_update.stop();
     stats.epoch_cache_update += epoch_cache_update.as_us();
     // Lookup slot leader and cluster nodes for each slot.
-    let slot_leader_cache: SlotLeaderCache = shred_buf
-        .iter()
-        .flatten()
-        .filter_map(|shred| shred::layout::get_slot(shred))
-        .collect::<HashSet<Slot>>()
-        .into_iter()
-        .filter_map(|slot: Slot| {
+    let slot_leader_cache = SlotLeaderCache::new(
+        shred_buf
+            .iter()
+            .flatten()
+            .filter_map(|shred| shred::layout::get_slot(shred)),
+        |slot| {
             max_slots.retransmit.fetch_max(slot, Ordering::Relaxed);
             // TODO: consider using root-bank here for leader lookup!
             // Shreds' signatures should be verified before they reach here,
@@ -464,10 +499,9 @@ fn retransmit(context: &RetransmitContext, state: &mut RetransmitState) -> Resul
             };
             let cluster_nodes =
                 cluster_nodes_cache.get(slot, &root_bank, &working_bank, cluster_info);
-            Some((slot, (slot_leader.id, cluster_nodes)))
-        })
-        .collect();
-    let slot_leader_cache = Arc::new(slot_leader_cache);
+            Some((slot_leader.id, cluster_nodes))
+        },
+    );
 
     if num_shreds == 1 {
         stats.num_small_batches += 1;
@@ -598,7 +632,7 @@ fn get_retransmit_addrs(
     socket_addr_space: &SocketAddrSpace,
     stats: &mut JobStats,
 ) -> Option<(/*root_distance:*/ u8, Vec<SocketAddr>)> {
-    let (slot_leader, cluster_nodes) = cache.get(&shred.slot())?;
+    let (slot_leader, cluster_nodes) = cache.get(shred.slot())?;
     let (root_distance, addrs) = cluster_nodes
         .get_retransmit_addrs(slot_leader, shred, DATA_PLANE_FANOUT, socket_addr_space)
         .inspect_err(|err| match err {
