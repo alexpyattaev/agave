@@ -99,6 +99,51 @@ Run the benchmarks:
 $ cargo +nightly bench
 ```
 
+# Profiling with Tracy
+
+`agave-validator` can be built with an on-demand [Tracy](https://github.com/wolfpld/tracy)
+client. Nothing is collected until a Tracy GUI connects, and the client only
+listens on localhost, so remote hosts are reached through an SSH tunnel.
+
+**Build** (frame pointers give usable sampled callstacks). `RUSTFLAGS` replaces
+the `rustflags` in `.cargo/config.toml`, so `target-cpu` has to be repeated:
+
+```bash
+$ RUSTFLAGS="-Ctarget-cpu=x86-64-v2 -C force-frame-pointers=yes" ./cargo build --profile release-with-debug --features tracy -p agave-validator --bin agave-validator
+```
+
+**Prepare the host** (Linux, not persistent across reboots). This allows
+unprivileged perf events and makes the scheduler tracepoints readable, which
+Tracy needs for sampling and context switch tracing:
+
+```bash
+$ sudo ./scripts/tracy-host-setup.sh
+# when done profiling
+$ sudo ./scripts/tracy-host-setup.sh --revert
+```
+
+**Run** the validator as usual. The client listens on `127.0.0.1:8086`
+(override with the `TRACY_PORT` env var). CPU sampling defaults to 10 kHz per
+core, which produces a lot of data on a busy validator; consider lowering it,
+e.g. `TRACY_SAMPLING_HZ=1000`.
+
+**Connect** from your workstation:
+
+```bash
+$ ssh -N -L 8086:localhost:8086 <validator-host>
+```
+
+then open the Tracy GUI and connect to `127.0.0.1:8086`. The GUI version must
+match the protocol of the `tracy-client` crate in `Cargo.toml` (`tracy-client`
+0.19.x requires Tracy v0.14.1), see the
+[version table](https://github.com/nagisa/rust_tracy_client/tree/main/tracy-client#version-support-table).
+
+Each replay pass over a slot shows as a `replay_slot` zone on the
+`solReplayStage` / `solReplayFork*` threads, with the slot number as the zone
+value. A frame is marked each time replay freezes a bank, so a frame spans from
+one frozen slot to the next, and a `slot <n> frozen` message is logged at the
+same point. Profiling adds overhead while the GUI is connected.
+
 # Release Process
 
 The release process for this project is described [here](RELEASE.md).

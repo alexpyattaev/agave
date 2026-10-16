@@ -117,6 +117,7 @@ use {
         time::{Duration, Instant},
     },
     thiserror::Error,
+    tracy_client::{Client, span},
 };
 
 mod dead_slots;
@@ -3880,6 +3881,8 @@ impl ReplayStage {
             }
         }
 
+        let replay_span = span!("replay_slot");
+        replay_span.emit_value(bank.slot());
         let mut replay_blockstore_time = Measure::start("replay_blockstore_into_bank");
         let blockstore_result = Self::replay_blockstore_into_bank(
             my_shred_version,
@@ -3890,6 +3893,7 @@ impl ReplayStage {
             finalization_cert_sender,
         );
         replay_blockstore_time.stop();
+        drop(replay_span);
         replay_result.replay_result = Some(blockstore_result);
 
         (replay_result, Some(replay_blockstore_time.as_us()))
@@ -4200,6 +4204,12 @@ impl ReplayStage {
                     ("slot", bank_slot, i64),
                     ("hash", bank.hash().to_string(), String),
                 );
+                // Avoid formatting the message unless a Tracy GUI is attached
+                if Client::is_connected() {
+                    let client = Client::running().expect("connected client is running");
+                    client.frame_mark();
+                    client.message(&format!("slot {bank_slot} frozen"), 0);
+                }
 
                 if let Err((expected_hash, computed_hash)) = verify_result {
                     warn!(

@@ -12,7 +12,12 @@ use {
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
 
+#[cfg(feature = "tracy")]
+tracy_client::register_demangler!();
+
 pub fn main() {
+    // No-op unless built with the `tracy` feature
+    let _tracy = tracy_client::Client::start();
     let default_args = DefaultArgs::new();
     let solana_version = solana_version::version!();
     let cli_app = app(solana_version, &default_args);

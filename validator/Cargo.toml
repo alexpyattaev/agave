@@ -19,6 +19,18 @@ rustdoc-args = ["--cfg=docsrs"]
 
 [features]
 agave-unstable-api = []
+# On-demand Tracy profiling, see "Profiling with Tracy" in README.md
+tracy = [
+    "tracy-client/callstack-inlines",
+    "tracy-client/code-transfer",
+    "tracy-client/context-switch-tracing",
+    "tracy-client/demangle",
+    "tracy-client/enable",
+    "tracy-client/ondemand",
+    "tracy-client/only-localhost",
+    "tracy-client/sampling",
+    "tracy-client/system-tracing",
+]
 
 [dependencies]
 agave-cpu-utils = { workspace = true }
@@ -96,6 +108,7 @@ solana-vote-program = { workspace = true }
 symlink = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
+tracy-client = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 caps = { workspace = true }

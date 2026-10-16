@@ -588,6 +588,7 @@ tonic = { version = "0.14.6", default-features = false }
 tonic-prost = "0.14.6"
 tonic-prost-build = "0.14.6"
 tracing = "0.1"
+tracy-client = { version = "0.19.0", default-features = false }
 trees = "0.4.2"
 trezor-client = { version = "0.1.6", default-features = false, features = ["solana"] }
 tungstenite = "0.28.0"
