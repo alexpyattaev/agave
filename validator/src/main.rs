@@ -12,6 +12,12 @@ use {
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
 
+#[cfg(feature = "tracy")]
+tracy_client::register_demangler!();
+
+/// Tracy's own default of 10 kHz per core produces too much data on a busy validator.
+const DEFAULT_TRACY_SAMPLING_HZ: &str = "1000";
+
 pub fn main() {
     let default_args = DefaultArgs::new();
     let solana_version = solana_version::version!();
@@ -79,14 +85,28 @@ pub fn main() {
         )
         .inspect_err(|err| error!("Failed to initialize validator: {err}"))
         .map_err(commands::Error::Dynamic),
-        ("", _) | ("run", _) => commands::run::execute(
-            &matches,
-            solana_version,
-            commands::run::execute::Operation::Run,
-            run_config,
-        )
-        .inspect_err(|err| error!("Failed to start validator: {err}"))
-        .map_err(commands::Error::Dynamic),
+        ("", _) | ("run", _) => {
+            // No-op unless built with the `tracy` feature
+            let _tracy = matches.value_of("tracy_port").map(|port| {
+                // SAFETY: no other thread has been spawned yet, so nothing reads the environment
+                // concurrently. The Tracy client reads both variables when it starts.
+                unsafe {
+                    std::env::set_var("TRACY_PORT", port);
+                    if std::env::var_os("TRACY_SAMPLING_HZ").is_none() {
+                        std::env::set_var("TRACY_SAMPLING_HZ", DEFAULT_TRACY_SAMPLING_HZ);
+                    }
+                }
+                tracy_client::Client::start()
+            });
+            commands::run::execute(
+                &matches,
+                solana_version,
+                commands::run::execute::Operation::Run,
+                run_config,
+            )
+            .inspect_err(|err| error!("Failed to start validator: {err}"))
+            .map_err(commands::Error::Dynamic)
+        }
         ("authorized-voter", Some(authorized_voter_subcommand_matches)) => {
             commands::authorized_voter::execute(authorized_voter_subcommand_matches, &ledger_path)
         }

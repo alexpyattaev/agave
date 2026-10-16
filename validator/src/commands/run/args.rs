@@ -227,6 +227,17 @@ pub fn add_args<'a>(app: App<'a, 'a>, default_args: &'a DefaultArgs) -> App<'a, 
             .help("Enable JSON RPC on this port, and the next port for the RPC websocket"),
     )
     .arg(
+        Arg::with_name("tracy_port")
+            .long("tracy-port")
+            .value_name("PORT")
+            .takes_value(true)
+            .validator(port_validator)
+            .help(
+                "Start the Tracy profiler client, listening on 127.0.0.1 at this port. Has no \
+                 effect unless built with the `tracy` feature",
+            ),
+    )
+    .arg(
         Arg::with_name("private_rpc")
             .long("private-rpc")
             .takes_value(false)
