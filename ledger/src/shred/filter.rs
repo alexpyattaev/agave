@@ -574,6 +574,20 @@ impl ShredRecoveryContext {
         merkle::rebuild_erasure_batch_with_buffer(shreds, &mut self.parity_buffer)
     }
 
+    /// Same as [`Self::rebuild_erasure_batch`] but as on master, without the
+    /// parity check. Used for the recovery A/B timing only.
+    pub(crate) fn rebuild_erasure_batch_master<T: IntoIterator<Item = Shred>>(
+        &mut self,
+        shreds: T,
+    ) -> Result<ErasureBatch, Error> {
+        let shreds: Vec<_> = shreds
+            .into_iter()
+            .filter(|shred| !self.shred_filter_ctx.should_discard_shred(shred.payload()))
+            .collect();
+
+        merkle::rebuild_erasure_batch_master(shreds)
+    }
+
     /// Checks the reconstructed shreds of the erasure batch.
     ///
     /// Yields `Err(())` in place of each reconstructed shred which fails filtering.

@@ -818,8 +818,21 @@ pub(super) fn rebuild_erasure_batch(shreds: Vec<Shred>) -> Result<ErasureBatch, 
 ///
 /// `parity_buffer` is scratch space for the parity check, reused across calls.
 pub(super) fn rebuild_erasure_batch_with_buffer(
-    mut shreds: Vec<Shred>,
+    shreds: Vec<Shred>,
     parity_buffer: &mut Vec<u8>,
+) -> Result<ErasureBatch, Error> {
+    rebuild_erasure_batch_impl(shreds, Some(parity_buffer))
+}
+
+/// Rebuilds the erasure batch the way master does, without the parity check
+/// of received coding shreds. Used for the recovery A/B timing only.
+pub(super) fn rebuild_erasure_batch_master(shreds: Vec<Shred>) -> Result<ErasureBatch, Error> {
+    rebuild_erasure_batch_impl(shreds, None)
+}
+
+fn rebuild_erasure_batch_impl(
+    mut shreds: Vec<Shred>,
+    parity_buffer: Option<&mut Vec<u8>>,
 ) -> Result<ErasureBatch, Error> {
     // Sort shreds by their erasure shard index.
     // In particular this places all data shreds before coding shreds.
@@ -881,7 +894,9 @@ pub(super) fn rebuild_erasure_batch_with_buffer(
         .map(|(shred, &mask)| Ok((shred.erasure_shard_mut()?, mask)))
         .collect::<Result<Vec<_>, Error>>()?;
     let num_received = mask.iter().filter(|&&received| received).count();
-    let coding_matches_data = if num_received > DATA_SHREDS_PER_FEC_BLOCK {
+    let coding_matches_data = if let Some(parity_buffer) = parity_buffer
+        && num_received > DATA_SHREDS_PER_FEC_BLOCK
+    {
         reconstruct_and_check_parity(&mut shards, parity_buffer)?
     } else {
         // Reconstruction derives the missing shards from exactly

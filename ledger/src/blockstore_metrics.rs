@@ -1,11 +1,12 @@
 use {
     crate::{blockstore_meta::BlockLocation, blockstore_options::LedgerColumnOptions},
+    log::Level,
     rocksdb::{
         PerfContext,
         perf::{PerfMetric, PerfStatsLevel, set_perf_stats},
     },
     solana_clock::Slot,
-    solana_metrics::datapoint_info,
+    solana_metrics::{datapoint::DataPoint, datapoint_info, submit},
     solana_time_utils::timestamp,
     std::{
         cell::RefCell,
@@ -51,6 +52,130 @@ pub struct BlockstoreInsertionMetrics {
     pub num_coding_shreds_invalid_erasure_config: usize,
     pub num_coding_shreds_blockstore_error: usize,
     pub num_coding_shreds_inserted: usize,
+    pub recovery_ab: RecoveryAbMetrics,
+}
+
+const NUM_TIMING_BUCKETS: usize = 20;
+
+/// Bucket `k` counts durations in `[2^(k-1), 2^k)` us, the last bucket
+/// everything from `2^(NUM_TIMING_BUCKETS - 2)` us up.
+fn timing_bucket(us: u64) -> usize {
+    (u64::BITS - us.leading_zeros()).min(NUM_TIMING_BUCKETS as u32 - 1) as usize
+}
+
+const RECOVERY_BUCKET_NAMES: [&str; NUM_TIMING_BUCKETS] = [
+    "recovery_lt_1us",
+    "recovery_lt_2us",
+    "recovery_lt_4us",
+    "recovery_lt_8us",
+    "recovery_lt_16us",
+    "recovery_lt_32us",
+    "recovery_lt_64us",
+    "recovery_lt_128us",
+    "recovery_lt_256us",
+    "recovery_lt_512us",
+    "recovery_lt_1024us",
+    "recovery_lt_2048us",
+    "recovery_lt_4096us",
+    "recovery_lt_8192us",
+    "recovery_lt_16384us",
+    "recovery_lt_32768us",
+    "recovery_lt_65536us",
+    "recovery_lt_131072us",
+    "recovery_lt_262144us",
+    "recovery_ge_262144us",
+];
+
+const RETRANSMIT_DELAY_BUCKET_NAMES: [&str; NUM_TIMING_BUCKETS] = [
+    "retransmit_delay_lt_1us",
+    "retransmit_delay_lt_2us",
+    "retransmit_delay_lt_4us",
+    "retransmit_delay_lt_8us",
+    "retransmit_delay_lt_16us",
+    "retransmit_delay_lt_32us",
+    "retransmit_delay_lt_64us",
+    "retransmit_delay_lt_128us",
+    "retransmit_delay_lt_256us",
+    "retransmit_delay_lt_512us",
+    "retransmit_delay_lt_1024us",
+    "retransmit_delay_lt_2048us",
+    "retransmit_delay_lt_4096us",
+    "retransmit_delay_lt_8192us",
+    "retransmit_delay_lt_16384us",
+    "retransmit_delay_lt_32768us",
+    "retransmit_delay_lt_65536us",
+    "retransmit_delay_lt_131072us",
+    "retransmit_delay_lt_262144us",
+    "retransmit_delay_ge_262144us",
+];
+
+/// Timing of shred recovery for one arm of the A/B comparison between the
+/// recovery path of master and the one with SIMD-0504 checks.
+#[derive(Default)]
+pub struct RecoveryArmMetrics {
+    /// Insert calls which ran this arm.
+    pub num_calls: u64,
+    /// Time spent in `try_shred_recovery`, over all calls.
+    pub recovery_us: u64,
+    pub recovery_max_us: u64,
+    recovery_buckets: [u64; NUM_TIMING_BUCKETS],
+    /// Insert calls which sent recovered shreds for retransmit.
+    pub num_retransmit_calls: u64,
+    /// Time from the start of the insert call until recovered shreds are sent
+    /// for retransmit, over calls which recovered shreds.
+    pub retransmit_delay_us: u64,
+    pub retransmit_delay_max_us: u64,
+    retransmit_delay_buckets: [u64; NUM_TIMING_BUCKETS],
+}
+
+impl RecoveryArmMetrics {
+    pub fn record(&mut self, recovery: Duration, retransmit_delay: Option<Duration>) {
+        let recovery_us = recovery.as_micros() as u64;
+        self.num_calls += 1;
+        self.recovery_us += recovery_us;
+        self.recovery_max_us = self.recovery_max_us.max(recovery_us);
+        self.recovery_buckets[timing_bucket(recovery_us)] += 1;
+        if let Some(retransmit_delay) = retransmit_delay {
+            let retransmit_delay_us = retransmit_delay.as_micros() as u64;
+            self.num_retransmit_calls += 1;
+            self.retransmit_delay_us += retransmit_delay_us;
+            self.retransmit_delay_max_us = self.retransmit_delay_max_us.max(retransmit_delay_us);
+            self.retransmit_delay_buckets[timing_bucket(retransmit_delay_us)] += 1;
+        }
+    }
+
+    fn report(&self, arm: &str) {
+        let mut point = DataPoint::new("blockstore-recovery-ab");
+        point
+            .add_tag("arm", arm)
+            .add_field_i64("num_calls", self.num_calls as i64)
+            .add_field_i64("recovery_us", self.recovery_us as i64)
+            .add_field_i64("recovery_max_us", self.recovery_max_us as i64)
+            .add_field_i64("num_retransmit_calls", self.num_retransmit_calls as i64)
+            .add_field_i64("retransmit_delay_us", self.retransmit_delay_us as i64)
+            .add_field_i64(
+                "retransmit_delay_max_us",
+                self.retransmit_delay_max_us as i64,
+            );
+        for (name, count) in RECOVERY_BUCKET_NAMES.iter().zip(&self.recovery_buckets) {
+            point.add_field_i64(name, *count as i64);
+        }
+        for (name, count) in RETRANSMIT_DELAY_BUCKET_NAMES
+            .iter()
+            .zip(&self.retransmit_delay_buckets)
+        {
+            point.add_field_i64(name, *count as i64);
+        }
+        submit(point, Level::Info);
+    }
+}
+
+/// Shred recovery A/B comparison: each insert call runs either the recovery
+/// path of master or the one with SIMD-0504 checks, chosen at random.
+#[derive(Default)]
+pub struct RecoveryAbMetrics {
+    pub master: RecoveryArmMetrics,
+    pub simd504: RecoveryArmMetrics,
 }
 
 #[derive(Default)]
@@ -81,6 +206,8 @@ impl BlockstoreInsertionMetrics {
     const NAME: &str = "blockstore-insert-shreds";
 
     pub fn report_metrics(&self) {
+        self.recovery_ab.master.report("master");
+        self.recovery_ab.simd504.report("simd504");
         datapoint_info!(
             Self::NAME,
             ("num_shreds", self.num_shreds as i64, i64),
