@@ -393,14 +393,11 @@ impl Tvu {
         // pipeline at the same point as the UDP ones so nonce verification and
         // filtering are shared, minus the ping handling the QUIC path has no
         // socket for.
-        let (repair_quic_response_sender, repair_quic_response_receiver) =
-            match tvu_config.repair_quic.as_ref() {
-                Some(_) => {
-                    let (sender, receiver) = bounded(SHRED_FETCH_CHANNEL_SIZE);
-                    (Some(sender), Some(receiver))
-                }
-                None => (None, None),
-            };
+        let (repair_quic_response_sender, repair_quic_response_receiver) = tvu_config
+            .repair_quic
+            .as_ref()
+            .map(|_| bounded(SHRED_FETCH_CHANNEL_SIZE))
+            .unzip();
         let fetch_stage = ShredFetchStage::new(
             fetch_sockets,
             repair_socket.clone(),

@@ -233,9 +233,10 @@ impl ShredFetchStage {
         Builder::new()
             .name("solTvuRepQPktMod".to_string())
             .spawn(move || {
+                let recvr_stats = None;
                 Self::modify_packets(
                     recvr,
-                    None, // recvr_stats
+                    recvr_stats,
                     sender,
                     &sharable_banks,
                     shred_version,

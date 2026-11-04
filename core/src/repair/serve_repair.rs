@@ -818,9 +818,7 @@ struct Node {
 const UNADVERTISED_REPAIR_QUIC_PORT: u16 = 1;
 
 /// Where a repair request should be sent, and what the transport needs to know
-/// to send it. Carrying the destination as data (rather than reviving the old
-/// `Protocol` selector) is deliberate: the previous QUIC path became invisible
-/// dead code precisely because the selector was a hard-wired enum.
+/// to send it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RepairTarget {
     Udp(SocketAddr),
@@ -899,6 +897,10 @@ pub(crate) struct RepairRequestWithMeta {
 }
 
 impl ServeRepair {
+    pub(crate) fn sharable_banks(&self) -> &SharableBanks {
+        &self.sharable_banks
+    }
+
     pub fn new(
         cluster_info: Arc<ClusterInfo>,
         sharable_banks: SharableBanks,
@@ -1049,6 +1051,7 @@ impl ServeRepair {
         let decoded = {
             let whitelist = self.repair_whitelist.read().unwrap();
             let mut remaining_pong_budget = 0;
+            let ping_cache = None;
             Self::decode_request(
                 request,
                 decoded_request,
@@ -1056,7 +1059,7 @@ impl ServeRepair {
                 &whitelist,
                 &my_id,
                 socket_addr_space,
-                None, // ping_cache
+                ping_cache,
                 &mut remaining_pong_budget,
             )
         };
@@ -1982,10 +1985,6 @@ impl ServeRepair {
         Ok(Some((target, out)))
     }
 
-    /// Pick the transport for a request to `peer`: QUIC when it is enabled, the
-    /// peer advertises it, and the client is not backing off from that peer;
-    /// UDP otherwise. The backoff check is what keeps a peer that advertises a
-    /// firewalled QUIC port from costing a full repair timeout per request.
     /// QUIC repair address for `peer`, or `None` when repair over QUIC is off,
     /// the peer does not serve it, or the peer is currently backed off.
     pub(crate) fn quic_repair_address(
@@ -2002,6 +2001,10 @@ impl ServeRepair {
             .filter(|addr| addr.port() != UNADVERTISED_REPAIR_QUIC_PORT)
     }
 
+    /// Pick the transport for a request to `peer`: QUIC when it is enabled, the
+    /// peer advertises it, and the client is not backing off from that peer;
+    /// UDP otherwise. The backoff check is what keeps a peer that advertises a
+    /// firewalled QUIC port from costing a full repair timeout per request.
     fn repair_target(
         peer: &Node,
         repair_info: &RepairInfo,
@@ -2016,7 +2019,7 @@ impl ServeRepair {
             Some(addr) => RepairTarget::Quic {
                 pubkey: peer.pubkey,
                 addr,
-                num_expected_responses: num_expected_responses.min(u8::MAX as u32) as u8,
+                num_expected_responses: u8::try_from(num_expected_responses).unwrap_or(u8::MAX),
             },
             None => RepairTarget::Udp(peer.serve_repair),
         }
@@ -2546,6 +2549,7 @@ mod tests {
         // attestation catches it.
         let replayed =
             quic_request_packet(&requester, &me.pubkey(), &Keypair::new().pubkey(), slot);
+        let ping_cache = None;
         assert_matches!(
             ServeRepair::decode_request(
                 replayed.clone(),
@@ -2554,7 +2558,7 @@ mod tests {
                 &whitelist,
                 &me.pubkey(),
                 &socket_addr_space,
-                None, // ping_cache
+                ping_cache,
                 &mut remaining_pong_budget,
             ),
             Err(Error::RepairVerify(RepairVerifyError::PubkeyMismatch))
@@ -2562,6 +2566,7 @@ mod tests {
 
         // The same request from the peer that signed it is served.
         let genuine = quic_request_packet(&requester, &me.pubkey(), &requester.pubkey(), slot);
+        let ping_cache = None;
         assert_matches!(
             ServeRepair::decode_request(
                 genuine.clone(),
@@ -2570,7 +2575,7 @@ mod tests {
                 &whitelist,
                 &me.pubkey(),
                 &socket_addr_space,
-                None, // ping_cache
+                ping_cache,
                 &mut remaining_pong_budget,
             ),
             Ok(_)
@@ -2614,16 +2619,14 @@ mod tests {
     fn repair_peers_ignore_the_unadvertised_quic_repair_port() {
         let quic_repair_addr = socketaddr!(Ipv4Addr::LOCALHOST, 1250);
         let mut peers = Vec::new();
+        let shred_version = 0;
         for quic_port in [UNADVERTISED_REPAIR_QUIC_PORT, quic_repair_addr.port()] {
-            let mut peer = ContactInfo::new(
-                solana_pubkey::new_rand(),
-                timestamp(), // wallclock
-                0u16,        // shred_version
-            );
+            let wallclock = timestamp();
+            let mut peer = ContactInfo::new(solana_pubkey::new_rand(), wallclock, shred_version);
             peer.set_serve_repair(Protocol::UDP, socketaddr!(Ipv4Addr::LOCALHOST, 1243))
-                .unwrap();
+                .expect("valid UDP repair address");
             peer.set_serve_repair(Protocol::QUIC, (Ipv4Addr::LOCALHOST, quic_port))
-                .unwrap();
+                .expect("valid QUIC repair address");
             peers.push(peer);
         }
         let repair_peers = RepairPeers::new(
@@ -2648,11 +2651,12 @@ mod tests {
         let bank = Bank::new_for_tests(&genesis_config);
         let bank_forks = BankForks::new_rw_arc(bank);
         let cluster_info = Arc::new(new_test_cluster_info());
+        let repair_validators = None;
         let repair_info = new_test_repair_info(
             cluster_info,
             bank_forks,
             Arc::new(ClusterSlots::default_for_tests()),
-            None, // repair_validators
+            repair_validators,
         );
         let num_expected_responses = 1;
         assert_eq!(

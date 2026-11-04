@@ -27,8 +27,6 @@ pub struct ClientStats {
     pub(crate) connection_lost: AtomicU64,
     /// A connect attempt failed: setup error, protocol fault, or wrong identity.
     pub(crate) connect_failed: AtomicU64,
-    /// Peers currently parked in backoff, i.e. served over UDP instead.
-    pub(crate) peers_in_backoff: AtomicU64,
     /// Connections closed because the peer's gossip address changed.
     pub(crate) connection_closed_peer_moved: AtomicU64,
     /// Connections closed because the local identity changed.
@@ -52,6 +50,11 @@ pub struct ServerStats {
     pub(crate) response_bytes_sent: AtomicU64,
     /// Times a peer's budget ran dry and we stopped reading its streams.
     pub(crate) peer_rate_limited: AtomicU64,
+    /// Times a staked peer's streams were paused because the global budget ran dry.
+    pub(crate) global_rate_limited_staked: AtomicU64,
+    /// Times an unstaked peer's streams were paused because staked peers left
+    /// no global headroom.
+    pub(crate) global_rate_limited_unstaked: AtomicU64,
     /// A connection ended through an expected teardown path.
     pub(crate) connection_lost: AtomicU64,
     /// A connection failed abnormally during accept, handshake, or read.
@@ -180,8 +183,6 @@ impl ClientStats {
         // Snapshot and reset every counter unconditionally, *before* `datapoint_info!`
         // so we do not end up with huge values here when operator changes log level.
         let connections_peak = take_peak(&self.peak_connections, live_connections);
-        self.peers_in_backoff
-            .store(peers_in_backoff, Ordering::Relaxed);
         let requests_sent = swap(&self.requests_sent);
         let requests_dropped = swap(&self.requests_dropped);
         let responses_received = swap(&self.responses_received);
@@ -224,15 +225,20 @@ impl ClientStats {
 
 impl ServerStats {
     /// Emit and reset the inbound counters.
-    pub(crate) fn report(&self, live_connections: u64) {
+    pub(crate) fn report(&self, staked_peers: u64, unstaked_peers: u64) {
         // Snapshot-and-reset every counter unconditionally, *before* `datapoint_info!`.
-        let unique_peers_peak = take_peak(&self.peak_unique_peers, live_connections);
+        let unique_peers_peak = take_peak(
+            &self.peak_unique_peers,
+            staked_peers.saturating_add(unstaked_peers),
+        );
         let requests_received = swap(&self.requests_received);
         let requests_dropped_channel_full = swap(&self.requests_dropped_channel_full);
         let request_read_failed = swap(&self.request_read_failed);
         let responses_sent = swap(&self.responses_sent);
         let response_bytes_sent = swap(&self.response_bytes_sent);
         let peer_rate_limited = swap(&self.peer_rate_limited);
+        let global_rate_limited_staked = swap(&self.global_rate_limited_staked);
+        let global_rate_limited_unstaked = swap(&self.global_rate_limited_unstaked);
         let handshakes_started = swap(&self.handshakes_started);
         let handshakes_completed = swap(&self.handshakes_completed);
         let connection_failed = swap(&self.connection_failed);
@@ -248,6 +254,8 @@ impl ServerStats {
         datapoint_info!(
             "repair_quic_server",
             ("unique_peers_peak", unique_peers_peak, i64),
+            ("staked_peers", staked_peers, i64),
+            ("unstaked_peers", unstaked_peers, i64),
             ("requests_received", requests_received, i64),
             (
                 "requests_dropped_channel_full",
@@ -258,6 +266,16 @@ impl ServerStats {
             ("responses_sent", responses_sent, i64),
             ("response_bytes_sent", response_bytes_sent, i64),
             ("peer_rate_limited", peer_rate_limited, i64),
+            (
+                "global_rate_limited_staked",
+                global_rate_limited_staked,
+                i64
+            ),
+            (
+                "global_rate_limited_unstaked",
+                global_rate_limited_unstaked,
+                i64
+            ),
             ("handshakes_started", handshakes_started, i64),
             ("handshakes_completed", handshakes_completed, i64),
             ("connection_failed", connection_failed, i64),

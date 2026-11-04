@@ -951,8 +951,8 @@ impl BlockIdRepairService {
         let max_batch_len = pending_count.min(MAX_REPAIR_REQUESTS_PER_ITERATION);
         let mut block_id_socket_batch: Vec<(Vec<u8>, SocketAddr)> =
             Vec::with_capacity(max_batch_len);
-        let mut shred_socket_batch: Vec<(Vec<u8>, SocketAddr)> = Vec::with_capacity(max_batch_len);
-        let mut quic_batch: Vec<OutboundRepairRequest> = Vec::new();
+        let mut shred_socket_batch = Vec::with_capacity(max_batch_len);
+        let mut quic_batch = Vec::new();
 
         let now = timestamp();
 

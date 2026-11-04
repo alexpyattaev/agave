@@ -6,9 +6,10 @@
 //! be disabled without touching the other.
 use {
     crate::{
-        HANDSHAKE_BURST, HANDSHAKE_GLOBAL_RATE, HANDSHAKE_WORKERS_PER_ENDPOINT, KnownPeersReceiver,
-        MAX_ENDPOINTS, MAX_INBOUND_CONNECTIONS, MAX_INFLIGHT_HANDSHAKES, MAX_RESPONSES_PER_REQUEST,
-        client::ClientLoop,
+        EXPECTED_STAKED_PEERS, HANDSHAKE_BURST, HANDSHAKE_GLOBAL_RATE,
+        HANDSHAKE_WORKERS_PER_ENDPOINT, KnownPeersReceiver, MAX_ENDPOINTS, MAX_INFLIGHT_HANDSHAKES,
+        MAX_RESPONSES_PER_REQUEST, MAX_UNSTAKED_INBOUND_CONNECTIONS, PeerSet,
+        client::{ClientLoop, record_request_dropped},
         error::Error,
         server::{AcceptLoop, ServerLoop, new_event_channel},
         stats::{ClientStats, ServerStats},
@@ -31,7 +32,10 @@ use {
     },
     tokio::{
         runtime::Handle,
-        sync::{mpsc, oneshot, watch},
+        sync::{
+            mpsc::{self, error::TrySendError},
+            oneshot, watch,
+        },
         task::JoinSet,
         time::{Instant, timeout_at},
     },
@@ -45,7 +49,7 @@ const REQUEST_CHANNEL_CAP: usize = 4096;
 
 /// Set of peers the client is currently not dialing, published for the repair
 /// threads to consult before choosing a transport.
-pub type PeerBackoffView = Arc<ArcSwap<crate::KnownPeers>>;
+pub type PeerBackoffView = Arc<ArcSwap<PeerSet>>;
 
 /// One repair request that arrived over QUIC, with the handle used to answer it.
 pub struct InboundRepairRequest {
@@ -250,7 +254,6 @@ impl RepairQuicServer {
 #[cfg(any(test, feature = "dev-context-only-utils"))]
 impl Drop for RepairQuicServer {
     fn drop(&mut self) {
-        // join() was called, or we are already panicking
         if self.task_handles.is_empty() || std::thread::panicking() {
             return;
         }
@@ -329,11 +332,11 @@ impl RepairQuicClient {
     pub fn try_send(&self, request: OutboundRepairRequest) {
         match self.requests.try_send(request) {
             Ok(()) => {}
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                crate::client::record_request_dropped(&self.stats, "request queue full");
+            Err(TrySendError::Full(_)) => {
+                record_request_dropped(&self.stats, "request queue full");
             }
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                crate::client::record_request_dropped(&self.stats, "client loop has exited");
+            Err(TrySendError::Closed(_)) => {
+                record_request_dropped(&self.stats, "client loop has exited");
             }
         }
     }
@@ -395,15 +398,15 @@ async fn join_tasks(name: &str, task_handles: &mut JoinSet<()>) {
 
 /// Create the channel carrying inbound requests to the repair serve loop.
 pub fn new_request_channel() -> (Sender<InboundRepairRequest>, Receiver<InboundRepairRequest>) {
-    bounded(MAX_INBOUND_CONNECTIONS)
+    bounded(MAX_UNSTAKED_INBOUND_CONNECTIONS + EXPECTED_STAKED_PEERS)
 }
 
 pub struct KeyUpdateNotifier {
     sender: watch::Sender<Keypair>,
-    ack_sender: crossbeam_channel::Sender<()>,
+    ack_sender: Sender<()>,
     /// Every transport loop acknowledges here. Holding the lock ensures only one
     /// update can be in progress at a time.
-    acks: Mutex<crossbeam_channel::Receiver<()>>,
+    acks: Mutex<Receiver<()>>,
 }
 
 impl KeyUpdateNotifier {
@@ -466,7 +469,7 @@ impl NotifyKeyUpdate for KeyUpdateNotifier {
 /// These should only be constructed by [`KeyUpdateNotifier`].
 pub(crate) struct KeyUpdateListener {
     pub(crate) receiver: watch::Receiver<Keypair>,
-    pub(crate) ack: crossbeam_channel::Sender<()>,
+    pub(crate) ack: Sender<()>,
 }
 
 /// Command to temporarily ban a peer.
@@ -490,10 +493,10 @@ impl BanSender {
     pub fn ban(&self, peer: Pubkey, duration: Duration) {
         match self.0.try_send(BanCommand { peer, duration }) {
             Ok(()) => {}
-            Err(mpsc::error::TrySendError::Full(_)) => {
+            Err(TrySendError::Full(_)) => {
                 warn!("Ban channel full, dropping ban request for peer={peer}");
             }
-            Err(mpsc::error::TrySendError::Closed(_)) => {
+            Err(TrySendError::Closed(_)) => {
                 warn!("Ban channel closed: we must be exiting");
             }
         }
@@ -504,11 +507,22 @@ impl BanSender {
 mod tests {
     use {
         super::*,
-        crate::{KnownPeers, PEER_FAILURES_BEFORE_BACKOFF},
+        crate::{
+            KnownPeers, MAX_UNSTAKED_INBOUND_CONNECTIONS, PEER_FAILURES_BEFORE_BACKOFF, close_codes,
+        },
+        quinn::{ApplicationClose, Connection, ConnectionError, Endpoint},
         solana_net_utils::sockets::bind_to_localhost_unique,
+        solana_tls_utils::socket_addr_to_quic_server_name,
         std::thread::sleep,
-        tokio::runtime::{Builder, Runtime},
+        tokio::{
+            runtime::{Builder, Runtime},
+            time::timeout,
+        },
     };
+
+    fn unstaked(peers: impl IntoIterator<Item = Pubkey>) -> KnownPeers {
+        KnownPeers::new(peers.into_iter().map(|peer| (peer, 0)).collect())
+    }
 
     fn make_runtime_for_tests() -> Runtime {
         Builder::new_multi_thread()
@@ -530,11 +544,15 @@ mod tests {
 
     impl EchoServer {
         fn spawn(rt: &Runtime, known: &[Pubkey]) -> Self {
+            Self::spawn_with(rt, unstaked(known.iter().copied()))
+        }
+
+        fn spawn_with(rt: &Runtime, known: KnownPeers) -> Self {
             let keypair = Keypair::new();
             let socket = bind_to_localhost_unique().expect("bind server socket");
             let address = socket.local_addr().expect("server local addr");
             let (requests_sender, requests) = new_request_channel();
-            let known_peers = watch::Sender::new(Arc::new(known.iter().copied().collect()));
+            let known_peers = watch::Sender::new(Arc::new(known));
             let server = RepairQuicServer::spawn(
                 rt.handle(),
                 &keypair,
@@ -686,7 +704,7 @@ mod tests {
         // makes a gossip partition recoverable rather than sticky.
         server
             .known_peers
-            .send(Arc::new([client_keypair.pubkey()].into_iter().collect()))
+            .send(Arc::new(unstaked([client_keypair.pubkey()])))
             .expect("known-peers receiver alive");
         let (responses_sender, responses) = bounded(4);
         client.try_send(request(
@@ -737,6 +755,94 @@ mod tests {
         );
 
         rt.block_on(client.join());
+        rt.block_on(server.server.join());
+    }
+
+    /// Dials `server` as `keypair` and sends one request on a fresh stream,
+    /// without waiting for the answer. Many identities share one endpoint.
+    async fn dial_and_request(
+        endpoint: &Endpoint,
+        keypair: &Keypair,
+        server: SocketAddr,
+    ) -> Connection {
+        let server_name = socket_addr_to_quic_server_name(server);
+        let connection = endpoint
+            .connect_with(new_client_config(keypair), server, &server_name)
+            .expect("connect_with")
+            .await
+            .expect("handshake completes before admission is decided");
+        let (mut send, _recv) = connection.open_bi().await.expect("open_bi");
+        send.write_all(b"repair request")
+            .await
+            .expect("write request");
+        send.finish().expect("finish request");
+        connection
+    }
+
+    /// Unstaked peers share a fixed pool of connection slots; once it is full
+    /// a new unstaked peer is refused, while a staked peer still gets in.
+    #[test]
+    fn unstaked_pool_is_capped_but_staked_peers_are_admitted() {
+        let rt = make_runtime_for_tests();
+        let unstaked_keypairs: Vec<_> = (0..=MAX_UNSTAKED_INBOUND_CONNECTIONS)
+            .map(|_| Keypair::new())
+            .collect();
+        let staked_keypair = Keypair::new();
+        let stakes = unstaked_keypairs
+            .iter()
+            .map(|keypair| (keypair.pubkey(), 0))
+            .chain([(staked_keypair.pubkey(), 1_000)])
+            .collect();
+        let server = EchoServer::spawn_with(&rt, KnownPeers::new(stakes));
+        let client_socket = bind_to_localhost_unique().expect("bind client socket");
+        let endpoint = {
+            let _guard = rt.enter();
+            QuicSocket::Kernel(client_socket)
+                .into_endpoint(None)
+                .expect("client endpoint")
+        };
+
+        // Fill the pool. A request reaching the serve loop proves its
+        // connection was admitted, so the pool is full before we go on.
+        let (last_unstaked, pool) = unstaked_keypairs.split_last().expect("non-empty");
+        let mut held = Vec::with_capacity(pool.len());
+        for keypair in pool {
+            held.push(rt.block_on(dial_and_request(&endpoint, keypair, server.address)));
+            server.serve_one(0);
+        }
+
+        let refused = rt.block_on(dial_and_request(&endpoint, last_unstaked, server.address));
+        let close = rt
+            .block_on(async { timeout(Duration::from_secs(5), refused.closed()).await })
+            .expect("server should close the over-cap connection");
+        assert!(
+            matches!(
+                close,
+                ConnectionError::ApplicationClosed(ApplicationClose { error_code, .. })
+                    if error_code == close_codes::TOO_MANY_CONNECTIONS.code
+            ),
+            "unstaked peer past the cap must be refused with TOO_MANY_CONNECTIONS, got {close:?}",
+        );
+        assert!(
+            server.requests.try_recv().is_err(),
+            "a refused peer's request must never reach the serve loop",
+        );
+
+        let staked = rt.block_on(dial_and_request(&endpoint, &staked_keypair, server.address));
+        let served = server.serve_one(0);
+        assert_eq!(
+            served.peer_pubkey,
+            staked_keypair.pubkey(),
+            "a staked peer must be admitted with the unstaked pool full",
+        );
+        assert!(
+            held.iter()
+                .chain([&staked])
+                .all(|connection| connection.close_reason().is_none()),
+            "admitting a staked peer must not evict anyone",
+        );
+
+        endpoint.close(0u32.into(), b"");
         rt.block_on(server.server.join());
     }
 }

@@ -43,7 +43,8 @@ not reusable directly, because it is broadcast-only, datagram-only,
 unidirectional and closed-membership, and repair is none of those.
 `solana-streamer`'s QUIC server is deliberately not used either: its
 staked/unstaked stream-throttling machinery solves a TPU ingest problem, not a
-request/response one.
+request/response one. Stake still matters here, but as a share of response
+bytes rather than of stream counts (see below).
 
 ## Wire format: one bidirectional stream per exchange
 
@@ -126,7 +127,8 @@ reason.
 
 ### Admission
 
-Order: address filter, handshake, banlist, gossip membership, connection cap.
+Order: address filter, handshake, banlist, gossip membership, unstaked
+connection cap.
 
 - **Pre-handshake address filter.** IPv6, multicast, our own IP (on
   `SocketAddrSpace::Global`) and anything `SocketAddrSpace` rejects are
@@ -143,15 +145,28 @@ Order: address filter, handshake, banlist, gossip membership, connection cap.
 - **All budgets are divided across accept loops.** That keeps the aggregate
   equal to what the constant says. `MAX_ENDPOINTS` exists because a zero share
   would build a zero-capacity `TokenBucket`, which panics on first use.
-- **Gossip membership.** A peer must be in the `KnownPeers` snapshot (pubkeys
-  from `ClusterInfo::tvu_peers`, refreshed every second) to be served, and
-  connections from peers that drop out of gossip are closed. This is wider than
-  votor's closed peer list and narrower than UDP repair, which serves anyone who
-  answers a ping. It bounds the connection table by something an attacker
-  cannot inflate cheaply. A node not yet in our CRDS falls back to UDP, which
-  is still there.
-- **Connection cap.** `MAX_INBOUND_CONNECTIONS` (4096) is a few times the
-  validator set, since unlike votor anyone gossip knows may connect.
+- **Gossip membership.** A peer must be in the `KnownPeers` snapshot to be
+  served, and connections from peers that drop out of gossip are closed. The
+  snapshot is the pubkeys from `ClusterInfo::tvu_peers`, each tagged with its
+  stake in the root bank's epoch stakes, refreshed every second. This is wider
+  than votor's closed peer list and narrower than UDP repair, which serves
+  anyone who answers a ping. A node not yet in our CRDS falls back to UDP,
+  which is still there.
+- **Stake comes in with membership.** Core pushes stakes through the same
+  watch channel instead of the crate reading `StakedNodes`. That keeps
+  streamer and runtime out of this crate, and avoids `StakedNodes`'s startup
+  hole: it is only populated by a service the TPU starts, well after the repair
+  server is already accepting connections.
+- **Staked peers are always admitted; unstaked peers share
+  `MAX_UNSTAKED_INBOUND_CONNECTIONS` (500).** Gossip membership is free to
+  forge, so on its own it does not bound the table; stake is the only
+  Sybil-resistant signal we have. The staked population is already bounded by
+  the epoch stake set, so it needs no cap and no eviction, and no number of
+  unstaked identities can push a staked peer out. Unstaked peers (RPC nodes,
+  fresh validators) get a fixed pool on a first-come basis. A redial of a live
+  connection does not need a new slot. A peer that loses its stake at an epoch
+  boundary keeps its connection and is simply counted as unstaked, so the pool
+  can briefly overshoot; new unstaked admissions wait until it drains.
 
 ### One connection per pubkey, and redial replaces
 
@@ -162,14 +177,49 @@ Replacement is only safe because of the next point.
 
 ### The per-peer budget outlives the connection
 
-Each peer has one `TokenBucket` denominated in bytes
-(`PEER_RATE_BYTES_PER_SECOND`, capacity `PEER_RATE_CAP_WINDOW` worth). It
-lives in the `PeerEntry`, not the connection, and the entry is kept as a
+Each peer has one `TokenBucket` denominated in bytes, with capacity
+`PEER_RATE_CAP_WINDOW` worth of its rate. It lives in the `PeerEntry`, not the
+connection, and the entry is kept as a
 tombstone after the connection closes until the bucket has refilled. If the
 bucket were created on admission, a peer that drained it would simply reconnect
 for a free refill, making the whole QoS story a no-op against anyone willing to
 redial. This is the same retain rule votor uses, and it matters more here
 because the bucket is the main per-peer protection rather than a backstop.
+
+The rate depends on stake. Unstaked peers get a flat
+`PEER_RATE_BYTES_PER_SECOND`. Staked peers get their stake share of
+`GLOBAL_RATE_BYTES_PER_SECOND`, never less than an unstaked peer. Repair demand
+from staked peers scales with stake, so a flat rate would either starve large
+validators or hand every small one a budget it cannot use. The floor
+keeps a small validator that is catching up from being worse off than an RPC
+node. A bucket's rate is fixed at construction, so when stakes move at an
+epoch boundary the budget is swapped through an `ArcSwap`, carrying the
+remaining tokens over so the swap is never a refill.
+
+### A global budget, staked first
+
+The per-peer buckets bound each peer, but not their sum, and the sum is what
+the server actually pays for in bandwidth and blockstore reads. So there is
+one more `TokenBucket` (`GLOBAL_RATE_BYTES_PER_SECOND`, capacity
+`GLOBAL_RATE_CAP_WINDOW` worth) shared by every connection, and every stream is
+charged to both its peer's bucket and this one.
+
+Staked and unstaked peers see different floors on the shared bucket. A staked
+peer may take a stream as long as one `MIN_STREAM_COST` is left. An unstaked
+peer may only take one while a `1 / UNSTAKED_GLOBAL_HEADROOM_DIVISOR` share of
+the capacity is still unused. Because the staked rates add up to roughly
+the global rate, staked demand at its entitled level keeps the bucket below the unstaked
+floor and unstaked peers wait. When staked peers ask for less, the bucket
+refills past the floor and unstaked peers are served from what is left. This
+gives a strict priority without a scheduler or a second queue: the gate is the
+same "stop calling `accept_bi`" backpressure as the per-peer one. A connection
+parked on the global bucket wakes after a short per-connection jitter, so
+throttled connections do not all retry at the same moment.
+
+QUIC keeps its own global budget rather than sharing the UDP serve path's.
+UDP's bucket is local to its listen thread, and coupling the two would let a
+flood on either transport starve the other. The node-wide repair egress is
+therefore the sum of the two caps.
 
 Charging is two-stage:
 
@@ -323,17 +373,23 @@ measurements before the default flips.
   to `MAX_REPAIR_LENGTH` requests per `REPAIR_MS` iteration. Stream-open rate
   at that load is unmeasured; batching several requests per stream is the
   escape hatch.
-- **Constants are placeholders.** `PEER_RATE_BYTES_PER_SECOND` and
-  `PEER_RATE_CAP_WINDOW` need sizing from measured honest catch-up bursts.
+- **Constants are placeholders.** `PEER_RATE_BYTES_PER_SECOND`,
+  `PEER_RATE_CAP_WINDOW`, `GLOBAL_RATE_BYTES_PER_SECOND`,
+  `UNSTAKED_GLOBAL_HEADROOM_DIVISOR` and `MAX_UNSTAKED_INBOUND_CONNECTIONS` need
+  sizing from measured honest catch-up bursts.
+- **No leader multiplier.** The UDP path charges 10x per byte while we are
+  leader; the QUIC global budget does not, so a leader pays full QUIC repair
+  egress during its slots.
+- **No minimum stake.** Any non-zero stake counts as staked, so dust-staked
+  identities bypass the unstaked connection cap at the cost of a vote account
+  each. Their per-peer rate is the floor, but they get
+  staked priority on the global budget. If this shows up in
+  practice, swqos-style reclassification of very low stake as unstaked is the
+  fix.
 - **Read amplification is not priced.** The budget charges bytes written, but
   `ParentAndFecSetCount` / `FecSetRoot` can read ~220 KB of
   `double_merkle_meta` to return ~1.2 KB, and `AncestorHashes` walks up to 30
   slot metas. A per-variant cost estimate in core would close this.
-- **No aggregate egress cap.** The QUIC serve path does not consult UDP's
-  global data budget; each peer is bounded, the sum across 4096 peers is not.
-- **No staked preference.** Admission is gossip membership only. Reserving
-  capacity for staked peers, with unstaked evicted first, is the intended next
-  step if the connection cap is ever reached in practice.
 - **Bootstrap.** A node that is not yet in our CRDS cannot be served over QUIC.
   It falls back to UDP, but this should be confirmed on fresh and restarted
   nodes.

@@ -879,10 +879,9 @@ impl AncestorHashesService {
             match serve_repair.quic_repair_address(pubkey, repair_quic) {
                 Some(quic_addr) => {
                     let quic = repair_quic.expect("a QUIC address implies a QUIC client");
-                    let num_expected_responses = ancestor_hashes_repair_type
-                        .num_expected_responses()
-                        .min(u32::from(u8::MAX))
-                        as u8;
+                    let num_expected_responses =
+                        u8::try_from(ancestor_hashes_repair_type.num_expected_responses())
+                            .unwrap_or(u8::MAX);
                     quic.client.try_send(OutboundRepairRequest {
                         peer: *pubkey,
                         peer_address: quic_addr,
@@ -1528,6 +1527,7 @@ mod test {
             repair_validators,
             ..
         } = repair_info;
+        let repair_quic = None;
         AncestorHashesService::initiate_ancestor_hashes_requests_for_duplicate_slot(
             &ancestor_hashes_request_statuses,
             &ancestor_hashes_request_socket,
@@ -1539,7 +1539,7 @@ mod test {
             &outstanding_requests,
             &requester_cluster_info.keypair(),
             AncestorRequestType::DeadDuplicateConfirmed,
-            None, // repair_quic
+            repair_quic,
             &response_sender,
         );
         assert!(ancestor_hashes_request_statuses.is_empty());
@@ -1580,6 +1580,7 @@ mod test {
         cluster_slots.insert_node_id(dead_slot, responder_id);
         requester_cluster_info.insert_info(responder_info.clone());
         // Now the request should actually be made
+        let repair_quic = None;
         AncestorHashesService::initiate_ancestor_hashes_requests_for_duplicate_slot(
             &ancestor_hashes_request_statuses,
             &ancestor_hashes_request_socket,
@@ -1591,7 +1592,7 @@ mod test {
             &outstanding_requests,
             &requester_cluster_info.keypair(),
             AncestorRequestType::DeadDuplicateConfirmed,
-            None, // repair_quic
+            repair_quic,
             &response_sender,
         );
 
@@ -1642,6 +1643,7 @@ mod test {
         assert!(ancestor_hashes_request_statuses.is_empty());
 
         // Now make a pruned request for the same slot
+        let repair_quic = None;
         AncestorHashesService::initiate_ancestor_hashes_requests_for_duplicate_slot(
             &ancestor_hashes_request_statuses,
             &ancestor_hashes_request_socket,
@@ -1653,7 +1655,7 @@ mod test {
             &outstanding_requests,
             &requester_cluster_info.keypair(),
             AncestorRequestType::PopularPruned,
-            None, // repair_quic
+            repair_quic,
             &response_sender,
         );
 

@@ -5,8 +5,7 @@
 //!
 //! A response is a sequence of frames, each a little-endian `u16` length
 //! followed by that many payload bytes, terminated by the stream FIN. `u16`
-//! because a repair response never exceeds one packet; the implementation this
-//! replaces spent a bincode fixint `u64` on the same job.
+//! because a repair response never exceeds one packet.
 use {
     crate::{
         MAX_RESPONSE_FRAME_BYTES, MAX_RESPONSES_PER_REQUEST, RESPONSE_LENGTH_PREFIX_BYTES,

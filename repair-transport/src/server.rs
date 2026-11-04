@@ -1,15 +1,17 @@
 //! Inbound (server) direction: we accept connections and serve repair requests.
 use {
     crate::{
-        CONN_EVENT_CHANNEL_CAP, HANDSHAKE_TIMEOUT, KnownPeersReceiver, MAX_INBOUND_CONNECTIONS,
-        MAX_REQUEST_BYTES, METRICS_INTERVAL, MIN_STREAM_COST, PEER_RATE_BYTES_PER_SECOND,
-        PEER_RATE_CAP_WINDOW, REQUEST_READ_TIMEOUT, RESPONSE_TIMEOUT, close_codes,
+        CONN_EVENT_CHANNEL_CAP, GLOBAL_RATE_BYTES_PER_SECOND, GLOBAL_RATE_CAP_WINDOW,
+        HANDSHAKE_TIMEOUT, KnownPeersReceiver, MAX_REQUEST_BYTES, MAX_UNSTAKED_INBOUND_CONNECTIONS,
+        METRICS_INTERVAL, MIN_STREAM_COST, PEER_RATE_BYTES_PER_SECOND, PEER_RATE_CAP_WINDOW,
+        REQUEST_READ_TIMEOUT, RESPONSE_TIMEOUT, UNSTAKED_GLOBAL_HEADROOM_DIVISOR, close_codes,
         endpoint::{BanCommand, InboundRepairRequest, KeyUpdateListener, Responder},
         error::{Error, stream_codes},
         framing::encode_responses,
         stats::{self, ServerStats, record_server_error},
         transport::new_server_config,
     },
+    arc_swap::ArcSwap,
     bytes::Bytes,
     crossbeam_channel::{Sender, TrySendError},
     log::{debug, error, info},
@@ -32,14 +34,101 @@ use {
     tokio_util::sync::CancellationToken,
 };
 
+/// Capacity of a bucket refilling at `rate` bytes per second that may bank up
+/// to `window` worth of refill, never less than two minimum-cost streams.
+fn bucket_capacity(rate: u64, window: Duration) -> u64 {
+    ((rate as f64 * window.as_secs_f64()).ceil() as u64).max(MIN_STREAM_COST.saturating_mul(2))
+}
+
+/// A peer's byte budget together with the stake class it was sized for.
+///
+/// A bucket's refill rate is fixed at construction, so when the peer's stake
+/// changes the whole budget is swapped, carrying the remaining tokens over.
+pub(crate) struct PeerBudget {
+    bucket: TokenBucket,
+    /// Refill rate, in bytes per second.
+    rate: u64,
+    /// Bucket capacity, in bytes.
+    cap: u64,
+    staked: bool,
+}
+
+impl PeerBudget {
+    /// Rate and class for `stake` out of `total_stake`. Unstaked peers get the
+    /// flat per-peer rate; staked peers get their stake share of the global
+    /// rate, never less than an unstaked peer.
+    fn rate_for(stake: u64, total_stake: u64) -> (u64, bool) {
+        if stake == 0 || total_stake == 0 {
+            return (PEER_RATE_BYTES_PER_SECOND, false);
+        }
+        let share = u128::from(GLOBAL_RATE_BYTES_PER_SECOND)
+            .saturating_mul(u128::from(stake))
+            .checked_div(u128::from(total_stake))
+            .expect("total_stake is nonzero");
+        let rate = u64::try_from(share)
+            .unwrap_or(u64::MAX)
+            .max(PEER_RATE_BYTES_PER_SECOND);
+        (rate, true)
+    }
+
+    fn new(stake: u64, total_stake: u64, carried_tokens: Option<u64>) -> Self {
+        let (rate, staked) = Self::rate_for(stake, total_stake);
+        // The bucket starts full and refills at the sustained rate, so its
+        // capacity is both the burst a peer may bank while idle and, since the
+        // entry outlives the connection, the most a reconnect can recover.
+        let cap = bucket_capacity(rate, PEER_RATE_CAP_WINDOW);
+        let initial = carried_tokens.map_or(cap, |tokens| tokens.min(cap));
+        Self {
+            bucket: TokenBucket::new(initial, cap, rate as f64),
+            rate,
+            cap,
+            staked,
+        }
+    }
+
+    fn sized_for(&self, stake: u64, total_stake: u64) -> bool {
+        Self::rate_for(stake, total_stake) == (self.rate, self.staked)
+    }
+}
+
 /// Everything we track about one peer that is independent of its connection.
 ///
-/// The rate limiter deliberately outlives the connection: if it were created on
+/// The budget deliberately outlives the connection: if it were created on
 /// admission, a peer that drained its budget could reconnect for a free refill.
 pub(crate) struct PeerEntry {
     /// At most one connection per peer; a redial replaces it.
     connection: Option<Connection>,
-    rate_limiter: Arc<TokenBucket>,
+    budget: Arc<ArcSwap<PeerBudget>>,
+}
+
+impl PeerEntry {
+    /// Resize the budget if the peer's stake moved it to a different rate.
+    fn refresh_budget(&self, stake: u64, total_stake: u64) {
+        let current = self.budget.load();
+        if !current.sized_for(stake, total_stake) {
+            let carried = current.bucket.current_tokens();
+            self.budget
+                .store(Arc::new(PeerBudget::new(stake, total_stake, Some(carried))));
+        }
+    }
+}
+
+/// The server-wide byte budget shared by every connection.
+pub(crate) struct GlobalBudget {
+    bucket: TokenBucket,
+    /// Tokens that must remain in `bucket` before an unstaked peer is served.
+    unstaked_floor: u64,
+}
+
+impl GlobalBudget {
+    fn new() -> Self {
+        let cap = bucket_capacity(GLOBAL_RATE_BYTES_PER_SECOND, GLOBAL_RATE_CAP_WINDOW);
+        let unstaked_floor = (cap / UNSTAKED_GLOBAL_HEADROOM_DIVISOR).max(MIN_STREAM_COST);
+        Self {
+            bucket: TokenBucket::new(cap, cap, GLOBAL_RATE_BYTES_PER_SECOND as f64),
+            unstaked_floor,
+        }
+    }
 }
 
 /// Event reported to the [`ServerLoop`].
@@ -49,7 +138,7 @@ pub(crate) enum InboundConnectionEvent {
         peer: Pubkey,
         connection: Connection,
     },
-    /// An inbound connection terminated. `stable_id` identifies the connection.
+    /// An inbound connection terminated.
     Closed { peer: Pubkey, stable_id: usize },
 }
 
@@ -128,7 +217,6 @@ impl AcceptLoop {
                 Some(joined) = handshakes.join_next(), if !handshakes.is_empty() => {
                     joined.expect("AcceptLoop: handshake task panicked");
                 }
-                // Rate gate refilled: allow pulling connection attempts.
                 _ = &mut accept_gate, if rate_limited => {
                     rate_limited = false;
                 }
@@ -212,7 +300,6 @@ async fn wait_for_complete_handshake(
             record_server_error(&Error::from(e), &stats);
             return;
         }
-        // Handshake has timed out
         Err(_elapsed) => {
             stats.handshake_timed_out.fetch_add(1, Ordering::Relaxed);
             return;
@@ -240,7 +327,8 @@ async fn serve_stream(
     mut send: SendStream,
     mut recv: RecvStream,
     requests: Sender<InboundRepairRequest>,
-    rate_limiter: Arc<TokenBucket>,
+    budget: Arc<PeerBudget>,
+    global: Arc<GlobalBudget>,
     stats: Arc<ServerStats>,
 ) {
     let request = match timeout(REQUEST_READ_TIMEOUT, recv.read_to_end(MAX_REQUEST_BYTES)).await {
@@ -283,7 +371,12 @@ async fn serve_stream(
     };
     let mut chunks = encode_responses(&payloads);
     let response_bytes: usize = chunks.iter().map(Bytes::len).sum();
-    rate_limiter.consume_tokens_saturating(response_bytes as u64);
+    budget
+        .bucket
+        .consume_tokens_saturating(response_bytes as u64);
+    global
+        .bucket
+        .consume_tokens_saturating(response_bytes as u64);
     if !chunks.is_empty() && send.write_all_chunks(&mut chunks).await.is_err() {
         return;
     }
@@ -296,13 +389,66 @@ async fn serve_stream(
     let _ = send.finish();
 }
 
+/// How long a connection must stop accepting streams, or `None` if it may
+/// take another one.
+///
+/// Staked peers may drain the global budget down to one stream's worth;
+/// unstaked peers stop at `unstaked_floor`, so they only ever consume what
+/// staked peers left unused. `stable_id` spreads out the wake-ups of
+/// connections throttled on the shared bucket.
+fn throttle_for(
+    budget: &PeerBudget,
+    global: &GlobalBudget,
+    stable_id: usize,
+    stats: &ServerStats,
+) -> Option<Duration> {
+    let peer_wait_us = (budget.bucket.current_tokens() < MIN_STREAM_COST).then(|| {
+        stats.peer_rate_limited.fetch_add(1, Ordering::Relaxed);
+        budget
+            .bucket
+            .us_to_have_tokens(MIN_STREAM_COST)
+            .expect("peer bucket capacity exceeds the per-stream floor")
+    });
+    let global_floor = if budget.staked {
+        MIN_STREAM_COST
+    } else {
+        global.unstaked_floor
+    };
+    let global_wait_us = (global.bucket.current_tokens() < global_floor).then(|| {
+        let counter = if budget.staked {
+            &stats.global_rate_limited_staked
+        } else {
+            &stats.global_rate_limited_unstaked
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+        let wait_us = global
+            .bucket
+            .us_to_have_tokens(global_floor)
+            .expect("global bucket capacity exceeds the unstaked floor");
+        // Up to 10% jitter, so connections parked on the shared bucket do not
+        // all wake on the same tick.
+        let jitter_percent = (stable_id % 10) as u64;
+        wait_us.saturating_add(wait_us.saturating_mul(jitter_percent) / 100)
+    });
+    peer_wait_us
+        .max(global_wait_us)
+        .map(|wait_us| Duration::from_micros(wait_us.saturating_add(1)))
+}
+
+fn read_gate_deadline(wait: Duration) -> Instant {
+    Instant::now()
+        .checked_add(wait)
+        .expect("read-gate deadline should never overflow")
+}
+
 /// Per-connection accept loop for an admitted inbound connection.
 pub(crate) struct ConnectionServer {
     connection: Connection,
     peer: Pubkey,
     remote_addr: SocketAddr,
     requests: Sender<InboundRepairRequest>,
-    rate_limiter: Arc<TokenBucket>,
+    budget: Arc<ArcSwap<PeerBudget>>,
+    global: Arc<GlobalBudget>,
     events_sender: mpsc::Sender<InboundConnectionEvent>,
     stats: Arc<ServerStats>,
     cancel: CancellationToken,
@@ -315,19 +461,21 @@ impl ConnectionServer {
             peer,
             remote_addr,
             requests,
-            rate_limiter,
+            budget,
+            global,
             events_sender,
             stats,
             cancel,
         } = self;
         let stable_id = connection.stable_id();
         let mut streams = JoinSet::new();
-        // Closed while the peer is over budget. We simply stop calling
-        // `accept_bi`, and QUIC's own MAX_STREAMS flow control applies the
-        // backpressure for us: no close, no ban, and the peer recovers with no
-        // state change once the bucket refills.
+        // Closed while the peer, or the server as a whole, is over budget. We
+        // simply stop calling `accept_bi`, and QUIC's own MAX_STREAMS flow
+        // control applies the backpressure for us: no close, no ban, and the
+        // peer recovers with no state change once the buckets refill. Starts
+        // closed so the first stream is gated like every other one.
         let mut read_gate = Box::pin(sleep(Duration::ZERO));
-        let mut throttled = false;
+        let mut throttled = true;
         loop {
             tokio::select! {
                 biased;
@@ -336,7 +484,10 @@ impl ConnectionServer {
                     joined.expect("ConnectionServer: stream task panicked");
                 }
                 _ = &mut read_gate, if throttled => {
-                    throttled = false;
+                    match throttle_for(&budget.load(), &global, stable_id, &stats) {
+                        Some(wait) => read_gate.as_mut().reset(read_gate_deadline(wait)),
+                        None => throttled = false,
+                    }
                 }
                 stream = connection.accept_bi(), if !throttled => {
                     let (send, recv) = match stream {
@@ -348,19 +499,13 @@ impl ConnectionServer {
                     };
                     // Charge the admission floor for the stream we just took, so a
                     // peer that opens streams and writes nothing still drains its
-                    // own budget.
-                    rate_limiter.consume_tokens_saturating(MIN_STREAM_COST);
-                    if rate_limiter.current_tokens() < MIN_STREAM_COST {
+                    // own budget, and the server's.
+                    let budget = budget.load_full();
+                    budget.bucket.consume_tokens_saturating(MIN_STREAM_COST);
+                    global.bucket.consume_tokens_saturating(MIN_STREAM_COST);
+                    if let Some(wait) = throttle_for(&budget, &global, stable_id, &stats) {
                         throttled = true;
-                        let wait_us = rate_limiter
-                            .us_to_have_tokens(MIN_STREAM_COST)
-                            .expect("bucket capacity exceeds the per-stream floor")
-                            .saturating_add(1);
-                        let deadline = Instant::now()
-                            .checked_add(Duration::from_micros(wait_us))
-                            .expect("read-gate deadline should never overflow");
-                        read_gate.as_mut().reset(deadline);
-                        stats.peer_rate_limited.fetch_add(1, Ordering::Relaxed);
+                        read_gate.as_mut().reset(read_gate_deadline(wait));
                     }
                     streams.spawn(serve_stream(
                         peer,
@@ -368,7 +513,8 @@ impl ConnectionServer {
                         send,
                         recv,
                         requests.clone(),
-                        rate_limiter.clone(),
+                        budget,
+                        global.clone(),
                         stats.clone(),
                     ));
                 }
@@ -399,13 +545,11 @@ pub(crate) struct ServerLoop {
     endpoints: Vec<Endpoint>,
     peer_state: HashMap<Pubkey, PeerEntry, PubkeyHasherBuilder>,
     connection_tasks: JoinSet<()>,
-    /// Cloned into spawned tasks.
     events_sender: mpsc::Sender<InboundConnectionEvent>,
     events_receiver: mpsc::Receiver<InboundConnectionEvent>,
     stats: Arc<ServerStats>,
     cancel: CancellationToken,
-    /// Bucket capacity, in bytes.
-    peer_rate_cap: u64,
+    global: Arc<GlobalBudget>,
 }
 
 impl ServerLoop {
@@ -420,13 +564,6 @@ impl ServerLoop {
         stats: Arc<ServerStats>,
         cancel: CancellationToken,
     ) -> Self {
-        // The bucket starts full and refills at the sustained rate, so its
-        // capacity is both the burst a peer may bank while idle and, since the
-        // entry outlives the connection, the most a reconnect can recover.
-        let peer_rate_cap = ((PEER_RATE_BYTES_PER_SECOND as f64
-            * PEER_RATE_CAP_WINDOW.as_secs_f64())
-        .ceil() as u64)
-            .max(MIN_STREAM_COST.saturating_mul(2));
         Self {
             requests,
             banlist: Banlist::default(),
@@ -440,16 +577,23 @@ impl ServerLoop {
             events_receiver,
             stats,
             cancel,
-            peer_rate_cap,
+            global: Arc::new(GlobalBudget::new()),
         }
     }
 
-    /// Counts the peers from which we currently hold a connection.
-    fn total_peers(&self) -> u64 {
+    /// Counts the peers from which we currently hold a connection, as
+    /// `(staked, unstaked)`.
+    fn connected_peers(&self) -> (u64, u64) {
         self.peer_state
             .values()
             .filter(|entry| entry.connection.is_some())
-            .count() as u64
+            .fold((0, 0), |(staked, unstaked), entry| {
+                if entry.budget.load().staked {
+                    (staked.saturating_add(1), unstaked)
+                } else {
+                    (staked, unstaked.saturating_add(1))
+                }
+            })
     }
 
     pub(crate) async fn run(mut self) {
@@ -501,16 +645,17 @@ impl ServerLoop {
                         debug_assert!(false, "known-peers channel closed while running");
                         break;
                     }
-                    self.close_unknown_peers();
+                    self.apply_known_peers();
                 }
                 _ = metrics.tick() => {
-                    self.stats.report(self.total_peers());
+                    let (staked, unstaked) = self.connected_peers();
+                    self.stats.report(staked, unstaked);
                     self.banlist.prune();
                     // Reclaim entries, but keep a depleted bucket as a tombstone so
                     // reconnecting does not hand the peer a fresh budget.
-                    let cap = self.peer_rate_cap;
                     self.peer_state.retain(|_, entry| {
-                        entry.connection.is_some() || entry.rate_limiter.current_tokens() < cap
+                        let budget = entry.budget.load();
+                        entry.connection.is_some() || budget.bucket.current_tokens() < budget.cap
                     });
                 }
                 _ = self.cancel.cancelled() => break,
@@ -531,19 +676,25 @@ impl ServerLoop {
             .count() as u64
     }
 
-    /// Close connections whose peer gossip no longer knows about.
-    fn close_unknown_peers(&mut self) {
+    /// Resize budgets to the latest stakes, and close connections whose peer
+    /// gossip no longer knows about.
+    ///
+    /// A peer that loses its stake keeps its connection and simply counts as
+    /// unstaked from now on, so the unstaked pool may briefly exceed its cap;
+    /// new unstaked admissions wait until it drains.
+    fn apply_known_peers(&mut self) {
         let known = self.known_peers.borrow().clone();
         let mut closed = 0u64;
         for (peer, entry) in self.peer_state.iter() {
-            let Some(connection) = entry.connection.as_ref() else {
-                continue;
-            };
-            if known.contains(peer) {
-                continue;
+            match known.stake(peer) {
+                Some(stake) => entry.refresh_budget(stake, known.total_stake()),
+                None => {
+                    if let Some(connection) = entry.connection.as_ref() {
+                        close_codes::NOT_ADMITTED.close(connection);
+                        closed = closed.saturating_add(1);
+                    }
+                }
             }
-            close_codes::NOT_ADMITTED.close(connection);
-            closed = closed.saturating_add(1);
         }
         self.stats
             .connection_closed_unknown_peer
@@ -597,35 +748,48 @@ impl ServerLoop {
         // Repair over QUIC serves anyone gossip knows about, which is both wider
         // than votor's closed peer list and narrower than UDP repair's "anyone
         // who answers a ping". A peer missing from our CRDS falls back to UDP.
-        if !self.known_peers.borrow().contains(&peer) {
+        let (stake, total_stake) = {
+            let known = self.known_peers.borrow();
+            (known.stake(&peer), known.total_stake())
+        };
+        let Some(stake) = stake else {
             debug!("Unknown peer {peer} attempted a connection from {remote_addr}, rejected");
             close_codes::NOT_ADMITTED.close(&connection);
             record_server_error(&Error::NotAdmitted(peer), &self.stats);
             return;
-        }
-        if !self.peer_state.contains_key(&peer)
-            && self.total_peers() as usize >= MAX_INBOUND_CONNECTIONS
-        {
-            close_codes::TOO_MANY_CONNECTIONS.close(&connection);
-            record_server_error(&Error::TooManyConnections, &self.stats);
-            return;
+        };
+        // Staked peers are always admitted: the epoch stake set bounds how many
+        // there can be. Unstaked peers share a fixed pool, and a redial of a
+        // live connection does not need a new slot.
+        let is_redial = self
+            .peer_state
+            .get(&peer)
+            .is_some_and(|entry| entry.connection.is_some());
+        if stake == 0 && !is_redial {
+            let (_staked, unstaked) = self.connected_peers();
+            if unstaked >= MAX_UNSTAKED_INBOUND_CONNECTIONS as u64 {
+                close_codes::TOO_MANY_CONNECTIONS.close(&connection);
+                record_server_error(&Error::TooManyConnections, &self.stats);
+                return;
+            }
         }
 
-        let rate_limiter = match self.peer_state.entry(peer) {
+        let budget = match self.peer_state.entry(peer) {
             Entry::Vacant(slot) => {
-                let rate_limiter = Arc::new(TokenBucket::new(
-                    self.peer_rate_cap,
-                    self.peer_rate_cap,
-                    PEER_RATE_BYTES_PER_SECOND as f64,
-                ));
+                let budget = Arc::new(ArcSwap::from_pointee(PeerBudget::new(
+                    stake,
+                    total_stake,
+                    None,
+                )));
                 slot.insert(PeerEntry {
                     connection: Some(connection.clone()),
-                    rate_limiter: rate_limiter.clone(),
+                    budget: budget.clone(),
                 });
-                rate_limiter
+                budget
             }
             Entry::Occupied(mut slot) => {
                 let entry = slot.get_mut();
+                entry.refresh_budget(stake, total_stake);
                 // A redial replaces: a restarting validator must not be locked
                 // out for a full idle timeout by its own stale connection. The
                 // budget survives because it lives in the entry, not the
@@ -636,10 +800,14 @@ impl ServerLoop {
                         .connection_replaced
                         .fetch_add(1, Ordering::Relaxed);
                 }
-                Arc::clone(&entry.rate_limiter)
+                Arc::clone(&entry.budget)
             }
         };
-        stats::record_connection_count(&self.stats.peak_unique_peers, self.total_peers());
+        let (staked, unstaked) = self.connected_peers();
+        stats::record_connection_count(
+            &self.stats.peak_unique_peers,
+            staked.saturating_add(unstaked),
+        );
         debug!("Admitted repair connection from {peer} ({remote_addr})");
         self.connection_tasks.spawn(
             ConnectionServer {
@@ -647,7 +815,8 @@ impl ServerLoop {
                 peer,
                 remote_addr,
                 requests: self.requests.clone(),
-                rate_limiter,
+                budget,
+                global: self.global.clone(),
                 events_sender: self.events_sender.clone(),
                 stats: self.stats.clone(),
                 cancel: self.cancel.clone(),
@@ -668,6 +837,71 @@ pub(crate) fn new_event_channel() -> (
 #[cfg(test)]
 mod tests {
     use {super::*, std::net::Ipv4Addr};
+
+    #[test]
+    fn staked_rate_is_stake_share_with_unstaked_floor() {
+        let total_stake = 1_000;
+        assert_eq!(
+            PeerBudget::rate_for(0, total_stake),
+            (PEER_RATE_BYTES_PER_SECOND, false)
+        );
+        assert_eq!(
+            PeerBudget::rate_for(100, total_stake),
+            (GLOBAL_RATE_BYTES_PER_SECOND / 10, true)
+        );
+        let dust_stake = 1;
+        assert_eq!(
+            PeerBudget::rate_for(dust_stake, total_stake),
+            (PEER_RATE_BYTES_PER_SECOND, true),
+            "a tiny stake never gets less than an unstaked peer",
+        );
+    }
+
+    /// Unstaked peers stop at the headroom floor of the global budget, staked
+    /// peers drain it down to a single stream.
+    #[test]
+    fn global_budget_serves_staked_peers_first() {
+        let stats = ServerStats::default();
+        let total_stake = 1_000;
+        let staked = PeerBudget::new(100, total_stake, None);
+        let unstaked = PeerBudget::new(0, total_stake, None);
+        let global = GlobalBudget::new();
+        let stable_id = 0;
+
+        assert_eq!(throttle_for(&staked, &global, stable_id, &stats), None);
+        assert_eq!(throttle_for(&unstaked, &global, stable_id, &stats), None);
+
+        // Leave half the unstaked floor: refilling past it takes far longer
+        // than this test runs.
+        let tokens = global.bucket.current_tokens();
+        global
+            .bucket
+            .consume_tokens(tokens - global.unstaked_floor / 2)
+            .expect("bucket holds what it just reported");
+        assert_eq!(
+            throttle_for(&staked, &global, stable_id, &stats),
+            None,
+            "staked peers keep drawing on what unstaked peers may not touch",
+        );
+        assert!(
+            throttle_for(&unstaked, &global, stable_id, &stats).is_some(),
+            "unstaked peers wait until staked demand leaves headroom",
+        );
+
+        global
+            .bucket
+            .consume_tokens_saturating(global.bucket.current_tokens());
+        assert!(
+            throttle_for(&staked, &global, stable_id, &stats).is_some(),
+            "an empty global budget throttles staked peers too",
+        );
+        assert_eq!(
+            stats.global_rate_limited_unstaked.load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(stats.global_rate_limited_staked.load(Ordering::Relaxed), 1);
+        assert_eq!(stats.peer_rate_limited.load(Ordering::Relaxed), 0);
+    }
 
     #[test]
     fn remote_address_filter_honors_socket_addr_space() {

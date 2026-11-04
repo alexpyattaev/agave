@@ -24,13 +24,51 @@ pub(crate) use error::close_codes;
 use {
     solana_packet::PACKET_DATA_SIZE,
     solana_pubkey::{Pubkey, PubkeyHasherBuilder},
-    std::{collections::HashSet, sync::Arc, time::Duration},
+    std::{
+        collections::{HashMap, HashSet},
+        sync::Arc,
+        time::Duration,
+    },
     tokio::sync::watch,
 };
 
-/// Pubkeys we are willing to serve repair for. Inbound admission is membership
-/// only: the address is attested by the connection itself.
-pub type KnownPeers = HashSet<Pubkey, PubkeyHasherBuilder>;
+/// A set of peer pubkeys.
+pub type PeerSet = HashSet<Pubkey, PubkeyHasherBuilder>;
+
+/// Peers we are willing to serve repair for, with their stake. Admission
+/// requires membership: the address is attested by the connection itself.
+/// Stake decides how much of the server a peer is entitled to.
+#[derive(Default)]
+pub struct KnownPeers {
+    /// Stake per gossip-known pubkey; zero for unstaked peers.
+    stakes: HashMap<Pubkey, u64, PubkeyHasherBuilder>,
+    total_stake: u64,
+}
+
+impl KnownPeers {
+    pub fn new(stakes: HashMap<Pubkey, u64, PubkeyHasherBuilder>) -> Self {
+        let total_stake = stakes
+            .values()
+            .fold(0u64, |total, stake| total.saturating_add(*stake));
+        Self {
+            stakes,
+            total_stake,
+        }
+    }
+
+    pub fn contains(&self, peer: &Pubkey) -> bool {
+        self.stakes.contains_key(peer)
+    }
+
+    /// Stake of a known peer, `None` if gossip does not know it.
+    pub fn stake(&self, peer: &Pubkey) -> Option<u64> {
+        self.stakes.get(peer).copied()
+    }
+
+    pub fn total_stake(&self) -> u64 {
+        self.total_stake
+    }
+}
 
 /// Readers clone the Arc and release the watch lock immediately.
 pub type KnownPeersSnapshot = Arc<KnownPeers>;
@@ -56,10 +94,25 @@ pub(crate) const RESPONSE_LENGTH_PREFIX_BYTES: usize = 2;
 pub(crate) const MAX_RESPONSE_FRAME_BYTES: usize =
     PACKET_DATA_SIZE.saturating_add(RESPONSE_LENGTH_PREFIX_BYTES);
 
-/// Byte budget granted to each peer per second, in both directions.
-/// Placeholder pending measurement: 1 Mbps is ~103 shred responses/second,
-/// which is far above what a healthy peer asks of a single server.
+/// Byte budget granted to each unstaked peer per second, and the floor for
+/// staked ones. Placeholder pending measurement: 1 Mbps is ~103 shred
+/// responses/second, which is far above what a healthy peer asks of a single
+/// server.
 pub const PEER_RATE_BYTES_PER_SECOND: u64 = 125_000;
+
+/// Response bytes per second the server hands out across all peers. Staked
+/// peers split it by stake share. Placeholder, matching the UDP serve path's
+/// per-listener budget; QUIC keeps its own so neither transport can starve
+/// the other.
+pub const GLOBAL_RATE_BYTES_PER_SECOND: u64 = 12_000_000;
+
+/// Global bucket capacity: the burst the whole server may bank while idle.
+pub const GLOBAL_RATE_CAP_WINDOW: Duration = Duration::from_secs(1);
+
+/// Unstaked peers are only served while the global bucket holds at least
+/// `1 / UNSTAKED_GLOBAL_HEADROOM_DIVISOR` of its capacity, i.e. out of what
+/// staked peers have left unused. Placeholder.
+pub const UNSTAKED_GLOBAL_HEADROOM_DIVISOR: u64 = 4;
 
 /// Bucket capacity, i.e. how much budget a peer can bank while idle.
 /// The bucket outlives the connection precisely so that reconnecting does not
@@ -76,13 +129,17 @@ pub(crate) const MIN_STREAM_COST: u64 = (PACKET_DATA_SIZE + 4) as u64;
 /// bounds an honest peer's request rate.
 pub const MAX_CONCURRENT_STREAMS_PER_PEER: u32 = 64;
 
-/// Upper bound on peers holding an inbound connection at once. Sized to a few
-/// times the validator set: unlike votor, repair admits anyone gossip knows.
-pub const MAX_INBOUND_CONNECTIONS: usize = 4096;
+/// Upper bound on unstaked peers holding an inbound connection at once.
+/// Staked peers are not capped: their number is bounded by the epoch stake set.
+pub const MAX_UNSTAKED_INBOUND_CONNECTIONS: usize = 500;
+
+/// Rough expected number of staked peers, used only to size channels.
+pub(crate) const EXPECTED_STAKED_PEERS: usize = 2048;
 
 /// Capacity of the channel carrying connection lifecycle events, sized so the
 /// whole connection table can churn at once without blocking a reader task.
-pub(crate) const CONN_EVENT_CHANNEL_CAP: usize = MAX_INBOUND_CONNECTIONS;
+pub(crate) const CONN_EVENT_CHANNEL_CAP: usize =
+    MAX_UNSTAKED_INBOUND_CONNECTIONS + EXPECTED_STAKED_PEERS;
 
 /// Hard timeout on reading one request off an accepted stream.
 pub(crate) const REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(2);

@@ -550,9 +550,9 @@ pub struct RepairInfo {
     pub repair_validators: Option<HashSet<Pubkey>>,
     // Validators which should be given priority when serving
     pub repair_whitelist: Arc<RwLock<HashSet<Pubkey>>>,
-    // Present when repair over QUIC is enabled. Peers that advertise a QUIC
-    // repair port and are not in the client's backoff are requested over QUIC;
-    // everyone else keeps the UDP path unchanged.
+    /// Present when repair over QUIC is enabled. Peers that advertise a QUIC
+    /// repair port and are not in the client's backoff are requested over QUIC;
+    /// everyone else keeps the UDP path unchanged.
     pub repair_quic: Option<RepairQuicConfig>,
 }
 
@@ -561,8 +561,7 @@ pub struct RepairQuicConfig {
     pub client: Arc<RepairQuicClient>,
     /// When set, a peer advertising a QUIC repair port is never served over
     /// UDP instead, so a test can assert the QUIC path was actually used.
-    /// Without it every QUIC test silently passes over UDP, which is how the
-    /// previous QUIC repair path rotted unnoticed.
+    /// Without it every QUIC test silently passes over UDP.
     pub required: bool,
 }
 
@@ -584,9 +583,9 @@ struct RepairChannels {
     verified_voter_slots_receiver: CrossbeamReceiver<VerifiedVotorSlotsMessage>,
     dumped_slots_receiver: DumpedSlotsReceiver,
     popular_pruned_forks_sender: PopularPrunedForksSender,
-    // Where shred repair responses received over QUIC are delivered. This is a
-    // clone of the same channel `ShredFetchStage` reads the UDP repair socket
-    // into, so nonce verification and response acceptance are shared.
+    /// Where shred repair responses received over QUIC are delivered. This is a
+    /// clone of the same channel `ShredFetchStage` reads the UDP repair socket
+    /// into, so nonce verification and response acceptance are shared.
     repair_quic_response_sender: Option<CrossbeamSender<PacketBatch>>,
 }
 
@@ -910,8 +909,8 @@ impl RepairService {
         repair_metrics: &mut RepairMetrics,
     ) {
         let mut build_batch_us = Measure::start("build_batch_us");
-        let mut batch: Vec<(Vec<u8>, SocketAddr)> = Vec::new();
-        let mut quic_batch: Vec<OutboundRepairRequest> = Vec::new();
+        let mut batch = Vec::new();
+        let mut quic_batch = Vec::new();
         {
             let mut outstanding_requests = outstanding_requests.write().unwrap();
             let targets = repairs.into_iter().filter_map(|repair_request| {

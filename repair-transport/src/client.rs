@@ -1,8 +1,8 @@
 //! Outbound (client) direction: we dial peers and request repairs from them.
 use {
     crate::{
-        METRICS_INTERVAL, PEER_BACKOFF, PEER_FAILURES_BEFORE_BACKOFF, RECONCILE_INTERVAL,
-        RESPONSE_TIMEOUT, close_codes,
+        HANDSHAKE_TIMEOUT, METRICS_INTERVAL, PEER_BACKOFF, PEER_FAILURES_BEFORE_BACKOFF,
+        RECONCILE_INTERVAL, RESPONSE_TIMEOUT, close_codes,
         endpoint::{KeyUpdateListener, OutboundRepairRequest, PeerBackoffView},
         error::Error,
         framing::{decode_responses, max_response_bytes},
@@ -21,7 +21,6 @@ use {
         collections::HashMap,
         net::SocketAddr,
         sync::{Arc, atomic::Ordering},
-        time::Duration,
     },
     tokio::{
         sync::mpsc,
@@ -30,9 +29,6 @@ use {
     },
     tokio_util::sync::CancellationToken,
 };
-
-/// Upper bound on a single handshake attempt, enforced inside the connect task.
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Requests we hold for a peer whose handshake has not completed yet. Repair
 /// re-requests on its own timer, so a deep queue would only deliver stale
@@ -330,8 +326,7 @@ impl ClientLoop {
         );
     }
 
-    fn drop_request(&self, request: OutboundRepairRequest) {
-        drop(request);
+    fn drop_request(&self, _request: OutboundRepairRequest) {
         self.stats.requests_dropped.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -482,14 +477,11 @@ impl ClientLoop {
         // A failed exchange on a live connection usually means the connection
         // itself is gone; reconcile would notice eventually, but the breaker has
         // to trip on time for the caller to fall back to UDP.
-        let tripped = failures >= PEER_FAILURES_BEFORE_BACKOFF;
-        if tripped {
+        if failures >= PEER_FAILURES_BEFORE_BACKOFF {
             if let PeerState::Established { connection, .. } = &slot.state {
                 close_codes::NORMAL_CLOSE.close(connection);
             }
             slot.state = Self::failure_state(failures);
-        }
-        if tripped {
             self.publish_backoff_view();
         }
     }
@@ -539,7 +531,7 @@ impl ClientLoop {
     /// Republish the set of peers the caller should not route QUIC repair to.
     fn publish_backoff_view(&self) {
         let now = Instant::now();
-        let in_backoff: crate::KnownPeers = self
+        let in_backoff = self
             .peers
             .iter()
             .filter(|(_peer, slot)| match slot.state {

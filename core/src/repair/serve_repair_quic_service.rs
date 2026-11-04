@@ -12,12 +12,12 @@ use {
         KnownPeers, KnownPeersSender,
         endpoint::{InboundRepairRequest, RepairQuicServer},
     },
-    bytes::Bytes,
     crossbeam_channel::{Receiver, RecvTimeoutError},
     log::error,
     solana_gossip::{cluster_info::ClusterInfo, contact_info::ContactInfo},
     solana_net_utils::SocketAddrSpace,
     solana_perf::packet::{BytesPacket, Meta},
+    solana_runtime::bank_forks::SharableBanks,
     std::{
         sync::{
             Arc,
@@ -29,9 +29,9 @@ use {
     tokio::runtime::Handle,
 };
 
-/// How often the set of pubkeys we are willing to serve is refreshed from
-/// gossip. Admission is membership only, so a stale snapshot merely delays
-/// serving a node that just joined.
+/// How often the set of pubkeys we are willing to serve, and their stakes, is
+/// refreshed from gossip and the root bank. A stale snapshot merely delays
+/// serving a node that just joined; stakes only move at epoch boundaries.
 const KNOWN_PEERS_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 
 const STATS_REPORT_INTERVAL: Duration = Duration::from_secs(2);
@@ -56,9 +56,11 @@ impl ServeRepairQuicService {
         runtime: Handle,
         exit: Arc<AtomicBool>,
     ) -> Self {
+        let sharable_banks = serve_repair.sharable_banks().clone();
         let t_serve =
             Self::spawn_serve_loop(serve_repair, requests, socket_addr_space, exit.clone());
-        let t_known_peers = Self::spawn_known_peers_loop(cluster_info, known_peers_sender, exit);
+        let t_known_peers =
+            Self::spawn_known_peers_loop(cluster_info, sharable_banks, known_peers_sender, exit);
         Self {
             thread_hdls: vec![t_serve, t_known_peers],
             server,
@@ -120,7 +122,7 @@ impl ServeRepairQuicService {
             // the requester sees the same way it sees a blockstore miss.
             return;
         };
-        let payloads: Vec<Bytes> = response
+        let payloads = response
             .iter()
             .filter(|packet| !packet.meta().discard())
             .map(|packet| packet.buffer().clone())
@@ -130,6 +132,7 @@ impl ServeRepairQuicService {
 
     fn spawn_known_peers_loop(
         cluster_info: Arc<ClusterInfo>,
+        sharable_banks: SharableBanks,
         known_peers_sender: KnownPeersSender,
         exit: Arc<AtomicBool>,
     ) -> JoinHandle<()> {
@@ -137,10 +140,20 @@ impl ServeRepairQuicService {
             .name("solRepQuicPeers".to_string())
             .spawn(move || {
                 while !exit.load(Ordering::Relaxed) {
-                    let peers: KnownPeers = cluster_info
+                    let root_bank = sharable_banks.root();
+                    let epoch_staked_nodes = root_bank.epoch_staked_nodes(root_bank.epoch());
+                    let stakes = cluster_info
                         .tvu_peers(|node: &ContactInfo| *node.pubkey())
                         .into_iter()
+                        .map(|peer| {
+                            let stake = epoch_staked_nodes
+                                .as_ref()
+                                .and_then(|stakes| stakes.get(&peer).copied())
+                                .unwrap_or_default();
+                            (peer, stake)
+                        })
                         .collect();
+                    let peers = KnownPeers::new(stakes);
                     if known_peers_sender.send(Arc::new(peers)).is_err() {
                         error!("repair QUIC server is gone, stopping known peers refresh");
                         break;
