@@ -18,7 +18,7 @@ use {
         },
     },
     agave_bls_sigverify::pubkeys::{VerifiedVotorSlotsMessage, VoteAccountPubkeys},
-    agave_repair_transport::endpoint::{OutboundRepairRequest, RepairQuicClient},
+    agave_repair_transport::endpoint::RepairQuicClient,
     agave_votor_messages::migration::MigrationStatus,
     ahash::AHashMap,
     bytes::Bytes,
@@ -553,7 +553,17 @@ pub struct RepairInfo {
     /// Present when repair over QUIC is enabled. Peers that advertise a QUIC
     /// repair port and are not in the client's backoff are requested over QUIC;
     /// everyone else keeps the UDP path unchanged.
-    pub repair_quic: Option<RepairQuicConfig>,
+    pub repair_quic: Option<RepairQuic>,
+}
+
+/// Repair over QUIC as the repair threads use it.
+#[derive(Clone)]
+pub struct RepairQuic {
+    pub config: RepairQuicConfig,
+    /// Where shred repair responses received over QUIC are delivered. This is a
+    /// clone of the same channel `ShredFetchStage` reads the UDP repair socket
+    /// into, so nonce verification and response acceptance are shared.
+    pub shred_responses: CrossbeamSender<PacketBatch>,
 }
 
 #[derive(Clone)]
@@ -583,10 +593,6 @@ struct RepairChannels {
     verified_voter_slots_receiver: CrossbeamReceiver<VerifiedVotorSlotsMessage>,
     dumped_slots_receiver: DumpedSlotsReceiver,
     popular_pruned_forks_sender: PopularPrunedForksSender,
-    /// Where shred repair responses received over QUIC are delivered. This is a
-    /// clone of the same channel `ShredFetchStage` reads the UDP repair socket
-    /// into, so nonce verification and response acceptance are shared.
-    repair_quic_response_sender: Option<CrossbeamSender<PacketBatch>>,
 }
 
 pub struct RepairServiceChannels {
@@ -600,14 +606,12 @@ impl RepairServiceChannels {
         dumped_slots_receiver: DumpedSlotsReceiver,
         popular_pruned_forks_sender: PopularPrunedForksSender,
         ancestor_hashes_replay_update_receiver: AncestorHashesReplayUpdateReceiver,
-        repair_quic_response_sender: Option<CrossbeamSender<PacketBatch>>,
     ) -> Self {
         Self {
             repair_channels: RepairChannels {
                 verified_voter_slots_receiver,
                 dumped_slots_receiver,
                 popular_pruned_forks_sender,
-                repair_quic_response_sender,
             },
             ancestors_hashes_channels: AncestorHashesChannels {
                 ancestor_hashes_replay_update_receiver,
@@ -905,7 +909,6 @@ impl RepairService {
         outstanding_requests: &RwLock<OutstandingShredRepairs>,
         repair_socket: &UdpSocket,
         xdp_sender: Option<&PinnedXdpSender>,
-        repair_quic_response_sender: Option<&CrossbeamSender<PacketBatch>>,
         repair_metrics: &mut RepairMetrics,
     ) {
         let mut build_batch_us = Measure::start("build_batch_us");
@@ -927,35 +930,15 @@ impl RepairService {
             for (target, req) in targets {
                 match target {
                     RepairTarget::Udp(to) => batch.push((req, to)),
-                    RepairTarget::Quic {
-                        pubkey,
-                        addr,
-                        num_expected_responses,
-                    } => {
-                        let Some(responses) = repair_quic_response_sender else {
-                            // A QUIC target is only produced when the client is
-                            // present, which is also when the sender is.
-                            error!("repair over QUIC selected without a response channel");
-                            continue;
-                        };
-                        quic_batch.push(OutboundRepairRequest {
-                            peer: pubkey,
-                            peer_address: addr,
-                            bytes: Bytes::from(req),
-                            num_expected_responses,
-                            responses: responses.clone(),
-                        });
-                    }
+                    RepairTarget::Quic(quic) => quic_batch.push((quic, req)),
                 }
             }
         }
         build_batch_us.stop();
 
         let mut send_batch_us = Measure::start("send_batch_us");
-        if let Some(quic) = repair_info.repair_quic.as_ref() {
-            for request in quic_batch {
-                quic.client.try_send(request);
-            }
+        for (quic, req) in quic_batch {
+            quic.send_shred_request(req);
         }
         if !batch.is_empty() {
             let num_pkts = batch.len();
@@ -996,7 +979,6 @@ impl RepairService {
             verified_voter_slots_receiver,
             dumped_slots_receiver,
             popular_pruned_forks_sender,
-            repair_quic_response_sender,
         } = repair_channels;
         let RepairTracker {
             sharable_banks,
@@ -1053,7 +1035,6 @@ impl RepairService {
             outstanding_requests,
             repair_socket,
             xdp_sender,
-            repair_quic_response_sender.as_ref(),
             repair_metrics,
         );
     }

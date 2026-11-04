@@ -19,7 +19,7 @@ use {
         forwarding_stage::ForwardingClientConfig,
         repair::{
             self, repair_handler::RepairHandlerType, repair_service::RepairQuicConfig,
-            serve_repair_quic_service::ServeRepairQuicService,
+            serve_repair::ServeRepair, serve_repair_quic_service::ServeRepairQuicService,
             serve_repair_service::ServeRepairService,
         },
         resource_limits::{ResourceLimitError, adjust_nofile_limit},
@@ -169,7 +169,7 @@ use {
         borrow::Cow,
         cmp,
         collections::{HashMap, HashSet},
-        net::{Ipv4Addr, SocketAddr, SocketAddrV4},
+        net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket},
         num::{NonZeroU64, NonZeroUsize},
         path::{Path, PathBuf},
         str::FromStr,
@@ -1698,9 +1698,6 @@ impl Validator {
             exit.clone(),
         );
 
-        // Repair over QUIC runs alongside the UDP path: its own endpoints, its
-        // own rate limiting, its own serve loop. Peers pick it up per peer, and
-        // UDP is untouched.
         let (repair_quic_service, repair_quic_runtime, repair_quic) =
             if config.repair_quic_mode.is_enabled() {
                 let serve_repair_quic = {
@@ -1716,90 +1713,19 @@ impl Validator {
                         bank_forks_r.migration_status(),
                     )
                 };
-                let runtime = tokio::runtime::Builder::new_multi_thread()
-                    .enable_all()
-                    // One worker for the server endpoint's handshake work, the
-                    // rest shared between admitted connections and the client.
-                    .worker_threads(4)
-                    .thread_name("solRepairQuicRt")
-                    .build()
-                    .map_err(|err| ValidatorError::Other(format!("repair QUIC runtime: {err}")))?;
-                let runtime_handle = runtime.handle().clone();
-                let advertised_quic_repair =
-                    node.sockets.serve_repair_quic.local_addr().map_err(|err| {
-                        ValidatorError::Other(format!("serve_repair_quic local addr: {err}"))
-                    })?;
-                let server_socket = into_quic_socket(
-                    node.sockets
-                        .serve_repair_quic
-                        .try_clone()
-                        .expect("serve_repair_quic socket must be cloneable"),
-                    None,
-                );
-                let client_socket = into_quic_socket(
-                    node.sockets
-                        .repair_quic_client
-                        .try_clone()
-                        .expect("repair_quic_client socket must be cloneable"),
-                    None,
-                );
-                let (requests_sender, requests_receiver) = new_request_channel();
-                let (known_peers_sender, known_peers_receiver) =
-                    watch::channel(Arc::new(KnownPeers::default()));
-                let server = RepairQuicServer::spawn(
-                    &runtime_handle,
-                    &cluster_info.keypair(),
-                    vec![server_socket],
-                    requests_sender,
-                    known_peers_receiver,
-                    socket_addr_space,
-                    cancel.child_token(),
-                )
-                .map_err(|err| ValidatorError::Other(format!("repair QUIC server: {err:?}")))?;
-                let client = Arc::new(
-                    RepairQuicClient::spawn(
-                        &runtime_handle,
-                        &cluster_info.keypair(),
-                        client_socket,
-                        cancel.child_token(),
-                    )
-                    .map_err(|err| ValidatorError::Other(format!("repair QUIC client: {err:?}")))?,
-                );
-                {
-                    let mut key_notifiers = key_notifiers.write().unwrap();
-                    key_notifiers.add(KeyUpdaterType::RepairQuicServer, server.key_updater());
-                    key_notifiers.add(KeyUpdaterType::RepairQuicClient, client.key_updater());
-                }
-                // Only advertise the port once we are actually serving on it;
-                // until then the contact info keeps the placeholder port.
-                let mut advertised = node
-                    .info
-                    .serve_repair(contact_info::Protocol::UDP)
-                    .ok_or_else(|| {
-                        ValidatorError::Other(
-                            "cannot advertise QUIC repair without a UDP repair address".to_string(),
-                        )
-                    })?;
-                advertised.set_port(advertised_quic_repair.port());
-                cluster_info
-                    .set_serve_repair_quic(advertised)
-                    .map_err(|err| {
-                        ValidatorError::Other(format!("advertising serve_repair_quic: {err:?}"))
-                    })?;
-                let service = ServeRepairQuicService::new(
+                let required = config.repair_quic_mode == RepairQuicMode::Required;
+                let (service, runtime, repair_quic) = start_repair_quic(
                     serve_repair_quic,
-                    server,
-                    requests_receiver,
-                    known_peers_sender,
-                    cluster_info.clone(),
+                    &node.sockets.serve_repair_quic,
+                    &node.sockets.repair_quic_client,
+                    &node.info,
+                    &cluster_info,
+                    &key_notifiers,
+                    required,
                     socket_addr_space,
-                    runtime_handle,
-                    exit.clone(),
-                );
-                let repair_quic = RepairQuicConfig {
-                    client,
-                    required: config.repair_quic_mode == RepairQuicMode::Required,
-                };
+                    &cancel,
+                    &exit,
+                )?;
                 (Some(service), Some(runtime), Some(repair_quic))
             } else {
                 (None, None, None)
@@ -2246,6 +2172,100 @@ impl Validator {
             geyser_plugin_service.join().expect("geyser_plugin_service");
         }
     }
+}
+
+/// Starts repair over QUIC alongside the UDP path: its own runtime, endpoints,
+/// rate limiting and serve loop. Peers pick it up per peer, and UDP is
+/// untouched.
+#[allow(clippy::too_many_arguments)]
+fn start_repair_quic(
+    serve_repair_quic: ServeRepair,
+    server_socket: &UdpSocket,
+    client_socket: &UdpSocket,
+    node_info: &ContactInfo,
+    cluster_info: &Arc<ClusterInfo>,
+    key_notifiers: &RwLock<KeyUpdaters>,
+    required: bool,
+    socket_addr_space: SocketAddrSpace,
+    cancel: &CancellationToken,
+    exit: &Arc<AtomicBool>,
+) -> Result<(ServeRepairQuicService, TokioRuntime, RepairQuicConfig), ValidatorError> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        // One worker for the server endpoint's handshake work, the
+        // rest shared between admitted connections and the client.
+        .worker_threads(4)
+        .thread_name("solRepairQuicRt")
+        .build()
+        .map_err(|err| ValidatorError::Other(format!("repair QUIC runtime: {err}")))?;
+    let runtime_handle = runtime.handle().clone();
+    let advertised_quic_repair = server_socket
+        .local_addr()
+        .map_err(|err| ValidatorError::Other(format!("serve_repair_quic local addr: {err}")))?;
+    let server_socket = into_quic_socket(
+        server_socket
+            .try_clone()
+            .expect("serve_repair_quic socket must be cloneable"),
+        None,
+    );
+    let client_socket = into_quic_socket(
+        client_socket
+            .try_clone()
+            .expect("repair_quic_client socket must be cloneable"),
+        None,
+    );
+    let (requests_sender, requests_receiver) = new_request_channel();
+    let (known_peers_sender, known_peers_receiver) =
+        watch::channel(Arc::new(KnownPeers::default()));
+    let server = RepairQuicServer::spawn(
+        &runtime_handle,
+        &cluster_info.keypair(),
+        vec![server_socket],
+        requests_sender,
+        known_peers_receiver,
+        socket_addr_space,
+        cancel.child_token(),
+    )
+    .map_err(|err| ValidatorError::Other(format!("repair QUIC server: {err:?}")))?;
+    let client = Arc::new(
+        RepairQuicClient::spawn(
+            &runtime_handle,
+            &cluster_info.keypair(),
+            client_socket,
+            cancel.child_token(),
+        )
+        .map_err(|err| ValidatorError::Other(format!("repair QUIC client: {err:?}")))?,
+    );
+    {
+        let mut key_notifiers = key_notifiers.write().unwrap();
+        key_notifiers.add(KeyUpdaterType::RepairQuicServer, server.key_updater());
+        key_notifiers.add(KeyUpdaterType::RepairQuicClient, client.key_updater());
+    }
+    // Only advertise the port once we are actually serving on it;
+    // until then the contact info keeps the placeholder port.
+    let mut advertised = node_info
+        .serve_repair(contact_info::Protocol::UDP)
+        .ok_or_else(|| {
+            ValidatorError::Other(
+                "cannot advertise QUIC repair without a UDP repair address".to_string(),
+            )
+        })?;
+    advertised.set_port(advertised_quic_repair.port());
+    cluster_info
+        .set_serve_repair_quic(advertised)
+        .map_err(|err| ValidatorError::Other(format!("advertising serve_repair_quic: {err:?}")))?;
+    let service = ServeRepairQuicService::new(
+        serve_repair_quic,
+        server,
+        requests_receiver,
+        known_peers_sender,
+        cluster_info.clone(),
+        socket_addr_space,
+        runtime_handle,
+        exit.clone(),
+    );
+    let repair_quic = RepairQuicConfig { client, required };
+    Ok((service, runtime, repair_quic))
 }
 
 fn active_vote_account_exists_in_bank(bank: &Bank, vote_account: &Pubkey) -> bool {

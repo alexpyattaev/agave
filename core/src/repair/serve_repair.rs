@@ -13,16 +13,18 @@ use {
             duplicate_repair_status::get_ancestor_hash_repair_sample_size,
             outstanding_requests::OutstandingRequests,
             repair_handler::RepairHandler,
-            repair_service::{OutstandingShredRepairs, RepairInfo, RepairQuicConfig, RepairStats},
+            repair_service::{OutstandingShredRepairs, RepairInfo, RepairQuic, RepairStats},
             request_response::RequestResponse,
             result::{Error, RepairVerifyError, Result},
         },
     },
+    agave_repair_transport::endpoint::OutboundRepairRequest,
     agave_votor_messages::{
         consensus_message::{Block, BlockId},
         migration::MigrationStatus,
     },
-    crossbeam_channel::{Receiver, RecvTimeoutError},
+    bytes::Bytes,
+    crossbeam_channel::{Receiver, RecvTimeoutError, Sender},
     lazy_lru::LruCache,
     rand::{
         Rng,
@@ -63,6 +65,7 @@ use {
     std::{
         cmp::Reverse,
         collections::{HashMap, HashSet, VecDeque},
+        fmt,
         net::{SocketAddr, UdpSocket},
         ops::Range,
         sync::{
@@ -438,6 +441,25 @@ pub(crate) struct ServeRepairStats {
     err_id_mismatch: usize,
     err_unmatched_pong: usize,
     err_pubkey_mismatch: usize,
+}
+
+impl ServeRepairStats {
+    fn record_request_stake(&mut self, stake: u64) {
+        if stake == 0 {
+            self.handle_requests_unstaked += 1;
+        } else {
+            self.handle_requests_staked += 1;
+        }
+    }
+
+    fn record_response(&mut self, stake: u64, num_packets: usize, num_bytes: usize) {
+        self.total_response_packets += num_packets;
+        if stake == 0 {
+            self.total_response_bytes_unstaked += num_bytes;
+        } else {
+            self.total_response_bytes_staked += num_bytes;
+        }
+    }
 }
 
 #[cfg_attr(feature = "stable-abi", derive(StableAbi, PartialEq))]
@@ -817,26 +839,96 @@ struct Node {
 /// <https://github.com/anza-xyz/agave/pull/10460#discussion_r3054463946>.
 const UNADVERTISED_REPAIR_QUIC_PORT: u16 = 1;
 
-/// Where a repair request should be sent, and what the transport needs to know
-/// to send it.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum RepairTarget {
-    Udp(SocketAddr),
-    Quic {
-        pubkey: Pubkey,
-        addr: SocketAddr,
-        num_expected_responses: u8,
-    },
+/// The QUIC repair address `node` advertises, or `None` when it does not
+/// serve repair over QUIC.
+fn advertised_quic_repair_addr(node: &ContactInfo) -> Option<SocketAddr> {
+    node.serve_repair(Protocol::QUIC)
+        .filter(|addr| addr.port() != UNADVERTISED_REPAIR_QUIC_PORT)
 }
 
-impl RepairTarget {
+/// Where a repair request should be sent, and what the transport needs to know
+/// to send it.
+#[derive(Debug)]
+pub(crate) enum RepairTarget<'a> {
+    Udp(SocketAddr),
+    Quic(QuicRepairTarget<'a>),
+}
+
+impl RepairTarget<'_> {
     /// The address the request is sent to, whichever transport carries it.
     #[cfg(test)]
     pub(crate) fn address(&self) -> SocketAddr {
         match self {
             Self::Udp(addr) => *addr,
-            Self::Quic { addr, .. } => *addr,
+            Self::Quic(quic) => quic.addr,
         }
+    }
+}
+
+/// A repair request routed over QUIC, together with the client that sends it.
+pub(crate) struct QuicRepairTarget<'a> {
+    quic: &'a RepairQuic,
+    pubkey: Pubkey,
+    addr: SocketAddr,
+    num_expected_responses: u8,
+}
+
+impl<'a> QuicRepairTarget<'a> {
+    /// Routes a request to `pubkey` over QUIC when it is enabled, the peer
+    /// advertises it, and the client is not backing off from that peer. The
+    /// backoff check is what keeps a peer that advertises a firewalled QUIC
+    /// port from costing a full repair timeout per request.
+    ///
+    /// `quic_addr` is only called once QUIC is known to be usable, so it may be
+    /// expensive.
+    fn new(
+        repair_quic: Option<&'a RepairQuic>,
+        pubkey: Pubkey,
+        num_expected_responses: u32,
+        quic_addr: impl FnOnce() -> Option<SocketAddr>,
+    ) -> Option<Self> {
+        let quic = repair_quic?;
+        if !quic.config.required && quic.config.client.is_backing_off(&pubkey) {
+            return None;
+        }
+        Some(Self {
+            quic,
+            pubkey,
+            addr: quic_addr()?,
+            num_expected_responses: u8::try_from(num_expected_responses).unwrap_or(u8::MAX),
+        })
+    }
+
+    pub(crate) fn addr(&self) -> SocketAddr {
+        self.addr
+    }
+
+    /// Queues the request; its responses are delivered on `responses`.
+    pub(crate) fn send(self, bytes: Vec<u8>, responses: &Sender<PacketBatch>) {
+        self.quic.config.client.try_send(OutboundRepairRequest {
+            peer: self.pubkey,
+            peer_address: self.addr,
+            bytes: Bytes::from(bytes),
+            num_expected_responses: self.num_expected_responses,
+            responses: responses.clone(),
+        });
+    }
+
+    /// [`Self::send`] for a shred repair request, whose responses enter the
+    /// shred pipeline.
+    pub(crate) fn send_shred_request(self, bytes: Vec<u8>) {
+        let quic = self.quic;
+        self.send(bytes, &quic.shred_responses);
+    }
+}
+
+impl fmt::Debug for QuicRepairTarget<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("QuicRepairTarget")
+            .field("pubkey", &self.pubkey)
+            .field("addr", &self.addr)
+            .field("num_expected_responses", &self.num_expected_responses)
+            .finish_non_exhaustive()
     }
 }
 
@@ -859,9 +951,7 @@ impl RepairPeers {
                 let node = Node {
                     pubkey: *peer.pubkey(),
                     serve_repair: peer.serve_repair(Protocol::UDP)?,
-                    repair_quic: peer
-                        .serve_repair(Protocol::QUIC)
-                        .filter(|addr| addr.port() != UNADVERTISED_REPAIR_QUIC_PORT),
+                    repair_quic: advertised_quic_repair_addr(peer),
                 };
                 Some((node, weight))
             })
@@ -1078,18 +1168,11 @@ impl ServeRepair {
         if whitelisted {
             stats.whitelisted_requests += 1;
         }
-        match stake > 0 {
-            true => stats.handle_requests_staked += 1,
-            false => stats.handle_requests_unstaked += 1,
-        }
+        stats.record_request_stake(stake);
         stats.processed += 1;
         let response = self.handle_repair(&from_addr, request, stats)?;
-        stats.total_response_packets += response.len();
-        let num_response_bytes: usize = response.iter().map(|packet| packet.meta().size).sum();
-        match stake > 0 {
-            true => stats.total_response_bytes_staked += num_response_bytes,
-            false => stats.total_response_bytes_unstaked += num_response_bytes,
-        }
+        let num_response_bytes = response.iter().map(|packet| packet.meta().size).sum();
+        stats.record_response(stake, response.len(), num_response_bytes);
         Some(response)
     }
 
@@ -1412,11 +1495,7 @@ impl ServeRepair {
             );
             match &result {
                 Ok(req) => {
-                    if req.stake == 0 {
-                        stats.handle_requests_unstaked += 1;
-                    } else {
-                        stats.handle_requests_staked += 1;
-                    }
+                    stats.record_request_stake(req.stake);
                     // assuming we will reply to the request, we need to update the budget estimate
                     // some responses may be larger, but we have to be conservative here
                     if req.request.max_response_packets() > 0 {
@@ -1882,11 +1961,7 @@ impl ServeRepair {
 
             // send the responses to the socket
             if packet_batch_sender.try_send(rsp).is_ok() {
-                stats.total_response_packets += num_response_packets;
-                match stake > 0 {
-                    true => stats.total_response_bytes_staked += num_response_bytes,
-                    false => stats.total_response_bytes_unstaked += num_response_bytes,
-                }
+                stats.record_response(stake, num_response_packets, num_response_bytes);
             } else {
                 stats.dropped_requests_outbound_bandwidth += 1;
                 stats.total_dropped_response_packets += num_response_packets;
@@ -1932,14 +2007,14 @@ impl ServeRepair {
     /// - weights are `(peer_stake / 2 + peer_stake / 2 * x)`
     ///
     /// For Alpenglow blocks we do a weighted selection where the weights are `peer_stake`
-    pub(crate) fn repair_request(
+    pub(crate) fn repair_request<'a>(
         &self,
-        repair_info: &RepairInfo,
+        repair_info: &'a RepairInfo,
         repair_request: ShredRepairType,
         peers_cache: &mut LruCache<Slot, RepairPeers>,
         repair_stats: &mut RepairStats,
         outstanding_requests: &mut OutstandingShredRepairs,
-    ) -> Result<Option<(RepairTarget, Vec<u8>)>> {
+    ) -> Result<Option<(RepairTarget<'a>, Vec<u8>)>> {
         let identity_keypair = repair_info.cluster_info.keypair();
         // find a peer that appears to be accepting replication and has the desired slot, as indicated
         // by a valid tvu port location
@@ -1985,55 +2060,47 @@ impl ServeRepair {
         Ok(Some((target, out)))
     }
 
-    /// QUIC repair address for `peer`, or `None` when repair over QUIC is off,
-    /// the peer does not serve it, or the peer is currently backed off.
-    pub(crate) fn quic_repair_address(
+    /// [`QuicRepairTarget::new`] for a peer whose QUIC repair address is
+    /// looked up in gossip; `None` means the request goes over UDP.
+    pub(crate) fn quic_repair_target<'a>(
         &self,
         peer: &Pubkey,
-        repair_quic: Option<&RepairQuicConfig>,
-    ) -> Option<SocketAddr> {
-        let quic = repair_quic?;
-        if !quic.required && quic.client.is_backing_off(peer) {
-            return None;
-        }
-        self.cluster_info
-            .lookup_contact_info(peer, |node: &ContactInfo| node.serve_repair(Protocol::QUIC))?
-            .filter(|addr| addr.port() != UNADVERTISED_REPAIR_QUIC_PORT)
+        repair_quic: Option<&'a RepairQuic>,
+        num_expected_responses: u32,
+    ) -> Option<QuicRepairTarget<'a>> {
+        QuicRepairTarget::new(repair_quic, *peer, num_expected_responses, || {
+            self.cluster_info
+                .lookup_contact_info(peer, advertised_quic_repair_addr)
+                .flatten()
+        })
     }
 
-    /// Pick the transport for a request to `peer`: QUIC when it is enabled, the
-    /// peer advertises it, and the client is not backing off from that peer;
-    /// UDP otherwise. The backoff check is what keeps a peer that advertises a
-    /// firewalled QUIC port from costing a full repair timeout per request.
-    fn repair_target(
+    /// QUIC when [`QuicRepairTarget::new`] allows it, UDP otherwise.
+    fn repair_target<'a>(
         peer: &Node,
-        repair_info: &RepairInfo,
+        repair_info: &'a RepairInfo,
         num_expected_responses: u32,
-    ) -> RepairTarget {
-        let quic_addr = repair_info
-            .repair_quic
-            .as_ref()
-            .filter(|quic| quic.required || !quic.client.is_backing_off(&peer.pubkey))
-            .and(peer.repair_quic);
-        match quic_addr {
-            Some(addr) => RepairTarget::Quic {
-                pubkey: peer.pubkey,
-                addr,
-                num_expected_responses: u8::try_from(num_expected_responses).unwrap_or(u8::MAX),
-            },
+    ) -> RepairTarget<'a> {
+        match QuicRepairTarget::new(
+            repair_info.repair_quic.as_ref(),
+            peer.pubkey,
+            num_expected_responses,
+            || peer.repair_quic,
+        ) {
+            Some(quic) => RepairTarget::Quic(quic),
             None => RepairTarget::Udp(peer.serve_repair),
         }
     }
 
     /// [`Self::repair_request`] but for [`BlockIdRepairType`] requests
     /// Only for use in Alpenglow blocks, peer selection is based on `peer_stake`
-    pub(crate) fn block_id_repair_request(
+    pub(crate) fn block_id_repair_request<'a>(
         &self,
-        repair_info: &RepairInfo,
+        repair_info: &'a RepairInfo,
         repair_request: BlockIdRepairType,
         peers_cache: &mut LruCache<Slot, RepairPeers>,
         outstanding_requests: &mut OutstandingRequests<BlockIdRepairType>,
-    ) -> Result<(Vec<u8>, RepairTarget, Pubkey)> {
+    ) -> Result<(Vec<u8>, RepairTarget<'a>, Pubkey)> {
         let identity_keypair = repair_info.cluster_info.keypair();
         let slot = repair_request.slot();
         let weight_source = RepairPeerWeightSource::CurrentEpochStake;
@@ -2659,9 +2726,9 @@ mod tests {
             repair_validators,
         );
         let num_expected_responses = 1;
-        assert_eq!(
+        assert_matches!(
             ServeRepair::repair_target(&peer, &repair_info, num_expected_responses),
-            RepairTarget::Udp(peer.serve_repair)
+            RepairTarget::Udp(addr) if addr == peer.serve_repair
         );
     }
 

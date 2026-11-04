@@ -18,7 +18,8 @@ use {
         repair::{
             block_id_repair_service::BlockIdRepairChannels,
             repair_service::{
-                OutstandingShredRepairs, RepairInfo, RepairQuicConfig, RepairServiceChannels,
+                OutstandingShredRepairs, RepairInfo, RepairQuic, RepairQuicConfig,
+                RepairServiceChannels,
             },
         },
         replay_stage::{ReplayReceivers, ReplaySenders, ReplayStage, ReplayStageConfig},
@@ -393,10 +394,16 @@ impl Tvu {
         // pipeline at the same point as the UDP ones so nonce verification and
         // filtering are shared, minus the ping handling the QUIC path has no
         // socket for.
-        let (repair_quic_response_sender, repair_quic_response_receiver) = tvu_config
+        let (repair_quic, repair_quic_response_receiver) = tvu_config
             .repair_quic
-            .as_ref()
-            .map(|_| bounded(SHRED_FETCH_CHANNEL_SIZE))
+            .map(|config| {
+                let (shred_responses, receiver) = bounded(SHRED_FETCH_CHANNEL_SIZE);
+                let repair_quic = RepairQuic {
+                    config,
+                    shred_responses,
+                };
+                (repair_quic, receiver)
+            })
             .unzip();
         let fetch_stage = ShredFetchStage::new(
             fetch_sockets,
@@ -486,14 +493,13 @@ impl Tvu {
                 repair_whitelist: tvu_config.repair_whitelist,
                 cluster_info: cluster_info.clone(),
                 cluster_slots: cluster_slots.clone(),
-                repair_quic: tvu_config.repair_quic.clone(),
+                repair_quic,
             };
             let repair_service_channels = RepairServiceChannels::new(
                 verified_voter_slots_receiver,
                 dumped_slots_receiver,
                 popular_pruned_forks_sender,
                 ancestor_hashes_replay_update_receiver,
-                repair_quic_response_sender.clone(),
             );
             let window_service_channels = WindowServiceChannels::new(
                 verified_receiver,
@@ -502,7 +508,6 @@ impl Tvu {
                 duplicate_slots_sender.clone(),
                 repair_service_channels,
                 block_id_repair_channels,
-                repair_quic_response_sender,
             );
             WindowService::new(
                 blockstore.clone(),

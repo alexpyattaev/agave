@@ -8,7 +8,7 @@ use {
             outstanding_requests::OutstandingRequests,
             packet_threshold::DynamicPacketToProcessThreshold,
             repair_service::{
-                AncestorDuplicateSlotsSender, RepairInfo, RepairQuicConfig, RepairStatsGroup,
+                AncestorDuplicateSlotsSender, RepairInfo, RepairQuic, RepairStatsGroup,
             },
             request_response::RequestResponse,
             serve_repair::{
@@ -19,8 +19,6 @@ use {
         },
         replay_stage::DUPLICATE_THRESHOLD,
     },
-    agave_repair_transport::endpoint::OutboundRepairRequest,
-    bytes::Bytes,
     crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TrySendError, bounded},
     dashmap::{DashMap, mapref::entry::Entry::Occupied},
     solana_clock::Slot,
@@ -842,7 +840,7 @@ impl AncestorHashesService {
         outstanding_requests: &RwLock<OutstandingAncestorHashesRepairs>,
         identity_keypair: &Keypair,
         request_type: AncestorRequestType,
-        repair_quic: Option<&RepairQuicConfig>,
+        repair_quic: Option<&RepairQuic>,
         response_sender: &Sender<PacketBatch>,
     ) -> bool {
         let Ok(sampled_validators) = serve_repair.repair_request_ancestor_hashes_sample_peers(
@@ -876,20 +874,14 @@ impl AncestorHashesService {
             ) else {
                 continue;
             };
-            match serve_repair.quic_repair_address(pubkey, repair_quic) {
-                Some(quic_addr) => {
-                    let quic = repair_quic.expect("a QUIC address implies a QUIC client");
-                    let num_expected_responses =
-                        u8::try_from(ancestor_hashes_repair_type.num_expected_responses())
-                            .unwrap_or(u8::MAX);
-                    quic.client.try_send(OutboundRepairRequest {
-                        peer: *pubkey,
-                        peer_address: quic_addr,
-                        bytes: Bytes::from(request_bytes),
-                        num_expected_responses,
-                        responses: response_sender.clone(),
-                    });
-                    asked_addresses.push(quic_addr);
+            match serve_repair.quic_repair_target(
+                pubkey,
+                repair_quic,
+                ancestor_hashes_repair_type.num_expected_responses(),
+            ) {
+                Some(quic) => {
+                    asked_addresses.push(quic.addr());
+                    quic.send(request_bytes, response_sender);
                 }
                 None => {
                     let _ = ancestor_hashes_request_socket.send_to(&request_bytes, socket_addr);

@@ -25,13 +25,11 @@ use {
         },
         shred_fetch_stage::SHRED_FETCH_CHANNEL_SIZE,
     },
-    agave_repair_transport::endpoint::OutboundRepairRequest,
     agave_votor::{
         common::DELTA,
         event::{RepairEvent, RepairEventReceiver},
     },
     agave_votor_messages::consensus_message::{Block, BlockId},
-    bytes::Bytes,
     crossbeam_channel::{Sender, bounded, select},
     lazy_lru::LruCache,
     log::{debug, info},
@@ -240,18 +238,13 @@ struct BlockIdRepairSockets {
     repair_socket: Arc<UdpSocket>,
 }
 
-/// Channels responses to requests sent over QUIC are delivered on. They are
-/// clones of the channels the UDP receivers feed, so response handling, nonce
-/// accounting and stats are shared between the two transports.
-struct QuicResponseSenders {
-    block_id: Sender<PacketBatch>,
-    shred: Sender<PacketBatch>,
-}
-
 struct BlockIdRepairContext {
     exit: Arc<AtomicBool>,
     response_receiver: PacketBatchReceiver,
-    quic_response_senders: Option<QuicResponseSenders>,
+    /// Where block id repair responses received over QUIC are delivered. This
+    /// is a clone of the channel the UDP receiver feeds, so response handling,
+    /// nonce accounting and stats are shared between the two transports.
+    quic_responses: Sender<PacketBatch>,
     channels: BlockIdRepairChannels,
     blockstore: Arc<Blockstore>,
     sockets: BlockIdRepairSockets,
@@ -272,14 +265,10 @@ impl BlockIdRepairService {
         block_id_repair_channels: BlockIdRepairChannels,
         repair_info: RepairInfo,
         outstanding_shred_requests: Arc<RwLock<OutstandingShredRepairs>>,
-        shred_quic_response_sender: Option<Sender<PacketBatch>>,
     ) -> Self {
-        let (sender, response_receiver) = bounded(RESPONSE_CHANNEL_SIZE);
-        let response_sender = EvictingSender::new(sender.clone(), response_receiver.clone());
-        let quic_response_senders = shred_quic_response_sender.map(|shred| QuicResponseSenders {
-            block_id: sender,
-            shred,
-        });
+        let (quic_responses, response_receiver) = bounded(RESPONSE_CHANNEL_SIZE);
+        let response_sender =
+            EvictingSender::new(quic_responses.clone(), response_receiver.clone());
 
         // UDP receiver thread
         let t_receiver = streamer::receiver(
@@ -297,7 +286,7 @@ impl BlockIdRepairService {
         let t_block_id_repair = Self::run(BlockIdRepairContext {
             exit,
             response_receiver,
-            quic_response_senders,
+            quic_responses,
             channels: block_id_repair_channels,
             blockstore,
             sockets: BlockIdRepairSockets {
@@ -481,7 +470,7 @@ impl BlockIdRepairService {
         Self::send_requests(
             context.sockets.block_id_repair_socket.as_ref(),
             context.sockets.repair_socket.as_ref(),
-            context.quic_response_senders.as_ref(),
+            &context.quic_responses,
             &context.repair_info,
             sharable_banks.root().slot(),
             state,
@@ -942,7 +931,7 @@ impl BlockIdRepairService {
     fn send_requests(
         block_id_repair_socket: &UdpSocket,
         repair_socket: &UdpSocket,
-        quic_response_senders: Option<&QuicResponseSenders>,
+        quic_responses: &Sender<PacketBatch>,
         repair_info: &RepairInfo,
         root: Slot,
         state: &mut RepairState,
@@ -952,14 +941,14 @@ impl BlockIdRepairService {
         let mut block_id_socket_batch: Vec<(Vec<u8>, SocketAddr)> =
             Vec::with_capacity(max_batch_len);
         let mut shred_socket_batch = Vec::with_capacity(max_batch_len);
-        let mut quic_batch = Vec::new();
+        let mut num_quic_requests = 0usize;
 
         let now = timestamp();
 
         while block_id_socket_batch
             .len()
             .saturating_add(shred_socket_batch.len())
-            .saturating_add(quic_batch.len())
+            .saturating_add(num_quic_requests)
             < MAX_REPAIR_REQUESTS_PER_ITERATION
         {
             let Some(request) = state.pending_repair_requests.pop() else {
@@ -996,24 +985,11 @@ impl BlockIdRepairService {
                             block_id_socket_batch.push((bytes, addr));
                             state.expect_ping_response(peer_pubkey, addr, now);
                         }
-                        RepairTarget::Quic {
-                            pubkey,
-                            addr,
-                            num_expected_responses,
-                        } => {
-                            let Some(senders) = quic_response_senders else {
-                                error!("repair over QUIC selected without a response channel");
-                                continue;
-                            };
-                            // No ping is expected over QUIC: the peer's identity
-                            // and address are attested by the TLS handshake.
-                            quic_batch.push(OutboundRepairRequest {
-                                peer: pubkey,
-                                peer_address: addr,
-                                bytes: Bytes::from(bytes),
-                                num_expected_responses,
-                                responses: senders.block_id.clone(),
-                            });
+                        // No ping is expected over QUIC: the peer's identity
+                        // and address are attested by the TLS handshake.
+                        RepairTarget::Quic(quic) => {
+                            quic.send(bytes, quic_responses);
+                            num_quic_requests = num_quic_requests.saturating_add(1);
                         }
                     }
                     state.sent_requests.insert(request, now);
@@ -1055,22 +1031,9 @@ impl BlockIdRepairService {
 
                     match target {
                         RepairTarget::Udp(addr) => shred_socket_batch.push((bytes, addr)),
-                        RepairTarget::Quic {
-                            pubkey,
-                            addr,
-                            num_expected_responses,
-                        } => {
-                            let Some(senders) = quic_response_senders else {
-                                error!("repair over QUIC selected without a response channel");
-                                continue;
-                            };
-                            quic_batch.push(OutboundRepairRequest {
-                                peer: pubkey,
-                                peer_address: addr,
-                                bytes: Bytes::from(bytes),
-                                num_expected_responses,
-                                responses: senders.shred.clone(),
-                            });
+                        RepairTarget::Quic(quic) => {
+                            quic.send_shred_request(bytes);
+                            num_quic_requests = num_quic_requests.saturating_add(1);
                         }
                     }
                     state.sent_requests.insert(request, now);
@@ -1082,11 +1045,6 @@ impl BlockIdRepairService {
             }
         }
 
-        if let Some(quic) = repair_info.repair_quic.as_ref() {
-            for request in quic_batch {
-                quic.client.try_send(request);
-            }
-        }
         if !block_id_socket_batch.is_empty() {
             let total = block_id_socket_batch.len();
             let _ = batch_send(
