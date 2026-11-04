@@ -18,7 +18,9 @@ use {
         },
         forwarding_stage::ForwardingClientConfig,
         repair::{
-            self, repair_handler::RepairHandlerType, serve_repair_service::ServeRepairService,
+            self, repair_handler::RepairHandlerType, repair_service::RepairQuicConfig,
+            serve_repair::ServeRepair, serve_repair_quic_service::ServeRepairQuicService,
+            serve_repair_service::ServeRepairService,
         },
         resource_limits::{ResourceLimitError, adjust_nofile_limit},
         sample_performance_service::SamplePerformanceService,
@@ -33,6 +35,10 @@ use {
     },
     agave_event_system::{EventSystem, stream_policy::StreamPolicy},
     agave_jemalloc::group::ArenaGroup,
+    agave_repair_transport::{
+        KnownPeers,
+        endpoint::{RepairQuicClient, RepairQuicServer, new_request_channel},
+    },
     agave_snapshots::{
         SnapshotInterval, snapshot_archive_info::SnapshotArchiveInfoGetter as _,
         snapshot_config::SnapshotConfig, snapshot_hash::StartingSnapshotHashes,
@@ -73,7 +79,7 @@ use {
             ClusterInfo, DEFAULT_CONTACT_DEBUG_INTERVAL_MILLIS,
             DEFAULT_CONTACT_SAVE_INTERVAL_MILLIS,
         },
-        contact_info::ContactInfo,
+        contact_info::{self, ContactInfo},
         crds_gossip_pull::CRDS_GOSSIP_PULL_CRDS_TIMEOUT_MS,
         gossip_service::GossipService,
         node::{Node, NodeMultihoming},
@@ -163,7 +169,7 @@ use {
         borrow::Cow,
         cmp,
         collections::{HashMap, HashSet},
-        net::{Ipv4Addr, SocketAddr, SocketAddrV4},
+        net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket},
         num::{NonZeroU64, NonZeroUsize},
         path::{Path, PathBuf},
         str::FromStr,
@@ -177,7 +183,10 @@ use {
     strum::VariantNames,
     strum_macros::{Display, EnumCount, EnumIter, EnumString, IntoStaticStr},
     thiserror::Error,
-    tokio::{runtime::Runtime as TokioRuntime, sync::mpsc},
+    tokio::{
+        runtime::Runtime as TokioRuntime,
+        sync::{mpsc, watch},
+    },
     tokio_util::sync::CancellationToken,
 };
 
@@ -409,8 +418,27 @@ pub struct ValidatorConfig {
     pub tvu_bls_sigverify_threads: NonZeroUsize,
     pub delay_leader_block_for_pending_fork: bool,
     pub repair_handler_type: RepairHandlerType,
+    pub repair_quic_mode: RepairQuicMode,
     // Thread niceness adjustment for snapshot packager service
     pub snapshot_packager_niceness_adj: i8,
+}
+
+/// Whether this validator speaks repair over QUIC, and how strictly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RepairQuicMode {
+    /// No QUIC repair endpoints are brought up at all.
+    Off,
+    /// QUIC is used for peers that advertise it, falling back to UDP per peer.
+    Enabled,
+    /// As `Enabled`, but a peer advertising QUIC repair is never repaired over
+    /// UDP instead. Exists so tests can assert the QUIC path was exercised.
+    Required,
+}
+
+impl RepairQuicMode {
+    fn is_enabled(&self) -> bool {
+        !matches!(self, Self::Off)
+    }
 }
 
 impl ValidatorConfig {
@@ -492,6 +520,7 @@ impl ValidatorConfig {
             tvu_bls_sigverify_threads: NonZeroUsize::new(2).expect("2 is non-zero"),
             delay_leader_block_for_pending_fork: true,
             repair_handler_type: RepairHandlerType::default(),
+            repair_quic_mode: RepairQuicMode::Off,
             snapshot_packager_niceness_adj: 0,
         }
     }
@@ -706,6 +735,10 @@ pub struct Validator {
     stats_reporter_service: StatsReporterService,
     gossip_service: GossipService,
     serve_repair_service: ServeRepairService,
+    repair_quic_service: Option<ServeRepairQuicService>,
+    /// Owns the threads the repair QUIC endpoints run on. Shut down after the
+    /// service has joined.
+    repair_quic_runtime: Option<TokioRuntime>,
     completed_data_sets_service: Option<CompletedDataSetsService>,
     snapshot_packager_service: SnapshotPackagerService,
     poh_recorder: Arc<RwLock<PohRecorder>>,
@@ -1665,6 +1698,39 @@ impl Validator {
             exit.clone(),
         );
 
+        let (repair_quic_service, repair_quic_runtime, repair_quic) =
+            if config.repair_quic_mode.is_enabled() {
+                let serve_repair_quic = {
+                    let bank_forks_r = bank_forks.read().unwrap();
+                    let leader_state = poh_recorder.read().unwrap().shared_leader_state();
+                    config.repair_handler_type.create_serve_repair(
+                        blockstore.clone(),
+                        cluster_info.clone(),
+                        bank_forks_r.sharable_banks(),
+                        config.repair_whitelist.clone(),
+                        leader_state,
+                        leader_schedule_cache.clone(),
+                        bank_forks_r.migration_status(),
+                    )
+                };
+                let required = config.repair_quic_mode == RepairQuicMode::Required;
+                let (service, runtime, repair_quic) = start_repair_quic(
+                    serve_repair_quic,
+                    &node.sockets.serve_repair_quic,
+                    &node.sockets.repair_quic_client,
+                    &node.info,
+                    &cluster_info,
+                    &key_notifiers,
+                    required,
+                    socket_addr_space,
+                    &cancel,
+                    &exit,
+                )?;
+                (Some(service), Some(runtime), Some(repair_quic))
+            } else {
+                (None, None, None)
+            };
+
         let (tower, vote_history) = process_blockstore.process().map_err(|e| {
             ValidatorError::Other(format!(
                 "Unable to restore Tower or VoteHistory and either --require-tower was specified \
@@ -1742,6 +1808,7 @@ impl Validator {
                 turbine_xdp_sender: turbine_xdp_sender.clone(),
                 repair_xdp_sender,
                 replay_arena,
+                repair_quic,
             },
             &max_slots,
             block_metadata_notifier,
@@ -1891,6 +1958,8 @@ impl Validator {
             stats_reporter_service,
             gossip_service,
             serve_repair_service,
+            repair_quic_service,
+            repair_quic_runtime,
             json_rpc_service,
             pubsub_service,
             rpc_completed_slots_service,
@@ -2064,6 +2133,12 @@ impl Validator {
         self.serve_repair_service
             .join()
             .expect("serve_repair_service");
+        if let Some(repair_quic_service) = self.repair_quic_service {
+            repair_quic_service.join().expect("repair_quic_service");
+        }
+        if let Some(repair_quic_runtime) = self.repair_quic_runtime {
+            repair_quic_runtime.shutdown_background();
+        }
         self.stats_reporter_service
             .join()
             .expect("stats_reporter_service");
@@ -2097,6 +2172,100 @@ impl Validator {
             geyser_plugin_service.join().expect("geyser_plugin_service");
         }
     }
+}
+
+/// Starts repair over QUIC alongside the UDP path: its own runtime, endpoints,
+/// rate limiting and serve loop. Peers pick it up per peer, and UDP is
+/// untouched.
+#[allow(clippy::too_many_arguments)]
+fn start_repair_quic(
+    serve_repair_quic: ServeRepair,
+    server_socket: &UdpSocket,
+    client_socket: &UdpSocket,
+    node_info: &ContactInfo,
+    cluster_info: &Arc<ClusterInfo>,
+    key_notifiers: &RwLock<KeyUpdaters>,
+    required: bool,
+    socket_addr_space: SocketAddrSpace,
+    cancel: &CancellationToken,
+    exit: &Arc<AtomicBool>,
+) -> Result<(ServeRepairQuicService, TokioRuntime, RepairQuicConfig), ValidatorError> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        // One worker for the server endpoint's handshake work, the
+        // rest shared between admitted connections and the client.
+        .worker_threads(4)
+        .thread_name("solRepairQuicRt")
+        .build()
+        .map_err(|err| ValidatorError::Other(format!("repair QUIC runtime: {err}")))?;
+    let runtime_handle = runtime.handle().clone();
+    let advertised_quic_repair = server_socket
+        .local_addr()
+        .map_err(|err| ValidatorError::Other(format!("serve_repair_quic local addr: {err}")))?;
+    let server_socket = into_quic_socket(
+        server_socket
+            .try_clone()
+            .expect("serve_repair_quic socket must be cloneable"),
+        None,
+    );
+    let client_socket = into_quic_socket(
+        client_socket
+            .try_clone()
+            .expect("repair_quic_client socket must be cloneable"),
+        None,
+    );
+    let (requests_sender, requests_receiver) = new_request_channel();
+    let (known_peers_sender, known_peers_receiver) =
+        watch::channel(Arc::new(KnownPeers::default()));
+    let server = RepairQuicServer::spawn(
+        &runtime_handle,
+        &cluster_info.keypair(),
+        vec![server_socket],
+        requests_sender,
+        known_peers_receiver,
+        socket_addr_space,
+        cancel.child_token(),
+    )
+    .map_err(|err| ValidatorError::Other(format!("repair QUIC server: {err:?}")))?;
+    let client = Arc::new(
+        RepairQuicClient::spawn(
+            &runtime_handle,
+            &cluster_info.keypair(),
+            client_socket,
+            cancel.child_token(),
+        )
+        .map_err(|err| ValidatorError::Other(format!("repair QUIC client: {err:?}")))?,
+    );
+    {
+        let mut key_notifiers = key_notifiers.write().unwrap();
+        key_notifiers.add(KeyUpdaterType::RepairQuicServer, server.key_updater());
+        key_notifiers.add(KeyUpdaterType::RepairQuicClient, client.key_updater());
+    }
+    // Only advertise the port once we are actually serving on it;
+    // until then the contact info keeps the placeholder port.
+    let mut advertised = node_info
+        .serve_repair(contact_info::Protocol::UDP)
+        .ok_or_else(|| {
+            ValidatorError::Other(
+                "cannot advertise QUIC repair without a UDP repair address".to_string(),
+            )
+        })?;
+    advertised.set_port(advertised_quic_repair.port());
+    cluster_info
+        .set_serve_repair_quic(advertised)
+        .map_err(|err| ValidatorError::Other(format!("advertising serve_repair_quic: {err:?}")))?;
+    let service = ServeRepairQuicService::new(
+        serve_repair_quic,
+        server,
+        requests_receiver,
+        known_peers_sender,
+        cluster_info.clone(),
+        socket_addr_space,
+        runtime_handle,
+        exit.clone(),
+    );
+    let repair_quic = RepairQuicConfig { client, required };
+    Ok((service, runtime, repair_quic))
 }
 
 fn active_vote_account_exists_in_bank(bank: &Bank, vote_account: &Pubkey) -> bool {

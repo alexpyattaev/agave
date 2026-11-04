@@ -13,11 +13,12 @@ use {
             repair_weight::RepairWeight,
             serve_repair::{
                 REPAIR_PEERS_CACHE_CAPACITY, RepairPeers, RepairProtocol, RepairRequestHeader,
-                ServeRepair, ShredRepairType,
+                RepairTarget, ServeRepair, ShredRepairType,
             },
         },
     },
     agave_bls_sigverify::pubkeys::{VerifiedVotorSlotsMessage, VoteAccountPubkeys},
+    agave_repair_transport::endpoint::RepairQuicClient,
     agave_votor_messages::migration::MigrationStatus,
     ahash::AHashMap,
     bytes::Bytes,
@@ -36,6 +37,7 @@ use {
     },
     solana_measure::measure::Measure,
     solana_net_utils::{PinnedXdpSender, Protocol},
+    solana_perf::packet::PacketBatch,
     solana_pubkey::Pubkey,
     solana_runtime::{
         bank::Bank,
@@ -548,6 +550,29 @@ pub struct RepairInfo {
     pub repair_validators: Option<HashSet<Pubkey>>,
     // Validators which should be given priority when serving
     pub repair_whitelist: Arc<RwLock<HashSet<Pubkey>>>,
+    /// Present when repair over QUIC is enabled. Peers that advertise a QUIC
+    /// repair port and are not in the client's backoff are requested over QUIC;
+    /// everyone else keeps the UDP path unchanged.
+    pub repair_quic: Option<RepairQuic>,
+}
+
+/// Repair over QUIC as the repair threads use it.
+#[derive(Clone)]
+pub struct RepairQuic {
+    pub config: RepairQuicConfig,
+    /// Where shred repair responses received over QUIC are delivered. This is a
+    /// clone of the same channel `ShredFetchStage` reads the UDP repair socket
+    /// into, so nonce verification and response acceptance are shared.
+    pub shred_responses: CrossbeamSender<PacketBatch>,
+}
+
+#[derive(Clone)]
+pub struct RepairQuicConfig {
+    pub client: Arc<RepairQuicClient>,
+    /// When set, a peer advertising a QUIC repair port is never served over
+    /// UDP instead, so a test can assert the QUIC path was actually used.
+    /// Without it every QUIC test silently passes over UDP.
+    pub required: bool,
 }
 
 pub struct RepairSlotRange {
@@ -887,27 +912,34 @@ impl RepairService {
         repair_metrics: &mut RepairMetrics,
     ) {
         let mut build_batch_us = Measure::start("build_batch_us");
-        let batch: Vec<(Vec<u8>, SocketAddr)> = {
+        let mut batch = Vec::new();
+        let mut quic_batch = Vec::new();
+        {
             let mut outstanding_requests = outstanding_requests.write().unwrap();
-            repairs
-                .into_iter()
-                .filter_map(|repair_request| {
-                    let (to, req) = serve_repair
-                        .repair_request(
-                            repair_info,
-                            repair_request,
-                            peers_cache,
-                            &mut repair_metrics.stats,
-                            &mut outstanding_requests,
-                        )
-                        .ok()??;
-                    Some((req, to))
-                })
-                .collect()
-        };
+            let targets = repairs.into_iter().filter_map(|repair_request| {
+                serve_repair
+                    .repair_request(
+                        repair_info,
+                        repair_request,
+                        peers_cache,
+                        &mut repair_metrics.stats,
+                        &mut outstanding_requests,
+                    )
+                    .ok()?
+            });
+            for (target, req) in targets {
+                match target {
+                    RepairTarget::Udp(to) => batch.push((req, to)),
+                    RepairTarget::Quic(quic) => quic_batch.push((quic, req)),
+                }
+            }
+        }
         build_batch_us.stop();
 
         let mut send_batch_us = Measure::start("send_batch_us");
+        for (quic, req) in quic_batch {
+            quic.send_shred_request(req);
+        }
         if !batch.is_empty() {
             let num_pkts = batch.len();
             if let Some(xdp) = xdp_sender {

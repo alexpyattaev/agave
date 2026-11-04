@@ -19,7 +19,9 @@ use {
             outstanding_requests::OutstandingRequests,
             packet_threshold::DynamicPacketToProcessThreshold,
             repair_service::{REPAIR_MS, RepairInfo, RepairStats},
-            serve_repair::{BlockIdRepairResponse, BlockIdRepairType, RepairProtocol},
+            serve_repair::{
+                BlockIdRepairResponse, BlockIdRepairType, RepairProtocol, RepairTarget,
+            },
         },
         shred_fetch_stage::SHRED_FETCH_CHANNEL_SIZE,
     },
@@ -28,7 +30,7 @@ use {
         event::{RepairEvent, RepairEventReceiver},
     },
     agave_votor_messages::consensus_message::{Block, BlockId},
-    crossbeam_channel::select,
+    crossbeam_channel::{Sender, bounded, select},
     lazy_lru::LruCache,
     log::{debug, info},
     solana_clock::Slot,
@@ -239,6 +241,10 @@ struct BlockIdRepairSockets {
 struct BlockIdRepairContext {
     exit: Arc<AtomicBool>,
     response_receiver: PacketBatchReceiver,
+    /// Where block id repair responses received over QUIC are delivered. This
+    /// is a clone of the channel the UDP receiver feeds, so response handling,
+    /// nonce accounting and stats are shared between the two transports.
+    quic_responses: Sender<PacketBatch>,
     channels: BlockIdRepairChannels,
     blockstore: Arc<Blockstore>,
     sockets: BlockIdRepairSockets,
@@ -260,8 +266,9 @@ impl BlockIdRepairService {
         repair_info: RepairInfo,
         outstanding_shred_requests: Arc<RwLock<OutstandingShredRepairs>>,
     ) -> Self {
-        let (response_sender, response_receiver) =
-            EvictingSender::new_bounded(RESPONSE_CHANNEL_SIZE);
+        let (quic_responses, response_receiver) = bounded(RESPONSE_CHANNEL_SIZE);
+        let response_sender =
+            EvictingSender::new(quic_responses.clone(), response_receiver.clone());
 
         // UDP receiver thread
         let t_receiver = streamer::receiver(
@@ -279,6 +286,7 @@ impl BlockIdRepairService {
         let t_block_id_repair = Self::run(BlockIdRepairContext {
             exit,
             response_receiver,
+            quic_responses,
             channels: block_id_repair_channels,
             blockstore,
             sockets: BlockIdRepairSockets {
@@ -462,6 +470,7 @@ impl BlockIdRepairService {
         Self::send_requests(
             context.sockets.block_id_repair_socket.as_ref(),
             context.sockets.repair_socket.as_ref(),
+            &context.quic_responses,
             &context.repair_info,
             sharable_banks.root().slot(),
             state,
@@ -922,6 +931,7 @@ impl BlockIdRepairService {
     fn send_requests(
         block_id_repair_socket: &UdpSocket,
         repair_socket: &UdpSocket,
+        quic_responses: &Sender<PacketBatch>,
         repair_info: &RepairInfo,
         root: Slot,
         state: &mut RepairState,
@@ -931,12 +941,14 @@ impl BlockIdRepairService {
         let mut block_id_socket_batch: Vec<(Vec<u8>, SocketAddr)> =
             Vec::with_capacity(max_batch_len);
         let mut shred_socket_batch = Vec::with_capacity(max_batch_len);
+        let mut num_quic_requests = 0usize;
 
         let now = timestamp();
 
         while block_id_socket_batch
             .len()
             .saturating_add(shred_socket_batch.len())
+            .saturating_add(num_quic_requests)
             < MAX_REPAIR_REQUESTS_PER_ITERATION
         {
             let Some(request) = state.pending_repair_requests.pop() else {
@@ -949,7 +961,7 @@ impl BlockIdRepairService {
 
             match request {
                 OutgoingMessage::Metadata(block_id_repair_type) => {
-                    let Ok((bytes, addr, peer_pubkey)) = state
+                    let Ok((bytes, target, peer_pubkey)) = state
                         .serve_repair
                         .block_id_repair_request(
                             repair_info,
@@ -968,9 +980,19 @@ impl BlockIdRepairService {
                         continue;
                     };
 
-                    block_id_socket_batch.push((bytes, addr));
+                    match target {
+                        RepairTarget::Udp(addr) => {
+                            block_id_socket_batch.push((bytes, addr));
+                            state.expect_ping_response(peer_pubkey, addr, now);
+                        }
+                        // No ping is expected over QUIC: the peer's identity
+                        // and address are attested by the TLS handshake.
+                        RepairTarget::Quic(quic) => {
+                            quic.send(bytes, quic_responses);
+                            num_quic_requests = num_quic_requests.saturating_add(1);
+                        }
+                    }
                     state.sent_requests.insert(request, now);
-                    state.expect_ping_response(peer_pubkey, addr, now);
 
                     // Update stats
                     state.request_stats.total_requests += 1;
@@ -984,7 +1006,7 @@ impl BlockIdRepairService {
                     }
                 }
                 OutgoingMessage::Shred(shred_request) => {
-                    let Ok(Some((addr, bytes))) = state
+                    let Ok(Some((target, bytes))) = state
                         .serve_repair
                         .repair_request(
                             repair_info,
@@ -1007,7 +1029,13 @@ impl BlockIdRepairService {
                         continue;
                     };
 
-                    shred_socket_batch.push((bytes, addr));
+                    match target {
+                        RepairTarget::Udp(addr) => shred_socket_batch.push((bytes, addr)),
+                        RepairTarget::Quic(quic) => {
+                            quic.send_shred_request(bytes);
+                            num_quic_requests = num_quic_requests.saturating_add(1);
+                        }
+                    }
                     state.sent_requests.insert(request, now);
 
                     // Update stats

@@ -351,6 +351,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "agave-repair-transport"
+version = "4.5.0-alpha.4"
+dependencies = [
+ "arc-swap",
+ "arrayvec",
+ "bytes",
+ "crossbeam-channel",
+ "log",
+ "quinn",
+ "quinn-proto",
+ "solana-keypair",
+ "solana-metrics",
+ "solana-net-utils",
+ "solana-packet",
+ "solana-perf",
+ "solana-pubkey 4.4.0",
+ "solana-tls-utils",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util 0.7.19",
+]
+
+[[package]]
 name = "agave-reserved-account-keys"
 version = "4.5.0-alpha.4"
 dependencies = [
@@ -8059,6 +8082,7 @@ dependencies = [
  "agave-jemalloc",
  "agave-logger",
  "agave-math-utils",
+ "agave-repair-transport",
  "agave-reserved-account-keys",
  "agave-scheduler-bindings",
  "agave-scheduler-handshake",

@@ -1,0 +1,43 @@
+[package]
+name = "agave-repair-transport"
+description = "QUIC bidirectional-stream transport for Solana repair traffic"
+documentation = "https://docs.rs/agave-repair-transport"
+version = { workspace = true }
+authors = { workspace = true }
+repository = { workspace = true }
+homepage = { workspace = true }
+license = { workspace = true }
+edition = { workspace = true }
+
+[lib]
+
+[features]
+dev-context-only-utils = []
+agave-unstable-api = []
+
+[dependencies]
+arc-swap = { workspace = true }
+arrayvec = { workspace = true }
+bytes = { workspace = true }
+crossbeam-channel = { workspace = true }
+log = { workspace = true }
+quinn = { workspace = true }
+solana-keypair = { workspace = true }
+solana-metrics = { workspace = true }
+solana-net-utils = { workspace = true }
+solana-packet = { workspace = true }
+solana-perf = { workspace = true }
+solana-pubkey = { workspace = true, features = ["rand"] }
+solana-tls-utils = { workspace = true, features = ["agave-unstable-api"] }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio-util = { workspace = true }
+
+[dev-dependencies]
+quinn-proto = { workspace = true }
+solana-keypair = { workspace = true }
+solana-net-utils = { workspace = true, features = ["dev-context-only-utils"] }
+tokio = { workspace = true, features = ["full"] }
+
+[lints]
+workspace = true

@@ -54,6 +54,7 @@ agave-fs = { workspace = true }
 agave-jemalloc = { workspace = true }
 agave-logger = { workspace = true }
 agave-math-utils = { workspace = true }
+agave-repair-transport = { workspace = true }
 agave-scheduler-bindings = { workspace = true }
 agave-scheduler-handshake = { workspace = true }
 agave-scheduling-utils = { workspace = true }

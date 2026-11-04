@@ -79,6 +79,7 @@ members = [
     "rayon-threadlimit",
     "rbpf-cli",
     "remote-wallet",
+    "repair-transport",
     "reserved-account-keys",
     "rpc",
     "rpc-client",
@@ -225,6 +226,7 @@ agave-math-utils = { path = "math-utils", version = "=4.5.0-alpha.4", features =
 agave-memory = { path = "memory", version = "=4.5.0-alpha.4", features = ["agave-unstable-api"] }
 agave-precompiles = { path = "precompiles", version = "=4.5.0-alpha.4", features = ["agave-unstable-api"] }
 agave-random = { path = "random", version = "=4.5.0-alpha.4", features = ["agave-unstable-api"] }
+agave-repair-transport = { path = "repair-transport", version = "=4.5.0-alpha.4", features = ["agave-unstable-api"] }
 agave-reserved-account-keys = { path = "reserved-account-keys", version = "=4.5.0-alpha.4", features = ["agave-unstable-api"] }
 agave-scheduler-bindings = "8.0.0"
 agave-scheduler-handshake = "10.0.0"

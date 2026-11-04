@@ -17,7 +17,10 @@ use {
         epoch_specs::EpochSpecs,
         repair::{
             block_id_repair_service::BlockIdRepairChannels,
-            repair_service::{OutstandingShredRepairs, RepairInfo, RepairServiceChannels},
+            repair_service::{
+                OutstandingShredRepairs, RepairInfo, RepairQuic, RepairQuicConfig,
+                RepairServiceChannels,
+            },
         },
         replay_stage::{ReplayReceivers, ReplaySenders, ReplayStage, ReplayStageConfig},
         shred_fetch_stage::{SHRED_FETCH_CHANNEL_SIZE, ShredFetchStage},
@@ -153,6 +156,8 @@ pub struct TvuConfig {
     pub turbine_xdp_sender: Option<TurbineXdpSender>,
     pub repair_xdp_sender: Option<PinnedXdpSender>,
     pub(crate) replay_arena: Option<Arena>,
+    /// Present when repair over QUIC is enabled.
+    pub repair_quic: Option<RepairQuicConfig>,
 }
 
 impl Default for TvuConfig {
@@ -170,6 +175,7 @@ impl Default for TvuConfig {
             turbine_xdp_sender: None,
             repair_xdp_sender: None,
             replay_arena: None,
+            repair_quic: None,
         }
     }
 }
@@ -376,9 +382,25 @@ impl Tvu {
         let ancestor_hashes_socket = Arc::new(ancestor_hashes_socket);
         let block_id_repair_socket = Arc::new(block_id_repair);
         let fetch_sockets: Vec<Arc<UdpSocket>> = fetch_sockets.into_iter().map(Arc::new).collect();
+        // Responses to repair requests we sent over QUIC. They enter the shred
+        // pipeline at the same point as the UDP ones so nonce verification and
+        // filtering are shared, minus the ping handling the QUIC path has no
+        // socket for.
+        let (repair_quic, repair_quic_response_receiver) = tvu_config
+            .repair_quic
+            .map(|config| {
+                let (shred_responses, receiver) = bounded(SHRED_FETCH_CHANNEL_SIZE);
+                let repair_quic = RepairQuic {
+                    config,
+                    shred_responses,
+                };
+                (repair_quic, receiver)
+            })
+            .unzip();
         let fetch_stage = ShredFetchStage::new(
             fetch_sockets,
             repair_socket.clone(),
+            repair_quic_response_receiver,
             fetch_sender,
             tvu_config.shred_version,
             bank_forks.clone(),
@@ -460,6 +482,7 @@ impl Tvu {
                 repair_whitelist: tvu_config.repair_whitelist,
                 cluster_info: cluster_info.clone(),
                 cluster_slots: cluster_slots.clone(),
+                repair_quic,
             };
             let repair_service_channels = RepairServiceChannels::new(
                 verified_voter_slots_receiver,
