@@ -1030,6 +1030,159 @@ mod tests {
         }
     }
 
+    // Empirically measures the retransmit (egress) load a single high-stake
+    // node carries, as a fraction of the whole cluster's retransmit traffic,
+    // using turbine's real stake-weighted shuffle + get_retransmit_peers path.
+    //
+    // Run with:
+    //   cargo test -p solana-turbine sim_turbine_egress_fraction -- --ignored --nocapture
+    #[test]
+    #[ignore = "manual turbine egress simulation (slow)"]
+    fn sim_turbine_egress_fraction() {
+        use solana_ledger::shred::ShredType;
+        const N: usize = 6000; // total nodes in the cluster
+        const FANOUT: usize = DATA_PLANE_FANOUT; // 200
+        const NUM_SHREDS: usize = 100_000;
+        // Tagged node holds 4% of stake; every other node holds an equal share
+        // of the remaining 96%. stake_other * (N-1) = 96, stake_tagged = 4 (per
+        // 100 units) -> exactly 4%.
+        const STAKE_OTHER: u64 = 96;
+        const STAKE_TAGGED: u64 = 4 * (N as u64 - 1);
+
+        let mut rng = ChaCha8Rng::seed_from_u64(20260105); // deterministic seed
+
+        // Build N localhost nodes. Index 0 is the ClusterInfo self identity
+        // (irrelevant to another node's retransmit calc). Index 1 is tagged.
+        let self_kp = Arc::new(Keypair::new());
+        let other_kps: Vec<Keypair> = repeat_with(Keypair::new).take(N - 1).collect();
+        let mut contact_infos =
+            vec![GossipContactInfo::new_localhost(&self_kp.pubkey(), timestamp())];
+        contact_infos.extend(
+            other_kps
+                .iter()
+                .map(|kp| GossipContactInfo::new_localhost(&kp.pubkey(), timestamp())),
+        );
+        let tagged = *contact_infos[1].pubkey();
+
+        let mut stakes: HashMap<Pubkey, u64> =
+            contact_infos.iter().map(|ci| (*ci.pubkey(), STAKE_OTHER)).collect();
+        stakes.insert(tagged, STAKE_TAGGED);
+        let total_stake: u64 = stakes.values().sum();
+
+        let cluster_info = ClusterInfo::new(
+            contact_infos[0].clone(),
+            Arc::clone(&self_kp),
+            SocketAddrSpace::Unspecified,
+        );
+        {
+            let now = timestamp();
+            let mut crds = cluster_info.gossip.crds.write();
+            for (kp, ci) in other_kps.iter().zip(contact_infos.iter().skip(1)) {
+                let value = CrdsValue::new(CrdsData::from(ci), kp);
+                crds.insert(value, now, GossipRoute::LocalMessage).unwrap();
+            }
+        }
+
+        let cluster_nodes =
+            new_cluster_nodes::<RetransmitStage>(&cluster_info, ClusterType::Development, &stakes);
+        assert_eq!(cluster_nodes.nodes.len(), N, "no dedup/phantom nodes expected");
+        let tagged_index = cluster_nodes.index[&tagged];
+        // Each shred removes exactly one leader from the shuffle, so the tree
+        // spans N-1 nodes -> N-2 retransmit edges (packets) per shred.
+        let edges_per_shred = (cluster_nodes.nodes.len() - 2) as u64;
+
+        // Cross-check the denominator on a few trees: summing every node's
+        // children must equal the number of tree edges (full coverage).
+        for _ in 0..3 {
+            let leader_idx = loop {
+                let k = rng.random_range(0..cluster_nodes.nodes.len());
+                if k != tagged_index {
+                    break k;
+                }
+            };
+            let leader = *cluster_nodes.nodes[leader_idx].pubkey();
+            let shred = ShredId::new(rng.random(), rng.random(), ShredType::Data);
+            let mut ws = cluster_nodes.weighted_shuffle.clone();
+            ws.remove_index(leader_idx);
+            let mut crng = turbine_rng(&leader, &shred);
+            let order: Vec<usize> = ws.shuffle(&mut crng).collect();
+            let total_children: usize = order
+                .iter()
+                .map(|&node| {
+                    let (_, peers) =
+                        get_retransmit_peers(FANOUT, |k| k == node, order.iter().copied());
+                    peers.count()
+                })
+                .sum();
+            assert_eq!(total_children, order.len() - 1, "coverage identity broken");
+            assert_eq!(order.len(), cluster_nodes.nodes.len() - 1);
+        }
+
+        // Main sweep: sum the tagged node's realized fanout over NUM_SHREDS.
+        let mut ws = cluster_nodes.weighted_shuffle.clone();
+        let mut tagged_egress: u64 = 0;
+        let mut root_count: u64 = 0;
+        let mut leaf_count: u64 = 0;
+        for _ in 0..NUM_SHREDS {
+            let leader_idx = loop {
+                let k = rng.random_range(0..cluster_nodes.nodes.len());
+                if k != tagged_index {
+                    break k;
+                }
+            };
+            let leader = *cluster_nodes.nodes[leader_idx].pubkey();
+            let shred = ShredId::new(rng.random(), rng.random(), ShredType::Data);
+
+            ws.clone_from(&cluster_nodes.weighted_shuffle);
+            ws.remove_index(leader_idx);
+            let mut crng = turbine_rng(&leader, &shred);
+            let (index, peers) = get_retransmit_peers(
+                FANOUT,
+                |k: usize| cluster_nodes.nodes[k].pubkey() == &tagged,
+                ws.shuffle(&mut crng),
+            );
+            // Realized egress = children that actually have a TVU address.
+            let protocol = Protocol::UDP;
+            let count = peers
+                .filter(|&k| {
+                    cluster_nodes.nodes[k]
+                        .contact_info()
+                        .and_then(|ci| ci.tvu(protocol))
+                        .is_some()
+                })
+                .count() as u64;
+            tagged_egress += count;
+            if index == 0 {
+                root_count += 1;
+            } else if count == 0 {
+                leaf_count += 1;
+            }
+        }
+
+        let total_created = NUM_SHREDS as u64 * edges_per_shred;
+        let frac = tagged_egress as f64 / total_created as f64;
+        let stake_frac = STAKE_TAGGED as f64 / total_stake as f64;
+        println!("--- turbine egress simulation ---");
+        println!("N={N} fanout={FANOUT} shreds={NUM_SHREDS}");
+        println!("tagged stake fraction      = {:.4}%", stake_frac * 100.0);
+        println!(
+            "P(tagged = root)           = {:.4}% (expect ~ stake fraction)",
+            root_count as f64 / NUM_SHREDS as f64 * 100.0
+        );
+        println!(
+            "P(tagged = leaf)           = {:.4}%",
+            leaf_count as f64 / NUM_SHREDS as f64 * 100.0
+        );
+        println!(
+            "mean children / shred      = {:.3}",
+            tagged_egress as f64 / NUM_SHREDS as f64
+        );
+        println!("edges (packets) per shred  = {edges_per_shred}");
+        println!("tagged_egress (packets)    = {tagged_egress}");
+        println!("total cluster retransmit   = {total_created}");
+        println!("tagged egress fraction     = {:.4}%", frac * 100.0);
+    }
+
     #[test]
     fn test_sort_and_dedup_nodes() {
         let mut rng = rand::rng();
