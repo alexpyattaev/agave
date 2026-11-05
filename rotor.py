@@ -20,6 +20,8 @@ past the knee -- demonstrated below). Use the integer-exact clamp or the
 rational "parallel" knee instead.
 """
 
+import sys
+
 # ---- cluster / traffic parameters -------------------------------------------
 SHREDS_PER_SECOND = 512 * 5 * 64  # 512 FEC sets/slot, 5 slots/s, 64 shreds/FEC
 N = 6000                          # nodes in the cluster
@@ -117,6 +119,37 @@ for s in stakes:
     i = egress_gbps(w_rational_fixed_ppb(int(round(s * PPB))) / PPB)
     print(f"  stake {s*100:6.3f}%:  float={f:7.2f} Gbps   fixed={i:7.2f} Gbps   diff={abs(f-i):.4g}")
 
+# ---- plotting ---------------------------------------------------------------
+def plot_egress(path="rotor.png"):
+    import numpy as np
+    import matplotlib
+    matplotlib.use("Agg")  # headless; just write a PNG
+    import matplotlib.pyplot as plt
+
+    s = np.logspace(-4, -1, 500)  # 0.01% .. 10% stake
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.plot(s * 100, [egress_gbps(w_linear(x)) for x in s],
+            ls=":", label="linear  w=s")
+    ax.plot(s * 100, [egress_gbps(w_clamp(x)) for x in s],
+            ls="--", label="clamp  min(s, s_cap)")
+    ax.plot(s * 100, [egress_gbps(w_rational(x)) for x in s],
+            lw=2.2, label="rational  s·s_cap/(s+s_cap)")
+    ax.axhline(CAP_GBPS, color="r", lw=1, alpha=0.6,
+               label=f"cap = {CAP_GBPS:.0f} Gbps")
+    ax.axvline(S_CAP * 100, color="k", lw=0.8, alpha=0.4,
+               label=f"knee s_cap = {S_CAP*100:.3f}%")
+    ax.set_xscale("log")
+    ax.set_xlabel("node stake share (%)")
+    ax.set_ylabel("relay egress demand (Gbps)")
+    ax.set_title(f"Rotor relay egress vs stake  (N={N}, {SHREDS_PER_SECOND:,} shreds/s)")
+    ax.set_ylim(0, CAP_GBPS * 2.2)  # linear/clamp run off the top by design
+    ax.grid(True, which="both", alpha=0.3)
+    ax.legend(loc="upper left", fontsize=9)
+    fig.tight_layout()
+    fig.savefig(path, dpi=120)
+    print(f"wrote {path}")
+
+
 # ---- caveat: renormalization can break the cap ------------------------------
 print(
     "\nCAVEAT: each shred needs exactly one relayer, so relay probability is\n"
@@ -126,3 +159,8 @@ print(
     "clamp the final per-node egress (or iterate clamp+renormalize), don't just\n"
     "clamp the pre-normalized weight."
 )
+
+if "--plot" in sys.argv:
+    plot_egress()
+else:
+    print("\n(run with --plot to write rotor.png)")
