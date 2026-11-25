@@ -10,12 +10,16 @@ use {
     },
     agave_shred_wire_format::{
         constants::{
-            CODING_SHREDS_PER_FEC_BLOCK, DATA_SHREDS_PER_FEC_BLOCK, MerkleProofEntry,
-            SHREDS_PER_FEC_BLOCK, SIZE_OF_MERKLE_PROOF_ENTRY, SIZE_OF_MERKLE_ROOT,
-            SIZE_OF_SIGNATURE, Section, Sections, sections_with_proof_entries,
+            CODING_SHREDS_PER_FEC_BLOCK, DATA_SHREDS_PER_FEC_BLOCK, MERKLE_PROOF_ENTRIES,
+            MerkleProofEntry, SHREDS_PER_FEC_BLOCK, SIZE_OF_MERKLE_PROOF_ENTRY,
+            SIZE_OF_MERKLE_ROOT, SIZE_OF_SIGNATURE, Section, Sections, sections_with_proof_entries,
         },
-        headers::peek_header,
+        headers::{
+            CodeHeader, CommonHeader, DataHeader, ShredFlags as WireShredFlags, peek_header,
+        },
         kind::{Code as CodeLayout, Data as DataLayout, ShredLayout},
+        shred_variant::{ShredKind, ShredVariant as WireShredVariant},
+        view::ShredViewMut,
     },
     itertools::Itertools,
     reed_solomon_erasure::{
@@ -30,14 +34,7 @@ use {
     solana_signature::Signature,
     solana_signer::Signer,
     static_assertions::const_assert_eq,
-    std::{
-        cmp::Ordering,
-        debug_assert_matches,
-        io::{Cursor, Write},
-        ops::Range,
-        sync::LazyLock,
-        time::Instant,
-    },
+    std::{cmp::Ordering, debug_assert_matches, ops::Range, sync::LazyLock, time::Instant},
 };
 
 // All erasure batches are 32:32.
@@ -316,19 +313,7 @@ macro_rules! impl_merkle_shred {
                 .payload
                 .get_mut(section.as_range())
                 .ok_or_else(|| Error::InvalidProofSize(proof_size))?;
-            let mut cursor = Cursor::new(slice.as_mut());
-            let proof_size = usize::from(proof_size);
-            proof.into_iter().enumerate().try_for_each(|(k, entry)| {
-                if k >= proof_size {
-                    return Err(Error::InvalidMerkleProof);
-                }
-                Ok(cursor.write_all(&entry?[..])?)
-            })?;
-            // Verify that exactly proof_size many entries are written.
-            if cursor.position() as usize != proof_size * SIZE_OF_MERKLE_PROOF_ENTRY {
-                return Err(Error::InvalidMerkleProof);
-            }
-            Ok(())
+            write_merkle_proof(slice.as_mut().as_chunks_mut().0, proof)
         }
 
         #[cfg(test)]
@@ -1328,39 +1313,70 @@ fn finish_erasure_batch(
 ) -> Result<Hash, Error> {
     debug_assert_eq!(shreds.iter().map(Shred::fec_set_index).dedup().count(), 1);
     // Write common and {data,coding} headers into shreds' payload.
-    fn write_headers(shred: &mut Shred) -> Result<(), wincode::WriteError> {
+    fn write_headers(shred: &mut Shred) -> Result<(), Error> {
         match shred {
             Shred::ShredCode(shred) => {
-                let mut dst = &mut shred.payload.as_mut()[..];
-                wincode::serialize_into(&mut dst, &(&shred.common_header, &shred.coding_header))
+                let common = wire_common_header(&shred.common_header)?;
+                let header = wire_code_header(&shred.coding_header);
+                let mut payload = shred.payload.as_mut();
+                ShredViewMut::<CodeLayout>::new(&mut payload, common.variant)?
+                    .write_headers(&common, &header)?;
             }
             Shred::ShredData(shred) => {
-                let mut dst = &mut shred.payload.as_mut()[..];
-                wincode::serialize_into(&mut dst, &(&shred.common_header, &shred.data_header))
+                let common = wire_common_header(&shred.common_header)?;
+                let header = wire_data_header(&shred.data_header);
+                let mut payload = shred.payload.as_mut();
+                ShredViewMut::<DataLayout>::new(&mut payload, common.variant)?
+                    .write_headers(&common, &header)?;
             }
         }
+        Ok(())
     }
     shreds.iter_mut().try_for_each(write_headers)?;
-    // Fill in erasure code buffers in the coding shreds.
-    REED_SOLOMON.encode(
-        shreds
+    let (root, signature) = {
+        // All payloads stay borrowed so that the erasure shards can be coded together.
+        let mut payloads = shreds
             .iter_mut()
-            .map(Shred::erasure_shard_mut)
-            .collect::<Result<Vec<_>, _>>()?,
-    )?;
-    // Set the chained_merkle_root for each shred.
+            .map(|shred| {
+                let variant = wire_shred_variant(shred.common_header().shred_variant)?;
+                let payload = match shred {
+                    Shred::ShredCode(shred) => shred.payload.as_mut(),
+                    Shred::ShredData(shred) => shred.payload.as_mut(),
+                };
+                Ok((variant, payload))
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        let mut writers = payloads
+            .iter_mut()
+            .map(|(variant, payload)| ShredWriter::new(payload, *variant))
+            .collect::<Result<Vec<_>, Error>>()?;
+        // Fill in erasure code buffers in the coding shreds.
+        REED_SOLOMON.encode(
+            writers
+                .iter_mut()
+                .map(ShredWriter::erasure_shard_mut)
+                .collect::<Vec<_>>(),
+        )?;
+        for writer in &mut writers {
+            *writer.chained_merkle_root_mut() = chained_merkle_root.to_bytes();
+        }
+        // Compute the Merkle tree for the erasure batch.
+        let tree = MerkleTree::try_new(
+            writers
+                .iter()
+                .map(|writer| Ok(hashv(&[MERKLE_HASH_PREFIX_LEAF, writer.merkle_leaf()]))),
+        )?;
+        // Populate the Merkle proof for all shreds.
+        for (index, writer) in writers.iter_mut().enumerate() {
+            write_merkle_proof(
+                writer.merkle_proof_mut(),
+                tree.make_merkle_proof(index, SHREDS_PER_FEC_BLOCK),
+            )?;
+        }
+        // Sign the root of the Merkle tree.
+        (*tree.root(), keypair.sign_message(tree.root().as_ref()))
+    };
     for shred in shreds.iter_mut() {
-        shred.set_chained_merkle_root(&chained_merkle_root)?;
-    }
-
-    // Compute the Merkle tree for the erasure batch.
-    let tree = MerkleTree::try_new(shreds.iter().map(Shred::merkle_node))?;
-    // Sign the root of the Merkle tree.
-    let signature = keypair.sign_message(tree.root().as_ref());
-    // Populate merkle proof for all shreds and attach signature.
-    for (index, shred) in shreds.iter_mut().enumerate() {
-        let proof = tree.make_merkle_proof(index, SHREDS_PER_FEC_BLOCK);
-        shred.set_merkle_proof(proof)?;
         shred.set_signature(signature);
         debug_assert!(shred.verify(&keypair.pubkey()));
         debug_assert_matches!(shred.sanitize(), Ok(()));
@@ -1371,7 +1387,102 @@ fn finish_erasure_batch(
             debug_assert_eq!(shred, &expected_shred);
         }
     }
-    Ok(*tree.root())
+    Ok(root)
+}
+
+/// [`ShredViewMut`] of either kind.
+enum ShredWriter<'a> {
+    Code(ShredViewMut<'a, CodeLayout>),
+    Data(ShredViewMut<'a, DataLayout>),
+}
+
+impl<'a> ShredWriter<'a> {
+    fn new(payload: &'a mut [u8], variant: WireShredVariant) -> Result<Self, Error> {
+        Ok(match variant.shred_kind() {
+            ShredKind::Code => Self::Code(ShredViewMut::new(payload, variant)?),
+            ShredKind::Data => Self::Data(ShredViewMut::new(payload, variant)?),
+        })
+    }
+
+    fn erasure_shard_mut(&mut self) -> &mut [u8] {
+        match self {
+            Self::Code(view) => view.erasure_shard_mut(),
+            Self::Data(view) => view.erasure_shard_mut(),
+        }
+    }
+
+    fn chained_merkle_root_mut(&mut self) -> &mut [u8; SIZE_OF_MERKLE_ROOT] {
+        match self {
+            Self::Code(view) => view.chained_merkle_root_mut(),
+            Self::Data(view) => view.chained_merkle_root_mut(),
+        }
+    }
+
+    fn merkle_leaf(&self) -> &[u8] {
+        match self {
+            Self::Code(view) => view.merkle_leaf(),
+            Self::Data(view) => view.merkle_leaf(),
+        }
+    }
+
+    fn merkle_proof_mut(&mut self) -> &mut [MerkleProofEntry; MERKLE_PROOF_ENTRIES] {
+        match self {
+            Self::Code(view) => view.merkle_proof_mut(),
+            Self::Data(view) => view.merkle_proof_mut(),
+        }
+    }
+}
+
+// Fails on proof depths other than the fixed one, which the shredder never produces.
+fn wire_shred_variant(variant: ShredVariant) -> Result<WireShredVariant, Error> {
+    if !variant.has_correct_proof_size() {
+        return Err(Error::InvalidProofSize(variant.proof_size()));
+    }
+    Ok(match variant {
+        ShredVariant::MerkleCode { resigned, .. } => WireShredVariant::code(resigned),
+        ShredVariant::MerkleData { resigned, .. } => WireShredVariant::data(resigned),
+    })
+}
+
+fn wire_common_header(header: &ShredCommonHeader) -> Result<CommonHeader, Error> {
+    Ok(CommonHeader {
+        variant: wire_shred_variant(header.shred_variant)?,
+        slot: header.slot,
+        index: header.index,
+        version: header.version,
+        fec_set_index: header.fec_set_index,
+    })
+}
+
+fn wire_data_header(header: &DataShredHeader) -> DataHeader {
+    DataHeader {
+        parent_offset: header.parent_offset,
+        flags: WireShredFlags::from(header.flags.bits()),
+        size: header.size,
+    }
+}
+
+fn wire_code_header(header: &CodingShredHeader) -> CodeHeader {
+    CodeHeader {
+        num_data_shreds: header.num_data_shreds,
+        num_code_shreds: header.num_coding_shreds,
+        position: header.position,
+    }
+}
+
+// Writes `proof` into `buffer`, which it must fill exactly.
+fn write_merkle_proof<'a, I>(buffer: &mut [MerkleProofEntry], proof: I) -> Result<(), Error>
+where
+    I: IntoIterator<Item = Result<&'a MerkleProofEntry, Error>>,
+{
+    let mut entries = buffer.iter_mut();
+    for entry in proof {
+        *entries.next().ok_or(Error::InvalidMerkleProof)? = *entry?;
+    }
+    match entries.next() {
+        Some(_) => Err(Error::InvalidMerkleProof),
+        None => Ok(()),
+    }
 }
 
 #[cfg(test)]

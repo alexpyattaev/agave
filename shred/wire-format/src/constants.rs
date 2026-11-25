@@ -201,8 +201,8 @@ pub struct Sections {
     pub erasure_shard: Section,
 }
 
-/// Fixed-depth layout, used only by the `const` checks below.
-const fn sections<K: ShredLayout>(resigned: bool) -> Sections {
+/// Section layout of a shred of kind `K` with [`MERKLE_PROOF_ENTRIES`] proof entries.
+pub const fn sections<K: ShredLayout>(resigned: bool) -> Sections {
     match sections_with_proof_entries::<K>(MERKLE_PROOF_ENTRIES, resigned) {
         Some(sections) => sections,
         None => panic!("the fixed proof length leaves a body in every payload, as asserted below"),

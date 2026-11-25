@@ -53,6 +53,13 @@ pub struct CodeHeader {
 #[repr(transparent)]
 pub struct ShredFlags(u8);
 
+impl From<u8> for ShredFlags {
+    #[inline]
+    fn from(bits: u8) -> Self {
+        Self(bits)
+    }
+}
+
 // TODO: only needed for migration, inline later.
 #[inline]
 pub fn peek_variant_byte(bytes: &[u8]) -> Result<u8, ParseError> {

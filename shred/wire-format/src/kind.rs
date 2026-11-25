@@ -7,6 +7,7 @@ use {
             SIZE_OF_DATA_HEADER, SIZE_OF_DATA_PAYLOAD, SIZE_OF_TRAILER, SIZE_OF_TRAILER_RESIGNED,
         },
         headers::{CodeHeader, DataHeader},
+        shred_variant::ShredKind,
     },
     std::fmt::Debug,
     wincode::{SchemaRead, SchemaWrite, config::DefaultConfig},
@@ -24,6 +25,7 @@ pub trait ShredLayout: sealed::Sealed + 'static {
         + for<'de> SchemaRead<'de, DefaultConfig, Dst = Self::Header>
         + SchemaWrite<DefaultConfig, Src = Self::Header>;
 
+    const SHRED_KIND: ShredKind;
     /// Wire length of a shred of this kind.
     const SIZE_OF_PAYLOAD: usize;
     /// Signature plus common and kind headers.
@@ -46,6 +48,7 @@ impl sealed::Sealed for Data {}
 impl ShredLayout for Data {
     type Header = DataHeader;
 
+    const SHRED_KIND: ShredKind = ShredKind::Data;
     const SIZE_OF_PAYLOAD: usize = SIZE_OF_DATA_PAYLOAD;
     const SIZE_OF_HEADERS: usize =
         constants::SIZE_OF_SIGNATURE + SIZE_OF_COMMON_HEADER + SIZE_OF_DATA_HEADER;
@@ -58,6 +61,7 @@ impl sealed::Sealed for Code {}
 impl ShredLayout for Code {
     type Header = CodeHeader;
 
+    const SHRED_KIND: ShredKind = ShredKind::Code;
     const SIZE_OF_PAYLOAD: usize = SIZE_OF_CODE_PAYLOAD;
     const SIZE_OF_HEADERS: usize =
         constants::SIZE_OF_SIGNATURE + SIZE_OF_COMMON_HEADER + SIZE_OF_CODE_HEADER;

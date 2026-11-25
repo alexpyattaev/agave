@@ -59,7 +59,7 @@ use {
     crate::shred::payload::PayloadMutGuard,
     agave_shred_wire_format::{
         constants::{DATA_SHREDS_PER_FEC_BLOCK, MerkleProofEntry},
-        error::ParseError,
+        error::{ParseError, WriteError},
     },
     bitflags::bitflags,
     bytes::BufMut,
@@ -249,6 +249,17 @@ pub enum Error {
     UnknownProofSize,
     #[error("Empty shreds list")]
     EmptyIterator,
+}
+
+impl From<WriteError> for Error {
+    fn from(err: WriteError) -> Self {
+        match err {
+            WriteError::UnexpectedKind { .. } => Self::InvalidShredType,
+            WriteError::InvalidPayloadSize { len, expected: _ } => Self::InvalidPayloadSize(len),
+            WriteError::VariantMismatch { .. } => Self::InvalidShredVariant,
+            WriteError::Write(err) => Self::WincodeWrite(err),
+        }
+    }
 }
 
 impl From<ParseError> for Error {

@@ -26,3 +26,44 @@ pub enum ShredVariant {
     #[wincode(tag = 0xb6)]
     MerkleDataResigned = 0xb6,
 }
+
+impl ShredVariant {
+    #[inline]
+    pub const fn data(resigned: bool) -> Self {
+        if resigned {
+            Self::MerkleDataResigned
+        } else {
+            Self::MerkleData
+        }
+    }
+
+    #[inline]
+    pub const fn code(resigned: bool) -> Self {
+        if resigned {
+            Self::MerkleCodeResigned
+        } else {
+            Self::MerkleCode
+        }
+    }
+
+    /// Whether a retransmitter signature trails the Merkle proof.
+    #[inline]
+    pub const fn resigned(self) -> bool {
+        matches!(self, Self::MerkleCodeResigned | Self::MerkleDataResigned)
+    }
+
+    #[inline]
+    pub const fn shred_kind(self) -> ShredKind {
+        match self {
+            Self::MerkleCode | Self::MerkleCodeResigned => ShredKind::Code,
+            Self::MerkleData | Self::MerkleDataResigned => ShredKind::Data,
+        }
+    }
+}
+
+/// Which of the two kinds of shred this is.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum ShredKind {
+    Data,
+    Code,
+}
